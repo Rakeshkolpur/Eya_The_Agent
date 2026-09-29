@@ -13,13 +13,17 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 - **Multi-step tasks.** "Find my latest PDF in Downloads, read it and tell me the hearing date" chains tools: the model picks a tool, gets the result, and repeats until it has an answer (typed/agent path: max 8 steps / 90 s). If a step takes more than a couple of seconds Eya says "Working on it." (in Talk mode a Live tool call is also given up on after 40 s, and Eya says it took too long).
 - **Instant simple commands.** "Hey Eya, could you please open Notepad?" is matched locally.
 - **Can actually change things now, carefully.** Eya can create folders, copy, move, rename and delete files and folders — chained together, e.g. "find my latest PDF, create a folder called Cases on my Desktop, and put it there." Nothing that deletes or overwrites something ever happens on the first ask: the tool returns the question instead of acting, Eya asks it out loud, and only your next clear yes makes her do it. "It", "that file" and "the folder" resolve to whatever was most recently found or touched, across separate requests, not just within one sentence.
+- **Smart file search.** Beyond name and type: "find PDFs from yesterday", "find images larger than 5 MB", "find Word files modified this week". If several files match what you're about to act on, Eya lists the actual names and asks which one rather than guessing — and once she's listed them, "the second one" or "the cause list one" correctly picks from that exact list, even in a later, separate request.
+- **Closes the document, not the app.** "Close report.docx", "close that PDF", "close it" (right after opening something) close just that document's window — the application stays open if you have other documents in it. "Close Word" still closes the whole app; Eya tells the two apart from how you ask.
+- **A few Windows settings, directly.** "What's my volume?", "set the brightness to 40 percent", "mute", "open the display settings page" — verified against the actual system state after each change, not just assumed. Deliberately not included: turning Wi-Fi or Bluetooth on/off (see Safety).
 
 ### Tools
 
 | Tool | What it does |
 | --- | --- |
 | `open_application` / `close_application` | Notepad, Calculator, File Explorer, Edge, Chrome, Firefox. Checks the app is installed first and offers an alternative if not. |
-| `find_file` | Search Downloads/Desktop/Documents (or another folder) by name, type or recency. |
+| `close_file` | Closes the specific window a document/image/PDF is open in, by matching its title — not the whole application. |
+| `find_file` | Search Downloads/Desktop/Documents (or another folder) by name, type, size or date (exact day, a range, or "yesterday"/"this week"/etc). |
 | `read_file` | Read plain-text files. |
 | `analyze_document` | Read a PDF, image or text file and answer a question about it (sent to Gemini). |
 | `web_search` | Google-grounded answer with sources. |
@@ -28,6 +32,9 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 | `copy_file` / `move_file` / `rename_file` | Only ever overwrite an existing file after the user has explicitly agreed to it (see Safety). |
 | `delete_file` / `delete_folder` | Always ask first — see Safety. `delete_folder` also reports how many files it would remove. |
 | `clipboard_read` / `clipboard_write` / `clipboard_clear` | Plain-text clipboard access. |
+| `open_windows_settings` / `open_settings_page` | Opens the Settings app, optionally straight to a specific page (Wi-Fi, Bluetooth, Display, Sound, ...). |
+| `get_volume` / `set_volume` / `mute_volume` / `unmute_volume` | Exact system volume, read and set, verified after the change. |
+| `get_brightness` / `set_brightness` | Exact screen brightness, read and set, verified after the change. Reports plainly if your display has no software brightness control (common on external monitors). |
 
 ### Safety
 
@@ -41,6 +48,9 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 - A bare file or folder name (not a full path) can never contain `/`, `\`, or `..`, so a name argument can't be used to sneak outside the folder it was given for.
 - Eya still cannot send, install, or purchase anything.
 - `analyze_document` uploads the file to Gemini to read it; that is inherent to the feature.
+- **No Wi-Fi/Bluetooth toggle tools, on purpose.** Turning off the machine's own Wi-Fi adapter risks cutting off the PC Eya runs on, and turning off Bluetooth risks dropping a wireless mouse or keyboard; both also typically need administrator rights, which Eya doesn't run with. Their Settings *pages* still open on request — flipping the switch is left to you.
+- `close_file` matches a document to a window by its title (e.g. "report.docx - Word"), not full Windows UI Automation — it can't yet tell which of two identically-named documents in different folders is which, and it correctly refuses rather than guessing when more than one open window matches.
+- No general system-command tool exists or is planned — every capability here is a specific, typed function, never an arbitrary shell command the model could construct.
 
 ## Setup
 
@@ -118,7 +128,7 @@ src/
   shared/      Cross-boundary types + IPC contract, wake-name matching
   main/        Electron main process
     agent/       AgentEngine (loop), IntentRouter, ResponseComposer, prompts, speechText
-    tools/       Typed tool registry + implementations (files, file ops, clipboard, documents, open, apps), verify.ts (post-action verification helpers)
+    tools/       Typed tool registry + implementations (files, file ops, close_file, clipboard, system/volume/brightness, documents, open, apps), verify.ts (post-action verification), dateQuery.ts (when/date-range resolver)
     security/    pathPolicy (what the assistant may touch, including bare-name and write-target checks)
     live/        liveBridge: config + tool execution for Talk mode
     wake/        sentencePiece (tokenizer), keywordSpotter (the model), loadWakeWordDetector
@@ -140,19 +150,27 @@ models/kws/    The downloaded wake-word model (not fetched by npm install; see S
 tests/         Vitest unit tests
 ```
 
+## A note on latency for the Windows-control tools
+
+`close_file`, the volume tools and the brightness tools each shell out to PowerShell, and the volume ones compile a small C# COM-interop helper on every single call (PowerShell can't call a non-`IDispatch` COM interface like Windows' own volume API directly) — measured live at roughly 0.6-3.2 seconds per call, noticeably slower than the in-process file tools. This is a real, known cost, not a bug; a future pass could keep one PowerShell process warm instead of starting a fresh one each time, but that adds real complexity for what is a background system tweak, not the main flow, so it hasn't been done.
+
 ## How "ask before deleting" actually works
 
 There's no separate pause-and-wait mechanism bolted onto the agent loop — it rides the same tool-call loop everything else already uses. A destructive or overwriting tool, called without `confirm: true`, does nothing and returns a normal (if unsuccessful) tool result whose `data` is a small structured question (`{ status: 'permission_required', action, target, reason }`). The model is told, in that tool's own description and in the system prompt, to relay that question and only call the same tool again with `confirm: true` once the user has clearly said yes in that conversation. This means it works identically for typed commands, voice commands, and Talk mode, with no extra plumbing in any of them — verified live: asking to delete a file gets a spoken question and the file is untouched; saying "yes, delete it" (a separate request, with no file path in it at all) correctly re-targets the same file and deletes it, because the file's path is carried forward through `ConversationContext` the same way "copy it to Desktop" resolves "it".
 
 ## Roadmap
 
-Requested next as one large phase ("a real Windows computer agent that can safely manipulate files, control applications, automate browsers, recover from failures, and complete long multi-step objectives"). Delivered so far: file operations, clipboard access, and the confirm-before-destroy protocol above, plus reference resolution across requests. Deliberately not attempted yet, because each is a substantial subsystem in its own right and none of them should be bolted on without its own real testing:
+Two large continuation phases have been requested and scoped down to what could be built and genuinely verified, rather than attempted whole. Delivered: file operations + confirm-before-destroy + reference resolution (phase 2), then smart file search (date/size/type filters, multi-match disambiguation, a numbered "search session" so "the second one" resolves), `close_file` (by window title, not full UI Automation), and a handful of Windows system controls (Settings pages, exact volume, exact brightness) (phase 3).
 
-1. Browser automation (Playwright-based, semantic selectors first) and a live "search a real site, click through it, download a file" workflow.
-2. Windows UI Automation, for apps that aren't a browser.
-3. A Gemini Computer Use (screenshot-driven) fallback for when neither of the above can find what it needs.
-4. A "trusted mode" setting that skips confirmation for destructive actions (off by default; not started).
-5. A task queue with cancellation ("stop", "never mind") and long-running/async tool handling.
-6. An audit log of every action taken.
-7. A trained (not synthetic-voice-tuned) wake word, once real usage data exists.
-8. Packaging the app for distribution (there is no build/installer step yet).
+Deliberately not attempted, because each is a substantial subsystem needing its own real testing (and in two cases, a considered no rather than a "later"):
+
+1. **Semantic website navigation** ("open X and go to Y" correctly opening the site first, then finding Y on the page, instead of turning the whole sentence into a search query) — this needs actual browser automation to exist first (see 2 below); there is currently none, so there is nothing yet to fix.
+2. Browser automation itself (Playwright-based, semantic selectors first) and a live "search a real site, click through it, download a file" workflow.
+3. Windows UI Automation proper (HWND/focus-event tracking, `WindowPattern.Close`), for richer window/document association than the current title-matching `close_file` gives.
+4. A Gemini Computer Use (screenshot-driven) fallback for when neither of the above can find what it needs.
+5. **Wi-Fi/Bluetooth on/off — a deliberate no, not a "later".** Toggling the Wi-Fi adapter risks cutting off the machine Eya runs on; toggling Bluetooth risks dropping a wireless mouse/keyboard; both typically need administrator rights besides. Their Settings pages still open on request.
+6. A "trusted mode" setting that skips confirmation for destructive actions (off by default; not started).
+7. A task queue with cancellation ("stop", "never mind") and long-running/async tool handling.
+8. An audit log of every action taken; detecting a file the user opened manually, outside Eya, and associating it automatically.
+9. A trained (not synthetic-voice-tuned) wake word, once real usage data exists.
+10. Packaging the app for distribution (there is no build/installer step yet).

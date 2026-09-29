@@ -452,13 +452,22 @@ describe('refsFromToolResult', () => {
     }
   });
 
-  it('picks the first (newest) match from a find_file-style result', () => {
+  it('remembers every match from a find_file-style result, newest first, for "the second one"', () => {
     const refs = refsFromToolResult('find_file', {
       ok: true,
       summary: 'found 2',
-      data: { files: [{ path: 'C:\\a\\new.pdf' }, { path: 'C:\\a\\old.pdf' }] },
+      data: { files: [{ path: 'C:\\a\\new.pdf', name: 'new.pdf' }, { path: 'C:\\a\\old.pdf', name: 'old.pdf' }] },
     });
-    expect(refs).toEqual([{ kind: 'file', value: 'C:\\a\\new.pdf' }]);
+    expect(refs).toEqual([
+      { kind: 'file', value: 'C:\\a\\new.pdf', meta: { index: 0, name: 'new.pdf' } },
+      { kind: 'file', value: 'C:\\a\\old.pdf', meta: { index: 1, name: 'old.pdf' } },
+    ]);
+  });
+
+  it('caps how many search results it remembers', () => {
+    const files = Array.from({ length: 25 }, (_, i) => ({ path: `C:\\a\\f${i}.pdf` }));
+    const refs = refsFromToolResult('find_file', { ok: true, summary: 'found 25', data: { files } });
+    expect(refs.length).toBeLessThanOrEqual(10);
   });
 
   it('returns nothing for a failed result, or one with no path-like data', () => {
@@ -487,6 +496,31 @@ describe('contextHintText', () => {
     const engine = engineWith(ai);
     const first = await run(engine, 'find my pdf');
     expect(first.spoken).not.toContain('C:\\Users\\me\\Downloads\\order.pdf');
+  });
+
+  it('lists every recent match numbered, so "the second one" or "the cause list one" can resolve', () => {
+    const ctx = new ConversationContext();
+    ctx.push({
+      at: 1,
+      userText: 'find my pdfs',
+      ok: true,
+      refs: [
+        { kind: 'file', value: 'C:\\a\\CauseList.pdf', meta: { index: 0, name: 'CauseList.pdf' } },
+        { kind: 'file', value: 'C:\\a\\Order.pdf', meta: { index: 1, name: 'Order.pdf' } },
+      ],
+    });
+    const hint = contextHintText(ctx);
+    expect(hint).toContain('1. CauseList.pdf — C:\\a\\CauseList.pdf');
+    expect(hint).toContain('2. Order.pdf — C:\\a\\Order.pdf');
+  });
+
+  it('a later search overrides the previous one, not appends to it', () => {
+    const ctx = new ConversationContext();
+    ctx.push({ at: 1, userText: 'find pdfs', ok: true, refs: [{ kind: 'file', value: 'C:\\a\\old.pdf', meta: { index: 0 } }] });
+    ctx.push({ at: 2, userText: 'find word docs', ok: true, refs: [{ kind: 'file', value: 'C:\\a\\new.docx', meta: { index: 0 } }] });
+    const hint = contextHintText(ctx);
+    expect(hint).toContain('new.docx');
+    expect(hint).not.toContain('old.pdf');
   });
 });
 

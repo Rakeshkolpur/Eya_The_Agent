@@ -417,11 +417,20 @@ export class AgentEngine implements RequestHandler, AudioHandler {
  * "your Downloads folder", not the path itself.
  */
 export function contextHintText(context: ConversationContext): string | undefined {
-  const file = context.lastRefOfKind('file');
+  const files = context.lastRefsOfKind('file');
   const folder = context.lastRefOfKind('folder');
-  if (file === undefined && folder === undefined) return undefined;
+  if (files.length === 0 && folder === undefined) return undefined;
   const parts: string[] = [];
-  if (file !== undefined) parts.push(`The file most recently found, opened, or touched is: ${file.value}`);
+  if (files.length === 1) {
+    parts.push(`The file most recently found, opened, or touched is: ${files[0]?.value}`);
+  } else if (files.length > 1) {
+    const listed = files
+      .map((f, i) => `${i + 1}. ${(f.meta?.['name'] as string | undefined) ?? f.value} — ${f.value}`)
+      .join('\n');
+    parts.push(
+      `The most recent file search found these, newest first (resolve "the first/second one", "the <name> one", etc. against this list):\n${listed}`,
+    );
+  }
   if (folder !== undefined) parts.push(`The folder most recently created or touched is: ${folder.value}`);
   return (
     `Conversation context (not something to say aloud; use it to resolve "it", "that file", "the folder", etc.):\n` +
@@ -438,6 +447,9 @@ const FOLDER_TOOLS = new Set(['create_folder', 'open_folder', 'delete_folder']);
  * These feed `ConversationContext`, whose `lastRefOfKind` already existed for
  * exactly this purpose.
  */
+/** How many of a multi-file search result are worth remembering for "the second one"/"the cause list one". */
+const MAX_SEARCH_REFS = 10;
+
 export function refsFromToolResult(toolName: string, result: ToolResult): TurnRef[] {
   if (!result.ok || result.data === undefined) return [];
   const refs: TurnRef[] = [];
@@ -447,10 +459,16 @@ export function refsFromToolResult(toolName: string, result: ToolResult): TurnRe
   }
   const files = result.data['files'];
   if (Array.isArray(files)) {
-    const first = files[0] as { path?: unknown } | undefined;
-    if (first !== undefined && typeof first.path === 'string') {
-      refs.push({ kind: 'file', value: first.path });
-    }
+    files.slice(0, MAX_SEARCH_REFS).forEach((entry, index) => {
+      const f = entry as { path?: unknown; name?: unknown } | undefined;
+      if (f !== undefined && typeof f.path === 'string') {
+        refs.push({
+          kind: 'file',
+          value: f.path,
+          meta: { index, ...(typeof f.name === 'string' ? { name: f.name } : {}) },
+        });
+      }
+    });
   }
   return refs;
 }

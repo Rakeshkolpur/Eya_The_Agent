@@ -85,13 +85,13 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
       status: 'Creating the folder…',
       description:
         'Create a new folder. Give the parent as a special folder name (desktop, downloads, documents, pictures, ' +
-        'videos, music, home, temp) or a full path, and the new folder\'s bare name (never a path). ' +
+        'videos, music, home) or a full path, and the new folder\'s bare name (never a path). ' +
         'If it already exists, this succeeds without changing anything.',
       args: {
         parentFolder: {
           type: 'string',
           required: true,
-          description: 'desktop, downloads, documents, pictures, videos, music, home, temp, or a full path inside the user folder.',
+          description: 'desktop, downloads, documents, pictures, videos, music, home, or a full path inside the user folder.',
         },
         name: { type: 'string', required: true, description: 'The new folder\'s name, e.g. "Cases". Never a path.' },
       },
@@ -145,7 +145,7 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
         destinationFolder: {
           type: 'string',
           required: true,
-          description: 'desktop, downloads, documents, pictures, videos, music, home, temp, or a full path inside the user folder.',
+          description: 'desktop, downloads, documents, pictures, videos, music, home, or a full path inside the user folder.',
         },
         confirm: { type: 'boolean', description: 'Set true only after the user has approved replacing an existing file.' },
       },
@@ -213,7 +213,7 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
         destinationFolder: {
           type: 'string',
           required: true,
-          description: 'desktop, downloads, documents, pictures, videos, music, home, temp, or a full path inside the user folder.',
+          description: 'desktop, downloads, documents, pictures, videos, music, home, or a full path inside the user folder.',
         },
         confirm: { type: 'boolean', description: 'Set true only after the user has approved replacing an existing file.' },
       },

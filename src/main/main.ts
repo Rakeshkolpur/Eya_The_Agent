@@ -13,6 +13,8 @@ import { createDocumentTool, createWebSearchTool } from '@main/tools/impl/docume
 import { createOpenTools } from '@main/tools/impl/openTools';
 import { createFileOpsTools } from '@main/tools/impl/fileOpsTools';
 import { createClipboardTools } from '@main/tools/impl/clipboardTools';
+import { closeFileTool } from '@main/tools/impl/closeFile';
+import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/systemTools';
 import { launchBrowser } from '@main/windowsApi/appPaths';
 import { registerLiveBridge } from '@main/live/liveBridge';
 import { loadWakeWordDetector } from '@main/wake/loadWakeWordDetector';
@@ -107,6 +109,10 @@ async function bootstrap(): Promise<void> {
   }
   for (const tool of createFileOpsTools(folders)) tools.register(tool);
   for (const tool of createClipboardTools(clipboard)) tools.register(tool);
+  tools.register(closeFileTool);
+  for (const tool of createSystemTools({ ...defaultSystemControlDeps, openExternal: (url) => shell.openExternal(url) })) {
+    tools.register(tool);
+  }
 
   const window = orb.create();
   const getSender = () => (window.isDestroyed() ? null : window.webContents);

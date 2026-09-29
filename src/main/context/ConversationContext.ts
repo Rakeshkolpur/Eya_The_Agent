@@ -42,4 +42,20 @@ export class ConversationContext {
     }
     return undefined;
   }
+
+  /**
+   * Every ref of a kind from the most recent turn that had any — the "search
+   * session" a multi-result find_file leaves behind, so "the second one" or
+   * "the cause list one" can be resolved from the full list, not just the
+   * single newest match `lastRefOfKind` would give.
+   */
+  lastRefsOfKind(kind: TurnRef['kind']): readonly TurnRef[] {
+    for (let i = this.turns.length - 1; i >= 0; i -= 1) {
+      const turn = this.turns[i];
+      if (turn === undefined) continue;
+      const matches = turn.refs.filter((r) => r.kind === kind);
+      if (matches.length > 0) return matches;
+    }
+    return [];
+  }
 }

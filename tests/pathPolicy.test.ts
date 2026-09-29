@@ -81,6 +81,17 @@ describe('resolveFolder', () => {
     expect(resolveFolder(join(home, 'Projects'), folders)).toBe(join(home, 'Projects'));
     expect(resolveFolder('my secret stash', folders)).toBeNull();
   });
+
+  it('resolves "temp", but checkPath then correctly refuses it: it always sits under AppData', () => {
+    // `temp` exists in KnownFolders for internal use (the wake-word model's own
+    // temp files), not as a folder a tool should offer the user — it is never
+    // actually reachable, by the same rule that protects a browser's saved
+    // passwords, also stored under AppData. Tool descriptions deliberately
+    // don't mention it as an option; this documents why it would fail if asked for.
+    const resolved = resolveFolder('temp', folders);
+    expect(resolved).toBe(folders.temp);
+    expect(checkPath(resolved ?? '', folders).ok).toBe(false);
+  });
 });
 
 describe('isExecutablePath / isBlockedFileName', () => {

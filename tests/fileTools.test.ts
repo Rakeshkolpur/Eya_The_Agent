@@ -43,6 +43,15 @@ beforeAll(async () => {
   await put('Downloads/.env', 'KEY=secret', daysAgo(0));
   await put('Documents/secrets.txt', 'hunter2', daysAgo(0));
   await put('Documents/big.txt', 'x'.repeat(30_000), daysAgo(6));
+  // Isolated from the three default search roots (downloads/desktop/documents),
+  // so these don't shift the exact-match assertions above; each test below
+  // reaches them with an explicit `folder`.
+  await put('Pictures/photo.jpg', 'jpg-bytes', daysAgo(1));
+  await put('Videos/dated/today.pdf', 'today', daysAgo(0));
+  await put('Videos/dated/yesterday.pdf', 'yesterday', daysAgo(1));
+  await put('Videos/dated/last-week.pdf', 'old', daysAgo(10));
+  await put('Videos/sized/big.pdf', 'x'.repeat(3 * 1024 * 1024), daysAgo(1));
+  await put('Videos/sized/small.pdf', 'tiny', daysAgo(1));
 
   const [findTool, readTool] = createFileTools(folders);
   if (findTool === undefined || readTool === undefined) throw new Error('tools missing');
@@ -112,6 +121,73 @@ describe('find_file', () => {
   it('respects the limit and clamps silly values', async () => {
     expect(((await find({ extension: 'pdf', limit: 1 })).data?.['files'] as unknown[]).length).toBe(1);
     expect(((await find({ extension: 'pdf', limit: -5 })).data?.['files'] as unknown[]).length).toBe(1);
+  });
+});
+
+describe('find_file: fileType', () => {
+  it('maps a natural type name to its extensions', async () => {
+    const result = await find({ folder: 'pictures', fileType: 'image' });
+    expect(names(result.data?.['files'])).toEqual(['photo.jpg']);
+  });
+
+  it('rejects an unknown type rather than silently matching everything', async () => {
+    const result = await find({ fileType: 'nonsense-type' });
+    expect(result.ok).toBe(false);
+  });
+
+  it('a specific extension still takes precedence over fileType if both are given', async () => {
+    const result = await find({ folder: 'pictures', extension: 'jpg', fileType: 'pdf' });
+    expect(names(result.data?.['files'])).toEqual(['photo.jpg']);
+  });
+});
+
+describe('find_file: when / date range', () => {
+  const dated = () => join(folders.videos, 'dated');
+
+  it('"when: today" only returns files modified today', async () => {
+    const result = await find({ folder: dated(), when: 'today' });
+    expect(names(result.data?.['files'])).toEqual(['today.pdf']);
+  });
+
+  it('"when: yesterday" only returns files modified yesterday', async () => {
+    const result = await find({ folder: dated(), when: 'yesterday' });
+    expect(names(result.data?.['files'])).toEqual(['yesterday.pdf']);
+  });
+
+  it('rejects an unrecognized "when" value', async () => {
+    expect((await find({ when: 'next tuesday' })).ok).toBe(false);
+  });
+
+  it('onDate matches a specific day', async () => {
+    const isoYesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const result = await find({ folder: dated(), onDate: isoYesterday });
+    expect(names(result.data?.['files'])).toEqual(['yesterday.pdf']);
+  });
+
+  it('fromDate/toDate cover an inclusive range', async () => {
+    const from = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+    const to = new Date().toISOString().slice(0, 10);
+    const result = await find({ folder: dated(), fromDate: from, toDate: to });
+    expect(names(result.data?.['files']).sort()).toEqual(['today.pdf', 'yesterday.pdf']);
+  });
+
+  it('rejects a malformed date rather than ignoring it', async () => {
+    expect((await find({ onDate: '20th September' })).ok).toBe(false);
+    expect((await find({ fromDate: 'not-a-date' })).ok).toBe(false);
+  });
+});
+
+describe('find_file: size filters', () => {
+  const sized = () => join(folders.videos, 'sized');
+
+  it('minSizeMB excludes smaller files', async () => {
+    const result = await find({ folder: sized(), minSizeMB: 1 });
+    expect(names(result.data?.['files'])).toEqual(['big.pdf']);
+  });
+
+  it('maxSizeMB excludes larger files', async () => {
+    const result = await find({ folder: sized(), maxSizeMB: 0.01 });
+    expect(names(result.data?.['files'])).toEqual(['small.pdf']);
   });
 });
 
