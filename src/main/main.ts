@@ -1,4 +1,4 @@
-import { app, ipcMain, session, shell } from 'electron';
+import { app, clipboard, ipcMain, session, shell } from 'electron';
 import { OrbWindow } from '@main/windows/OrbWindow';
 import { GlobalShortcutManager } from '@main/shortcuts/GlobalShortcut';
 import { IpcRouter } from '@main/ipc/ipcRouter';
@@ -11,6 +11,8 @@ import { closeApplicationTool } from '@main/tools/impl/closeApplication';
 import { createFileTools } from '@main/tools/impl/fileTools';
 import { createDocumentTool, createWebSearchTool } from '@main/tools/impl/documentTools';
 import { createOpenTools } from '@main/tools/impl/openTools';
+import { createFileOpsTools } from '@main/tools/impl/fileOpsTools';
+import { createClipboardTools } from '@main/tools/impl/clipboardTools';
 import { launchBrowser } from '@main/windowsApi/appPaths';
 import { registerLiveBridge } from '@main/live/liveBridge';
 import { loadWakeWordDetector } from '@main/wake/loadWakeWordDetector';
@@ -85,6 +87,7 @@ async function bootstrap(): Promise<void> {
     pictures: app.getPath('pictures'),
     videos: app.getPath('videos'),
     music: app.getPath('music'),
+    temp: app.getPath('temp'),
   };
 
   const tools = new ToolRegistry();
@@ -102,6 +105,8 @@ async function bootstrap(): Promise<void> {
   })) {
     tools.register(tool);
   }
+  for (const tool of createFileOpsTools(folders)) tools.register(tool);
+  for (const tool of createClipboardTools(clipboard)) tools.register(tool);
 
   const window = orb.create();
   const getSender = () => (window.isDestroyed() ? null : window.webContents);

@@ -31,6 +31,7 @@ beforeAll(async () => {
     pictures: join(home, 'Pictures'),
     videos: join(home, 'Videos'),
     music: join(home, 'Music'),
+    temp: join(home, 'AppData', 'Local', 'Temp'),
   };
   await put('Downloads/report_final.pdf', 'pdf', daysAgo(10));
   await put('Downloads/invoice march.pdf', 'pdf', daysAgo(1));

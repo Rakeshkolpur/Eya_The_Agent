@@ -1,5 +1,12 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { AgentEngine, describeAIFailure, looksLikeChatter, toolResultForModel } from '../src/main/agent/AgentEngine';
+import {
+  AgentEngine,
+  contextHintText,
+  describeAIFailure,
+  looksLikeChatter,
+  refsFromToolResult,
+  toolResultForModel,
+} from '../src/main/agent/AgentEngine';
 import type { Transcriber } from '../src/main/agent/AgentEngine';
 import { IntentRouter } from '../src/main/agent/IntentRouter';
 import { ResponseComposer } from '../src/main/agent/ResponseComposer';
@@ -427,5 +434,103 @@ describe('toolResultForModel', () => {
     };
     expect(json.data.truncated).toBe(true);
     expect(json.data.preview.length).toBeLessThanOrEqual(12_000);
+  });
+});
+
+describe('refsFromToolResult', () => {
+  it('remembers a path a tool returned directly, as a file by default', () => {
+    expect(refsFromToolResult('rename_file', { ok: true, summary: 's', data: { path: 'C:\\a\\b.txt' } })).toEqual([
+      { kind: 'file', value: 'C:\\a\\b.txt' },
+    ]);
+  });
+
+  it('remembers create_folder/open_folder/delete_folder results as a folder, not a file', () => {
+    for (const name of ['create_folder', 'open_folder', 'delete_folder']) {
+      expect(refsFromToolResult(name, { ok: true, summary: 's', data: { path: 'C:\\a\\Cases' } }), name).toEqual([
+        { kind: 'folder', value: 'C:\\a\\Cases' },
+      ]);
+    }
+  });
+
+  it('picks the first (newest) match from a find_file-style result', () => {
+    const refs = refsFromToolResult('find_file', {
+      ok: true,
+      summary: 'found 2',
+      data: { files: [{ path: 'C:\\a\\new.pdf' }, { path: 'C:\\a\\old.pdf' }] },
+    });
+    expect(refs).toEqual([{ kind: 'file', value: 'C:\\a\\new.pdf' }]);
+  });
+
+  it('returns nothing for a failed result, or one with no path-like data', () => {
+    expect(refsFromToolResult('delete_file', { ok: false, summary: 'needs confirmation', data: { path: 'x' } })).toEqual([]);
+    expect(refsFromToolResult('open_application', { ok: true, summary: 'opened' })).toEqual([]);
+    expect(refsFromToolResult('web_search', { ok: true, summary: 's', data: { answer: 'x' } })).toEqual([]);
+  });
+});
+
+describe('contextHintText', () => {
+  it('says nothing when the conversation has touched no file or folder', () => {
+    expect(contextHintText(new ConversationContext())).toBeUndefined();
+  });
+
+  it('names the most recently touched file and folder, for resolving "it"/"that file"', () => {
+    const ctx = new ConversationContext();
+    ctx.push({ at: 1, userText: 'find my pdf', ok: true, refs: [{ kind: 'file', value: 'C:\\a\\order.pdf' }] });
+    ctx.push({ at: 2, userText: 'make a folder', ok: true, refs: [{ kind: 'folder', value: 'C:\\a\\Cases' }] });
+    const hint = contextHintText(ctx);
+    expect(hint).toContain('C:\\a\\order.pdf');
+    expect(hint).toContain('C:\\a\\Cases');
+  });
+
+  it('never puts the hint in what gets spoken', async () => {
+    const ai = new ScriptedAI([step([call('find_file', { extension: 'pdf' })]), say('I found your file.')]);
+    const engine = engineWith(ai);
+    const first = await run(engine, 'find my pdf');
+    expect(first.spoken).not.toContain('C:\\Users\\me\\Downloads\\order.pdf');
+  });
+});
+
+describe('context flows into the next request', () => {
+  it('lets a later "copy it to desktop"-style request see the earlier file path', async () => {
+    const copyLog: ToolArgs[] = [];
+    tools.register(
+      fakeTool(
+        'copy_file',
+        (a) => {
+          copyLog.push(a);
+          return { ok: true, summary: 'copied', data: { path: 'C:\\Desktop\\order.pdf' } };
+        },
+        { sourcePath: { type: 'string' }, destinationFolder: { type: 'string' } },
+      ),
+    );
+    const context = new ConversationContext();
+    const engine = new AgentEngine({
+      router: new IntentRouter(),
+      tools,
+      composer: new ResponseComposer(),
+      tts,
+      context,
+      now: () => new Date('2026-09-28T10:00:00Z'),
+      ai: new ScriptedAI([step([call('find_file', { extension: 'pdf' })]), say('Found it.')]),
+    });
+    await engine.handle({ requestId: 'r1', text: 'find my latest pdf', source: 'text' }, (u) => updates.push(u));
+
+    const secondAi = new ScriptedAI([
+      step([call('copy_file', { sourcePath: 'C:\\Users\\me\\Downloads\\order.pdf', destinationFolder: 'desktop' })]),
+      say('Copied it to your Desktop.'),
+    ]);
+    const engine2 = new AgentEngine({
+      router: new IntentRouter(),
+      tools,
+      composer: new ResponseComposer(),
+      tts,
+      context,
+      now: () => new Date('2026-09-28T10:00:00Z'),
+      ai: secondAi,
+    });
+    await engine2.handle({ requestId: 'r2', text: 'copy it to my desktop', source: 'text' }, (u) => updates.push(u));
+
+    expect(secondAi.seen[0]?.[0]?.content).toContain('C:\\Users\\me\\Downloads\\order.pdf');
+    expect(copyLog).toEqual([{ sourcePath: 'C:\\Users\\me\\Downloads\\order.pdf', destinationFolder: 'desktop' }]);
   });
 });

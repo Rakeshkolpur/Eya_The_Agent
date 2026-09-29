@@ -2,9 +2,12 @@ import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
+  checkItemName,
   checkPath,
   isBlockedFileName,
   isExecutablePath,
+  isKnownFolderRoot,
+  resolveChildPath,
   resolveFolder,
 } from '../src/main/security/pathPolicy';
 import type { KnownFolders } from '../src/main/security/pathPolicy';
@@ -18,6 +21,7 @@ const folders: KnownFolders = {
   pictures: join(home, 'Pictures'),
   videos: join(home, 'Videos'),
   music: join(home, 'Music'),
+  temp: join(home, 'AppData', 'Local', 'Temp'),
 };
 
 describe('checkPath', () => {
@@ -90,5 +94,58 @@ describe('isExecutablePath / isBlockedFileName', () => {
   it('matches secret names', () => {
     expect(isBlockedFileName('.env')).toBe(true);
     expect(isBlockedFileName('report.pdf')).toBe(false);
+  });
+});
+
+describe('checkItemName', () => {
+  it('accepts ordinary file and folder names', () => {
+    for (const name of ['Cases', 'Case_List.pdf', "Today's Cause List.pdf", 'High Court']) {
+      expect(checkItemName(name).ok, name).toBe(true);
+    }
+  });
+
+  it('rejects a name that is actually a path', () => {
+    for (const name of ['../evil', 'a/b.txt', 'a\\b.txt', '..', '.', '']) {
+      expect(checkItemName(name).ok, name).toBe(false);
+    }
+  });
+
+  it('rejects characters Windows forbids in a name, and reserved device names', () => {
+    for (const name of ['a:b.txt', 'a*b.txt', 'a?b.txt', 'a"b.txt', 'a<b>.txt', 'trailing.']) {
+      expect(checkItemName(name).ok, name).toBe(false);
+    }
+    // A trailing space is trimmed away first, same as every other string argument.
+    expect(checkItemName('Cases ')).toEqual({ ok: true, name: 'Cases' });
+    for (const name of ['CON', 'con.txt', 'PRN', 'COM1', 'LPT1.docx']) {
+      expect(checkItemName(name).ok, name).toBe(false);
+    }
+  });
+});
+
+describe('resolveChildPath', () => {
+  it('combines a parent folder and a bare name into an allowed path', () => {
+    const result = resolveChildPath(folders.desktop, 'Cases', folders);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.path).toBe(join(folders.desktop, 'Cases'));
+  });
+
+  it('refuses a name that tries to escape the parent folder', () => {
+    expect(resolveChildPath(folders.desktop, '../../evil', folders).ok).toBe(false);
+  });
+
+  it('still enforces the parent folder being inside home', () => {
+    expect(resolveChildPath('C:\\Windows', 'Cases', folders).ok).toBe(false);
+  });
+});
+
+describe('isKnownFolderRoot', () => {
+  it('recognizes every special folder itself', () => {
+    expect(isKnownFolderRoot(folders.desktop, folders)).toBe(true);
+    expect(isKnownFolderRoot(folders.downloads, folders)).toBe(true);
+    expect(isKnownFolderRoot(home, folders)).toBe(true);
+  });
+
+  it('does not flag an ordinary folder inside one', () => {
+    expect(isKnownFolderRoot(join(folders.desktop, 'Cases'), folders)).toBe(false);
   });
 });

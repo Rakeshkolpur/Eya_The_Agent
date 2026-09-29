@@ -12,6 +12,7 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 - **A natural voice.** Outside Talk mode Gemini's speech models stream audio in about a second. Replies heard before are saved and play instantly. Pick the voice from the dropdown in the panel. If the cloud voice is unavailable it falls back to the offline Kokoro voice, then the Windows voice.
 - **Multi-step tasks.** "Find my latest PDF in Downloads, read it and tell me the hearing date" chains tools: the model picks a tool, gets the result, and repeats until it has an answer (typed/agent path: max 8 steps / 90 s). If a step takes more than a couple of seconds Eya says "Working on it." (in Talk mode a Live tool call is also given up on after 40 s, and Eya says it took too long).
 - **Instant simple commands.** "Hey Eya, could you please open Notepad?" is matched locally.
+- **Can actually change things now, carefully.** Eya can create folders, copy, move, rename and delete files and folders — chained together, e.g. "find my latest PDF, create a folder called Cases on my Desktop, and put it there." Nothing that deletes or overwrites something ever happens on the first ask: the tool returns the question instead of acting, Eya asks it out loud, and only your next clear yes makes her do it. "It", "that file" and "the folder" resolve to whatever was most recently found or touched, across separate requests, not just within one sentence.
 
 ### Tools
 
@@ -23,14 +24,22 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 | `analyze_document` | Read a PDF, image or text file and answer a question about it (sent to Gemini). |
 | `web_search` | Google-grounded answer with sources. |
 | `open_file` / `open_folder` / `open_url` | Open things the way Windows would. `open_url` can target a specific browser. |
+| `create_folder` | Create a folder under a special folder or a full path. Idempotent: doing it again just confirms it's there. |
+| `copy_file` / `move_file` / `rename_file` | Only ever overwrite an existing file after the user has explicitly agreed to it (see Safety). |
+| `delete_file` / `delete_folder` | Always ask first — see Safety. `delete_folder` also reports how many files it would remove. |
+| `clipboard_read` / `clipboard_write` / `clipboard_clear` | Plain-text clipboard access. |
 
 ### Safety
 
 - Files: only inside your user folder. Secrets are blocked everywhere (`.env`, `.ssh`, `AppData`, `*.pem`, `credentials.json`, ...), including this project's own `.env`.
 - Programs and scripts (`.exe`, `.ps1`, `.lnk`, ...) are never opened.
 - Closing apps is polite: Eya asks the window to close and reports honestly if it stays open (for example "save changes?"). She never force-kills anything except Calculator, which ignores polite requests and has nothing to lose. Explorer windows are closed individually, never by ending `explorer.exe`, so your desktop and taskbar are untouched.
-- Text inside files and web pages is treated as information, never instructions.
-- Eya has no tools to delete, move, send or install anything.
+- Text inside files, web pages and the clipboard is treated as information, never instructions.
+- **Delete or overwrite always asks first, out loud, and nothing else can skip that.** The tool itself refuses to act on the first call — it hands back a plain question instead of a result. Eya can only proceed once she calls the same tool again with an explicit "the user agreed" flag, which the model is instructed to set only after you've clearly said yes in that same conversation. This lives in the tool's own logic, not in a prompt the model could just ignore.
+- `delete_folder` will not touch Desktop, Downloads, Documents, or any other of your main folders, whatever else is asked of it — only something inside them.
+- Every create/copy/move/rename/delete is verified after the fact by actually checking the filesystem, not just trusting that the call didn't throw.
+- A bare file or folder name (not a full path) can never contain `/`, `\`, or `..`, so a name argument can't be used to sneak outside the folder it was given for.
+- Eya still cannot send, install, or purchase anything.
 - `analyze_document` uploads the file to Gemini to read it; that is inherent to the feature.
 
 ## Setup
@@ -109,15 +118,16 @@ src/
   shared/      Cross-boundary types + IPC contract, wake-name matching
   main/        Electron main process
     agent/       AgentEngine (loop), IntentRouter, ResponseComposer, prompts, speechText
-    tools/       Typed tool registry + implementations (files, documents, open, apps)
-    security/    pathPolicy (what the assistant may touch)
+    tools/       Typed tool registry + implementations (files, file ops, clipboard, documents, open, apps), verify.ts (post-action verification helpers)
+    security/    pathPolicy (what the assistant may touch, including bare-name and write-target checks)
     live/        liveBridge: config + tool execution for Talk mode
     wake/        sentencePiece (tokenizer), keywordSpotter (the model), loadWakeWordDetector
+    permissions/ PermissionManager: risk levels (safe/confirm/high_risk/blocked) per action
     providers/
       ai/        GeminiAIProvider (model fallback, retries, daily-limit aware), OllamaAIProvider, ChainedAIProvider
       tts/       GeminiTTS (streaming), TtsStreamService, RendererTTSBridge (serialized queue)
     windowsApi/  Process launch/verify, App Paths lookup (no shell)
-    permissions/ memory/ context/ config/ ipc/ shortcuts/ windows/
+    memory/ context/ config/ ipc/ shortcuts/ windows/
   renderer/    React orb
     liveListener.ts / vad.ts / wav.ts   always-on mic -> utterances, plus a raw tap for the wake word
     wakeWord.ts                          batches raw mic audio for the wake-word model in main
@@ -130,8 +140,19 @@ models/kws/    The downloaded wake-word model (not fetched by npm install; see S
 tests/         Vitest unit tests
 ```
 
+## How "ask before deleting" actually works
+
+There's no separate pause-and-wait mechanism bolted onto the agent loop — it rides the same tool-call loop everything else already uses. A destructive or overwriting tool, called without `confirm: true`, does nothing and returns a normal (if unsuccessful) tool result whose `data` is a small structured question (`{ status: 'permission_required', action, target, reason }`). The model is told, in that tool's own description and in the system prompt, to relay that question and only call the same tool again with `confirm: true` once the user has clearly said yes in that conversation. This means it works identically for typed commands, voice commands, and Talk mode, with no extra plumbing in any of them — verified live: asking to delete a file gets a spoken question and the file is untouched; saying "yes, delete it" (a separate request, with no file path in it at all) correctly re-targets the same file and deletes it, because the file's path is carried forward through `ConversationContext` the same way "copy it to Desktop" resolves "it".
+
 ## Roadmap
 
-1. A trained (not synthetic-voice-tuned) wake word, once real usage data exists.
-2. Confirmation prompts, then file operations (copy/move/rename) behind them.
-3. Packaging the app for distribution (there is no build/installer step yet).
+Requested next as one large phase ("a real Windows computer agent that can safely manipulate files, control applications, automate browsers, recover from failures, and complete long multi-step objectives"). Delivered so far: file operations, clipboard access, and the confirm-before-destroy protocol above, plus reference resolution across requests. Deliberately not attempted yet, because each is a substantial subsystem in its own right and none of them should be bolted on without its own real testing:
+
+1. Browser automation (Playwright-based, semantic selectors first) and a live "search a real site, click through it, download a file" workflow.
+2. Windows UI Automation, for apps that aren't a browser.
+3. A Gemini Computer Use (screenshot-driven) fallback for when neither of the above can find what it needs.
+4. A "trusted mode" setting that skips confirmation for destructive actions (off by default; not started).
+5. A task queue with cancellation ("stop", "never mind") and long-running/async tool handling.
+6. An audit log of every action taken.
+7. A trained (not synthetic-voice-tuned) wake word, once real usage data exists.
+8. Packaging the app for distribution (there is no build/installer step yet).

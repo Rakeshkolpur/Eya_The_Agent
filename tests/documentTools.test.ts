@@ -42,6 +42,7 @@ beforeAll(async () => {
     pictures: join(home, 'Pictures'),
     videos: join(home, 'Videos'),
     music: join(home, 'Music'),
+    temp: join(home, 'AppData', 'Local', 'Temp'),
   };
   await mkdir(folders.downloads, { recursive: true });
   await writeFile(join(folders.downloads, 'order.pdf'), 'PDFBYTES');

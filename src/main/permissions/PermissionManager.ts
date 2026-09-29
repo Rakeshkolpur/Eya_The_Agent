@@ -1,13 +1,36 @@
 /**
- * Central permission checker. Milestone 1: allow-listed intents only.
- * Sensitive actions (delete file, send email, install software, etc.)
- * must go through checkAction() and receive an explicit user grant.
+ * Central risk classification for actions a tool might take.
  *
- * The prompt UI is not yet wired up; the interface exists so tools written
- * from day one route through it instead of side-stepping later.
+ * Actual gating for the file-operation tools happens where the risk is
+ * precise and conditional (e.g. copying only needs confirmation when it
+ * would overwrite something) — see `tools/impl/fileOpsTools.ts`, which asks
+ * the question via a normal tool result and only proceeds once the model
+ * calls again with `confirm: true` after the user has agreed. This registry
+ * exists so every action's risk is declared in one place instead of scattered
+ * `if` statements, and so a future settings UI (a "trusted mode" toggle, for
+ * instance) has one thing to consult rather than many.
  */
+export type RiskLevel = 'safe' | 'confirm' | 'high_risk' | 'blocked';
+
 export type SensitiveAction =
+  | 'open_application'
+  | 'close_application'
+  | 'find_file'
+  | 'read_file'
+  | 'analyze_document'
+  | 'web_search'
+  | 'open_file'
+  | 'open_folder'
+  | 'open_url'
+  | 'create_folder'
+  | 'copy_file'
+  | 'move_file'
+  | 'rename_file'
   | 'delete_file'
+  | 'delete_folder'
+  | 'overwrite_file'
+  | 'clipboard_read'
+  | 'clipboard_write'
   | 'send_message'
   | 'send_email'
   | 'install_software'
@@ -15,6 +38,54 @@ export type SensitiveAction =
   | 'change_security_settings'
   | 'financial_transaction'
   | 'upload_private_file';
+
+const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
+  open_application: 'safe',
+  close_application: 'safe',
+  find_file: 'safe',
+  read_file: 'safe',
+  analyze_document: 'safe',
+  web_search: 'safe',
+  open_file: 'safe',
+  open_folder: 'safe',
+  open_url: 'safe',
+  create_folder: 'safe',
+  copy_file: 'safe', // becomes 'confirm' at the moment it would overwrite something
+  move_file: 'safe', // becomes 'confirm' at the moment it would overwrite something
+  rename_file: 'safe', // becomes 'confirm' at the moment it would overwrite something
+  delete_file: 'confirm',
+  delete_folder: 'high_risk',
+  overwrite_file: 'confirm',
+  clipboard_read: 'safe',
+  clipboard_write: 'safe',
+  send_message: 'confirm',
+  send_email: 'confirm',
+  install_software: 'high_risk',
+  execute_download: 'confirm',
+  change_security_settings: 'high_risk',
+  financial_transaction: 'blocked',
+  upload_private_file: 'confirm',
+};
+
+export interface PermissionRequest {
+  readonly status: 'permission_required';
+  readonly action: SensitiveAction;
+  /** What the action would affect, e.g. a file name — never a raw path read aloud. */
+  readonly target: string;
+  readonly reason: string;
+  readonly options: readonly ['approve', 'deny'];
+  // Structurally compatible with ToolResult['data'], so a tool can return this directly.
+  readonly [key: string]: unknown;
+}
+
+/** A question for the user, in the exact shape a tool hands back as its result data. */
+export function permissionRequest(action: SensitiveAction, target: string, reason: string): PermissionRequest {
+  return { status: 'permission_required', action, target, reason, options: ['approve', 'deny'] };
+}
+
+export function riskLevelFor(action: SensitiveAction): RiskLevel {
+  return RISK_LEVELS[action];
+}
 
 export interface PermissionGrant {
   readonly action: SensitiveAction;
@@ -25,10 +96,20 @@ export interface PermissionGrant {
 export class PermissionManager {
   private readonly sessionGrants = new Set<SensitiveAction>();
 
-  /** Milestone 1 stub: everything sensitive is denied until UI lands. */
+  riskLevel(action: SensitiveAction): RiskLevel {
+    return riskLevelFor(action);
+  }
+
+  /** True for anything hard-blocked regardless of confirmation (there is no way to grant this). */
+  isBlocked(action: SensitiveAction): boolean {
+    return this.riskLevel(action) === 'blocked';
+  }
+
+  /** A session-wide grant, e.g. "session" scope for a repeated safe-ish action. Never used to bypass a `blocked` action. */
   async checkAction(action: SensitiveAction): Promise<boolean> {
-    if (this.sessionGrants.has(action)) return true;
-    return false;
+    if (this.isBlocked(action)) return false;
+    if (this.riskLevel(action) === 'safe') return true;
+    return this.sessionGrants.has(action);
   }
 
   grantForSession(action: SensitiveAction): PermissionGrant {

@@ -6,7 +6,7 @@ import type { ToolRegistry } from '@main/tools/ToolRegistry';
 import type { ToolArgs, ToolResult } from '@main/tools/types';
 import type { TTSProvider } from '@main/providers/tts/TTSProvider';
 import type { AIProvider, AIChatMessage, AICompletion } from '@main/providers/ai/AIProvider';
-import type { ConversationContext } from '@main/context/ConversationContext';
+import type { ConversationContext, TurnRef } from '@main/context/ConversationContext';
 import { normalizeCommand } from './IntentRouter';
 import type { IntentRouter, IntentMatch } from './IntentRouter';
 import type { ResponseComposer } from './ResponseComposer';
@@ -228,6 +228,10 @@ export class AgentEngine implements RequestHandler, AudioHandler {
     return this.finish(req, spoken, toolResult.ok, {
       intent: intent.tool,
       subject: intent.canonicalName,
+      refs: [
+        { kind: 'application', value: intent.canonicalName },
+        ...refsFromToolResult(intent.tool, toolResult),
+      ],
       ...(toolResult.error !== undefined ? { error: toolResult.error } : {}),
       emit,
     });
@@ -243,8 +247,9 @@ export class AgentEngine implements RequestHandler, AudioHandler {
     emit({ state: 'thinking', message: 'Thinking…' });
     const started = Date.now();
     const now = this.deps.now?.() ?? new Date();
+    const hint = contextHintText(context);
     const messages: AIChatMessage[] = [
-      { role: 'system', content: systemPrompt(now) },
+      { role: 'system', content: hint === undefined ? systemPrompt(now) : `${systemPrompt(now)}\n\n${hint}` },
       ...this.messagesFromContext(context),
       { role: 'user', content: req.text },
     ];
@@ -259,6 +264,7 @@ export class AgentEngine implements RequestHandler, AudioHandler {
     let lastToolOk = true;
     let acknowledged = false;
     let finished = false;
+    const allRefs: TurnRef[] = [];
 
     for (let step = 0; step < MAX_AGENT_STEPS; step += 1) {
       if (Date.now() - started > AGENT_BUDGET_MS) {
@@ -305,6 +311,7 @@ export class AgentEngine implements RequestHandler, AudioHandler {
         log.info('tool result', { name: call.name, ok: result.ok, ms: Date.now() - toolStarted });
         lastToolName = call.name;
         lastToolOk = result.ok;
+        allRefs.push(...refsFromToolResult(call.name, result));
         messages.push({
           role: 'tool',
           name: call.name,
@@ -323,6 +330,7 @@ export class AgentEngine implements RequestHandler, AudioHandler {
 
     return this.finish(req, spoken, lastToolOk, {
       ...(lastToolName !== undefined ? { intent: lastToolName } : {}),
+      refs: allRefs,
       emit,
     });
   }
@@ -362,6 +370,7 @@ export class AgentEngine implements RequestHandler, AudioHandler {
       readonly intent?: string;
       readonly subject?: string;
       readonly error?: string;
+      readonly refs?: readonly TurnRef[];
       readonly emit: (patch: Omit<AgentUpdate, 'requestId'>) => void;
     },
   ): Promise<AgentResult> {
@@ -369,15 +378,16 @@ export class AgentEngine implements RequestHandler, AudioHandler {
     await this.speak(spoken);
     extras.emit({ state: 'idle' });
 
+    const refs =
+      extras.refs ??
+      (extras.subject !== undefined ? [{ kind: 'application' as const, value: extras.subject }] : []);
     this.deps.context.push({
       at: Date.now(),
       userText: req.text,
       ...(extras.intent !== undefined ? { intent: extras.intent, toolUsed: extras.intent } : {}),
       reply: spoken,
       ok,
-      refs: extras.subject !== undefined
-        ? [{ kind: 'application' as const, value: extras.subject }]
-        : [],
+      refs,
     });
 
     return {
@@ -397,6 +407,52 @@ export class AgentEngine implements RequestHandler, AudioHandler {
     }
     return out;
   }
+}
+
+/**
+ * A short, unspoken addendum to the system prompt naming the most recent file
+ * and folder the conversation touched, so "copy it to Desktop" or "put it in
+ * that folder" resolves reliably. The literal path only ever lives here and
+ * in tool results — never in what gets spoken — since the spoken reply says
+ * "your Downloads folder", not the path itself.
+ */
+export function contextHintText(context: ConversationContext): string | undefined {
+  const file = context.lastRefOfKind('file');
+  const folder = context.lastRefOfKind('folder');
+  if (file === undefined && folder === undefined) return undefined;
+  const parts: string[] = [];
+  if (file !== undefined) parts.push(`The file most recently found, opened, or touched is: ${file.value}`);
+  if (folder !== undefined) parts.push(`The folder most recently created or touched is: ${folder.value}`);
+  return (
+    `Conversation context (not something to say aloud; use it to resolve "it", "that file", "the folder", etc.):\n` +
+    `${parts.join('\n')}\nIf the user clearly means something else, use that instead.`
+  );
+}
+
+const FOLDER_TOOLS = new Set(['create_folder', 'open_folder', 'delete_folder']);
+
+/**
+ * What a tool result implies for "it"/"that file"/"the folder" resolution
+ * later. A tool that returns a `path` is remembered as the most recent
+ * file or folder touched; `find_file`'s first (newest) match counts too.
+ * These feed `ConversationContext`, whose `lastRefOfKind` already existed for
+ * exactly this purpose.
+ */
+export function refsFromToolResult(toolName: string, result: ToolResult): TurnRef[] {
+  if (!result.ok || result.data === undefined) return [];
+  const refs: TurnRef[] = [];
+  const path = result.data['path'];
+  if (typeof path === 'string') {
+    refs.push({ kind: FOLDER_TOOLS.has(toolName) ? 'folder' : 'file', value: path });
+  }
+  const files = result.data['files'];
+  if (Array.isArray(files)) {
+    const first = files[0] as { path?: unknown } | undefined;
+    if (first !== undefined && typeof first.path === 'string') {
+      refs.push({ kind: 'file', value: first.path });
+    }
+  }
+  return refs;
 }
 
 /** A tool result as the model sees it, kept within a sane size. */
