@@ -307,8 +307,8 @@ describe('the instant path and always-on listening', () => {
     const result = await run(engineWith(ai), 'Hey Eya, please open Notepad');
     expect(ai.seen).toHaveLength(0);
     expect(toolLog).toEqual([{ name: 'open_application', args: { name: 'notepad' } }]);
-    expect(result.spoken).toBe('Notepad is open.');
-    expect(tts.prefetched).toEqual(['Notepad is open.']);
+    expect(result.spoken).toBe('Done.');
+    expect(tts.prefetched).toEqual(['Done.']);
   });
 
   it('ignores long chatter without spending a model call', async () => {
@@ -374,7 +374,7 @@ describe('voice input', () => {
   it('turns speech into text and carries out the command', async () => {
     const result = await runAudio(engineWith(undefined, transcriber('Open Notepad')), true);
     expect(toolLog).toEqual([{ name: 'open_application', args: { name: 'notepad' } }]);
-    expect(result.spoken).toBe('Notepad is open.');
+    expect(result.spoken).toBe('Done.');
   });
 
   it('says the daily limit is spent in words, not silence, for a typed-mic press', async () => {

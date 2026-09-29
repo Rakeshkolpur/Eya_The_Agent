@@ -20,7 +20,7 @@ describe('risk levels', () => {
 });
 
 describe('permissionRequest', () => {
-  it('builds the structured question a tool hands back', () => {
+  it('builds the structured question a tool hands back, defaulting to approve/deny', () => {
     const req = permissionRequest('delete_file', 'report.pdf', 'This permanently removes the file.');
     expect(req).toEqual({
       status: 'permission_required',
@@ -29,6 +29,11 @@ describe('permissionRequest', () => {
       reason: 'This permanently removes the file.',
       options: ['approve', 'deny'],
     });
+  });
+
+  it('accepts a custom set of options, e.g. a choice of delete kind', () => {
+    const req = permissionRequest('delete_file', 'report.pdf', 'Recycle can be undone; permanent cannot.', ['recycle', 'permanent']);
+    expect(req.options).toEqual(['recycle', 'permanent']);
   });
 });
 

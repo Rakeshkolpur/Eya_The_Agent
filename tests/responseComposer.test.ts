@@ -4,14 +4,31 @@ import { ResponseComposer } from '../src/main/agent/ResponseComposer';
 describe('ResponseComposer', () => {
   const c = new ResponseComposer();
 
-  it('phrases successful open_application naturally', () => {
+  it('says just "Done" for a successful open_application, not a description of it', () => {
     expect(
       c.compose({
         userText: 'open chrome',
         intentTool: 'open_application',
         toolResult: { ok: true, summary: 'chrome is running', data: { app: 'chrome' } },
       }),
-    ).toBe('Chrome is open.');
+    ).toBe('Done.');
+  });
+
+  it('says just "Done" for a successful close_application, but still mentions when it was already closed', () => {
+    expect(
+      c.compose({
+        userText: 'close notepad',
+        intentTool: 'close_application',
+        toolResult: { ok: true, summary: 'closed', data: { app: 'notepad' } },
+      }),
+    ).toBe('Done.');
+    expect(
+      c.compose({
+        userText: 'close notepad',
+        intentTool: 'close_application',
+        toolResult: { ok: true, summary: 'not running', data: { app: 'notepad', alreadyClosed: true } },
+      }),
+    ).toBe("Notepad wasn't running.");
   });
 
   it('phrases failed open_application', () => {

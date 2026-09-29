@@ -1,5 +1,7 @@
+import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { promisify } from 'node:util';
 import {
   checkItemName,
   checkPath,
@@ -11,6 +13,8 @@ import type { KnownFolders } from '@main/security/pathPolicy';
 import { permissionRequest } from '@main/permissions/PermissionManager';
 import { verifyAbsent, verifyFileExists, verifyFolderExists } from '../verify';
 import type { Tool, ToolArgs, ToolResult } from '../types';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * File-mutating tools: create/copy/move/rename/delete. Every one of them
@@ -56,6 +60,38 @@ async function moveFile(source: string, destination: string): Promise<void> {
   }
 }
 
+/**
+ * Sends a file or folder to the Windows Recycle Bin, so a "normal" delete can
+ * genuinely be undone, instead of just calling the same permanent-removal API
+ * as a "permanent" one. `.NET`'s own `Microsoft.VisualBasic.FileIO.FileSystem`
+ * wraps the real Windows Shell recycle operation; there is no equivalent in
+ * plain Node, so this shells out to PowerShell for it, the same way
+ * `close_file` and the system-control tools already do for other things
+ * Node alone can't do. `OnlyErrorDialogs` does not block waiting for a person
+ * at the keyboard here — a locked or in-use file throws a normal, catchable
+ * error instead (verified live).
+ */
+export interface RecycleDeps {
+  recycleFile(path: string): Promise<void>;
+  recycleFolder(path: string): Promise<void>;
+}
+
+function psQuote(path: string): string {
+  return path.replace(/'/g, "''");
+}
+
+async function runRecycle(kind: 'DeleteFile' | 'DeleteDirectory', path: string): Promise<void> {
+  const script =
+    `Add-Type -AssemblyName Microsoft.VisualBasic; ` +
+    `[Microsoft.VisualBasic.FileIO.FileSystem]::${kind}('${psQuote(path)}', 'OnlyErrorDialogs', 'SendToRecycleBin')`;
+  await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true });
+}
+
+export const defaultRecycleDeps: RecycleDeps = {
+  recycleFile: (path) => runRecycle('DeleteFile', path),
+  recycleFolder: (path) => runRecycle('DeleteDirectory', path),
+};
+
 /** Bounded recursive file count, just for an honest "this contains N files" in a delete confirmation. */
 async function countFilesUnder(dir: string, limit = 5000): Promise<{ count: number; truncated: boolean }> {
   let count = 0;
@@ -78,7 +114,7 @@ async function countFilesUnder(dir: string, limit = 5000): Promise<{ count: numb
   return { count, truncated: false };
 }
 
-export function createFileOpsTools(folders: KnownFolders): Tool[] {
+export function createFileOpsTools(folders: KnownFolders, recycle: RecycleDeps = defaultRecycleDeps): Tool[] {
   const createFolder: Tool = {
     schema: {
       name: 'create_folder',
@@ -352,12 +388,20 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
       status: 'Deleting the file…',
       requiresConfirmation: true,
       description:
-        'Permanently delete a file. ALWAYS requires confirmation: the first call (without confirm) deletes nothing ' +
-        'and instead returns a question to ask the user. Call again with confirm=true only after the user has ' +
-        'clearly said yes to deleting it in this conversation. Never set confirm=true on the first call.',
+        'Delete a file. ALWAYS ask the user to choose first, every time, before calling this with a mode: the first ' +
+        'call (without mode) deletes nothing and instead returns exactly that question to ask. Two kinds exist: ' +
+        '"recycle" moves it to the Recycle Bin, where the user can restore it; "permanent" removes it completely and ' +
+        'cannot be undone. Never assume permanent, and never pick a mode yourself. Once the user answers, map their ' +
+        'words naturally — "normal", "normal delete", "move it to the recycle bin", "recycle" mean mode: "recycle"; ' +
+        '"permanently", "permanent delete", "delete it completely", "for good" mean mode: "permanent" — and call ' +
+        'again with that mode. Never set a mode on the first call.',
       args: {
         path: { type: 'string', required: true, description: 'Full path to the file to delete (from a previous tool result).' },
-        confirm: { type: 'boolean', description: 'Set true only after the user has explicitly said yes to deleting this file.' },
+        mode: {
+          type: 'string',
+          enum: ['recycle', 'permanent'],
+          description: 'Which kind of delete the user chose. Omit entirely on the first call, to ask.',
+        },
       },
     },
     async execute(args): Promise<ToolResult> {
@@ -370,25 +414,33 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
       if (!stat.isFile()) return { ok: false, summary: 'not a file', error: 'That is a folder; use delete_folder.' };
 
       const name = basename(check.path);
-      if (!boolArg(args, 'confirm')) {
+      const modeArg = stringArg(args, 'mode');
+      if (modeArg !== 'recycle' && modeArg !== 'permanent') {
         return {
           ok: false,
-          summary: 'needs confirmation',
-          error: `Do you want me to permanently delete "${name}"?`,
-          data: permissionRequest('delete_file', name, 'This permanently removes the file. It cannot be undone.'),
+          summary: 'needs a choice',
+          error: `Do you want me to delete "${name}" normally, so it goes to the Recycle Bin and can be restored, or permanently delete it?`,
+          data: permissionRequest(
+            'delete_file',
+            name,
+            'A normal delete can be undone from the Recycle Bin; a permanent delete cannot.',
+            ['recycle', 'permanent'],
+          ),
         };
       }
 
       try {
-        await fs.unlink(check.path);
+        if (modeArg === 'recycle') await recycle.recycleFile(check.path);
+        else await fs.unlink(check.path);
       } catch (err) {
         return { ok: false, summary: 'delete failed', error: `I could not delete that file: ${String(err)}` };
       }
       const verification = await verifyAbsent(check.path);
+      const summary = modeArg === 'recycle' ? 'moved the file to the Recycle Bin' : 'permanently deleted the file';
       return {
         ok: verification.verified,
-        summary: verification.verified ? 'deleted the file' : 'deletion not verified',
-        data: { path: check.path, verification },
+        summary: verification.verified ? summary : 'deletion not verified',
+        data: { path: check.path, mode: modeArg, verification },
         ...(verification.verified ? {} : { error: `The file may not have been deleted: ${verification.evidence}.` }),
       };
     },
@@ -400,13 +452,21 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
       status: 'Deleting the folder…',
       requiresConfirmation: true,
       description:
-        'Permanently delete a folder and everything inside it. ALWAYS requires confirmation: the first call ' +
-        '(without confirm) deletes nothing and instead returns how many files it contains and a question to ask the ' +
-        'user. Call again with confirm=true only after the user has clearly said yes in this conversation. This is ' +
-        'more dangerous than delete_file, so be especially sure the user means it. Never set confirm=true on the first call.',
+        'Delete a folder and everything inside it. ALWAYS ask the user to choose first, every time, before calling ' +
+        'this with a mode: the first call (without mode) deletes nothing and instead returns how many files it ' +
+        'contains, plus exactly that question to ask. Two kinds exist: "recycle" moves the whole folder to the ' +
+        'Recycle Bin, where the user can restore it; "permanent" removes it completely and cannot be undone. This is ' +
+        'more dangerous than delete_file, so be especially sure the user means it, but never assume permanent — ask. ' +
+        'Once the user answers, map their words naturally — "normal", "normal delete", "move it to the recycle bin", ' +
+        '"recycle" mean mode: "recycle"; "permanently", "permanent delete", "delete it completely", "for good" mean ' +
+        'mode: "permanent" — and call again with that mode. Never set a mode on the first call.',
       args: {
         path: { type: 'string', required: true, description: 'Full path to the folder to delete (from a previous tool result).' },
-        confirm: { type: 'boolean', description: 'Set true only after the user has explicitly said yes to deleting this folder.' },
+        mode: {
+          type: 'string',
+          enum: ['recycle', 'permanent'],
+          description: 'Which kind of delete the user chose. Omit entirely on the first call, to ask.',
+        },
       },
     },
     async execute(args): Promise<ToolResult> {
@@ -422,15 +482,21 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
       if (!stat.isDirectory()) return { ok: false, summary: 'not a folder', error: 'That is a file; use delete_file.' };
 
       const name = basename(check.path);
-      if (!boolArg(args, 'confirm')) {
+      const modeArg = stringArg(args, 'mode');
+      if (modeArg !== 'recycle' && modeArg !== 'permanent') {
         const { count, truncated } = await countFilesUnder(check.path);
         const countText = `${count}${truncated ? '+' : ''} file${count === 1 && !truncated ? '' : 's'}`;
         return {
           ok: false,
-          summary: 'needs confirmation',
-          error: `"${name}" contains ${countText}. Do you want me to permanently delete the whole folder?`,
+          summary: 'needs a choice',
+          error: `"${name}" contains ${countText}. Do you want me to delete it normally, so it goes to the Recycle Bin, or permanently delete it?`,
           data: {
-            ...permissionRequest('delete_folder', name, `This permanently removes the folder and ${countText} inside it. It cannot be undone.`),
+            ...permissionRequest(
+              'delete_folder',
+              name,
+              `A normal delete can be undone from the Recycle Bin; a permanent delete removes the folder and ${countText} inside it for good.`,
+              ['recycle', 'permanent'],
+            ),
             fileCount: count,
             fileCountTruncated: truncated,
           },
@@ -438,15 +504,17 @@ export function createFileOpsTools(folders: KnownFolders): Tool[] {
       }
 
       try {
-        await fs.rm(check.path, { recursive: true, force: false });
+        if (modeArg === 'recycle') await recycle.recycleFolder(check.path);
+        else await fs.rm(check.path, { recursive: true, force: false });
       } catch (err) {
         return { ok: false, summary: 'delete failed', error: `I could not delete that folder: ${String(err)}` };
       }
       const verification = await verifyAbsent(check.path);
+      const summary = modeArg === 'recycle' ? 'moved the folder to the Recycle Bin' : 'permanently deleted the folder';
       return {
         ok: verification.verified,
-        summary: verification.verified ? 'deleted the folder' : 'deletion not verified',
-        data: { path: check.path, verification },
+        summary: verification.verified ? summary : 'deletion not verified',
+        data: { path: check.path, mode: modeArg, verification },
         ...(verification.verified ? {} : { error: `The folder may not have been deleted: ${verification.evidence}.` }),
       };
     },

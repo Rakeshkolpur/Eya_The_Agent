@@ -1,14 +1,36 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createFileOpsTools } from '../src/main/tools/impl/fileOpsTools';
+import type { RecycleDeps } from '../src/main/tools/impl/fileOpsTools';
 import type { KnownFolders } from '../src/main/security/pathPolicy';
 import type { Tool, ToolArgs } from '../src/main/tools/types';
 
 let home = '';
 let folders: KnownFolders;
 let tools: Record<string, Tool>;
+let recycledFiles: string[] = [];
+let recycledFolders: string[] = [];
+
+/**
+ * Recycling for real (the Windows Shell Recycle Bin) is exercised live, not
+ * in this fast unit suite — this fake just needs to (a) actually make the
+ * path disappear, so `verifyAbsent` sees what a real recycle would produce,
+ * and (b) record that the *recycle* path was taken, as opposed to the
+ * permanent-delete path, which calls fs.unlink/fs.rm directly and never
+ * touches this at all.
+ */
+const fakeRecycle: RecycleDeps = {
+  recycleFile: async (path) => {
+    recycledFiles.push(path);
+    await unlink(path);
+  },
+  recycleFolder: async (path) => {
+    recycledFolders.push(path);
+    await rm(path, { recursive: true, force: true });
+  },
+};
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -39,7 +61,7 @@ beforeAll(async () => {
   };
   await mkdir(folders.desktop, { recursive: true });
   await mkdir(folders.downloads, { recursive: true });
-  tools = Object.fromEntries(createFileOpsTools(folders).map((t) => [t.schema.name, t]));
+  tools = Object.fromEntries(createFileOpsTools(folders, fakeRecycle).map((t) => [t.schema.name, t]));
 });
 
 afterAll(async () => {
@@ -174,31 +196,66 @@ describe('rename_file', () => {
 });
 
 describe('delete_file', () => {
-  it('never deletes on the first call: it asks first', async () => {
+  it('never deletes on the first call: it asks which kind of delete, not just permanent', async () => {
     await writeFile(join(folders.desktop, 'doomed.txt'), 'x');
     const result = await call('delete_file', { path: join(folders.desktop, 'doomed.txt') });
     expect(result.ok).toBe(false);
     expect(result.data?.['status']).toBe('permission_required');
     expect(result.data?.['action']).toBe('delete_file');
+    expect(result.data?.['options']).toEqual(['recycle', 'permanent']);
+    expect(result.error).toMatch(/Recycle Bin/);
+    expect(result.error).toMatch(/permanently/);
     expect(await exists(join(folders.desktop, 'doomed.txt'))).toBe(true);
   });
 
-  it('deletes only once confirm is true, and verifies it is really gone', async () => {
+  it('mode: recycle sends it to the Recycle Bin mechanism, not a permanent delete', async () => {
+    await writeFile(join(folders.desktop, 'recycle-me.txt'), 'x');
+    recycledFiles = [];
+    const result = await call('delete_file', { path: join(folders.desktop, 'recycle-me.txt'), mode: 'recycle' });
+    expect(result.ok).toBe(true);
+    expect(result.data?.['mode']).toBe('recycle');
+    expect(result.summary).toMatch(/Recycle Bin/);
+    expect(await exists(join(folders.desktop, 'recycle-me.txt'))).toBe(false);
+    expect(recycledFiles).toEqual([join(folders.desktop, 'recycle-me.txt')]);
+  });
+
+  it('mode: permanent deletes outright, verifies it is really gone, and never touches the recycle mechanism', async () => {
     await writeFile(join(folders.desktop, 'doomed2.txt'), 'x');
-    const confirmed = await call('delete_file', { path: join(folders.desktop, 'doomed2.txt'), confirm: true });
+    recycledFiles = [];
+    const confirmed = await call('delete_file', { path: join(folders.desktop, 'doomed2.txt'), mode: 'permanent' });
     expect(confirmed.ok).toBe(true);
+    expect(confirmed.data?.['mode']).toBe('permanent');
+    expect(confirmed.summary).toMatch(/permanently/);
     expect(await exists(join(folders.desktop, 'doomed2.txt'))).toBe(false);
+    expect(recycledFiles).toEqual([]);
+  });
+
+  it('reports honestly if the recycle mechanism itself fails', async () => {
+    await writeFile(join(folders.desktop, 'stuck.txt'), 'x');
+    const failing: RecycleDeps = { ...fakeRecycle, recycleFile: async () => { throw new Error('shell refused'); } };
+    const failingTools = Object.fromEntries(createFileOpsTools(folders, failing).map((t) => [t.schema.name, t]));
+    const result = await failingTools['delete_file']!.execute({ path: join(folders.desktop, 'stuck.txt'), mode: 'recycle' });
+    expect(result.ok).toBe(false);
+    expect(await exists(join(folders.desktop, 'stuck.txt'))).toBe(true);
   });
 
   it('refuses a folder', async () => {
     await mkdir(join(folders.desktop, 'a-folder'), { recursive: true });
-    const result = await call('delete_file', { path: join(folders.desktop, 'a-folder'), confirm: true });
+    const result = await call('delete_file', { path: join(folders.desktop, 'a-folder'), mode: 'permanent' });
     expect(result.ok).toBe(false);
+  });
+
+  it('an unrecognized mode value is treated the same as no mode: it asks again', async () => {
+    await writeFile(join(folders.desktop, 'confused.txt'), 'x');
+    const result = await call('delete_file', { path: join(folders.desktop, 'confused.txt'), mode: 'delete it now' });
+    expect(result.ok).toBe(false);
+    expect(result.data?.['status']).toBe('permission_required');
+    expect(await exists(join(folders.desktop, 'confused.txt'))).toBe(true);
   });
 });
 
 describe('delete_folder', () => {
-  it('reports how many files it contains before deleting anything', async () => {
+  it('reports how many files it contains and offers both kinds of delete before deleting anything', async () => {
     const dir = join(folders.desktop, 'ToDelete');
     await mkdir(join(dir, 'sub'), { recursive: true });
     await writeFile(join(dir, 'one.txt'), 'x');
@@ -207,23 +264,37 @@ describe('delete_folder', () => {
     const first = await call('delete_folder', { path: dir });
     expect(first.ok).toBe(false);
     expect(first.data?.['status']).toBe('permission_required');
+    expect(first.data?.['options']).toEqual(['recycle', 'permanent']);
     expect(first.data?.['fileCount']).toBe(2);
     expect(await exists(dir)).toBe(true);
 
-    const confirmed = await call('delete_folder', { path: dir, confirm: true });
+    const confirmed = await call('delete_folder', { path: dir, mode: 'permanent' });
     expect(confirmed.ok).toBe(true);
     expect(await exists(dir)).toBe(false);
   });
 
+  it('mode: recycle sends the whole folder to the Recycle Bin mechanism', async () => {
+    const dir = join(folders.desktop, 'ToRecycle');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'a.txt'), 'x');
+    recycledFolders = [];
+
+    const result = await call('delete_folder', { path: dir, mode: 'recycle' });
+    expect(result.ok).toBe(true);
+    expect(result.data?.['mode']).toBe('recycle');
+    expect(await exists(dir)).toBe(false);
+    expect(recycledFolders).toEqual([dir]);
+  });
+
   it('refuses to delete a known special folder itself', async () => {
-    const result = await call('delete_folder', { path: folders.desktop, confirm: true });
+    const result = await call('delete_folder', { path: folders.desktop, mode: 'permanent' });
     expect(result.ok).toBe(false);
     expect(await exists(folders.desktop)).toBe(true);
   });
 
   it('refuses a file', async () => {
     await writeFile(join(folders.desktop, 'not-a-folder.txt'), 'x');
-    const result = await call('delete_folder', { path: join(folders.desktop, 'not-a-folder.txt'), confirm: true });
+    const result = await call('delete_folder', { path: join(folders.desktop, 'not-a-folder.txt'), mode: 'permanent' });
     expect(result.ok).toBe(false);
   });
 });
@@ -235,8 +306,8 @@ describe('path safety', () => {
       ['copy_file', { sourcePath: outside, destinationFolder: 'desktop' }],
       ['move_file', { sourcePath: outside, destinationFolder: 'desktop' }],
       ['rename_file', { path: outside, newName: 'x.txt' }],
-      ['delete_file', { path: outside, confirm: true }],
-      ['delete_folder', { path: outside, confirm: true }],
+      ['delete_file', { path: outside, mode: 'permanent' }],
+      ['delete_folder', { path: outside, mode: 'permanent' }],
     ] as const) {
       const result = await call(name, args);
       expect(result.ok, name).toBe(false);

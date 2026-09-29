@@ -20,7 +20,7 @@ export class ResponseComposer {
 
     if (input.intentTool === 'open_application') {
       const app = (result.data?.['app'] as string | undefined) ?? 'that app';
-      if (result.ok) return `${capitalize(app)} is open.`;
+      if (result.ok) return 'Done.';
       if (result.data?.['reason'] === 'not_installed') {
         const alternatives = result.data['alternatives'];
         const alt = Array.isArray(alternatives) ? (alternatives[0] as string | undefined) : undefined;
@@ -35,7 +35,7 @@ export class ResponseComposer {
       const app = (result.data?.['app'] as string | undefined) ?? 'that app';
       const alreadyClosed = result.data?.['alreadyClosed'] === true;
       if (result.ok && alreadyClosed) return `${capitalize(app)} wasn't running.`;
-      if (result.ok) return `${capitalize(app)} is closed.`;
+      if (result.ok) return 'Done.';
       if (result.data?.['reason'] === 'still_open') {
         return `${capitalize(app)} is still open. It may be waiting for you to save something.`;
       }

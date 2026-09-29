@@ -73,14 +73,20 @@ export interface PermissionRequest {
   /** What the action would affect, e.g. a file name — never a raw path read aloud. */
   readonly target: string;
   readonly reason: string;
-  readonly options: readonly ['approve', 'deny'];
+  /** What the user can say to answer, e.g. ['approve', 'deny'] or ['recycle', 'permanent']. */
+  readonly options: readonly string[];
   // Structurally compatible with ToolResult['data'], so a tool can return this directly.
   readonly [key: string]: unknown;
 }
 
 /** A question for the user, in the exact shape a tool hands back as its result data. */
-export function permissionRequest(action: SensitiveAction, target: string, reason: string): PermissionRequest {
-  return { status: 'permission_required', action, target, reason, options: ['approve', 'deny'] };
+export function permissionRequest(
+  action: SensitiveAction,
+  target: string,
+  reason: string,
+  options: readonly string[] = ['approve', 'deny'],
+): PermissionRequest {
+  return { status: 'permission_required', action, target, reason, options };
 }
 
 export function riskLevelFor(action: SensitiveAction): RiskLevel {
