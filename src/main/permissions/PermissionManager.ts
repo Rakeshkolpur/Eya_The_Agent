@@ -39,7 +39,10 @@ export type SensitiveAction =
   | 'financial_transaction'
   | 'upload_private_file'
   | 'permanently_delete_recycle_bin_item'
-  | 'empty_recycle_bin';
+  | 'empty_recycle_bin'
+  | 'lock_screen'
+  | 'restart_computer'
+  | 'shutdown_computer';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   open_application: 'safe',
@@ -71,6 +74,11 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   permanently_delete_recycle_bin_item: 'confirm',
   // Removes everything in the bin at once, not just one item the user named.
   empty_recycle_bin: 'high_risk',
+  // Reversible with the user's own password, and inherently low-consequence — no confirmation needed.
+  lock_screen: 'safe',
+  // Interrupts every other running application on the machine, not just Eya.
+  restart_computer: 'high_risk',
+  shutdown_computer: 'high_risk',
 };
 
 export interface PermissionRequest {

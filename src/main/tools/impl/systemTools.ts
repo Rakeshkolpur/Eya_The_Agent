@@ -1,10 +1,22 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { rootLogger } from '@main/logging/logger';
+import { permissionRequest } from '@main/permissions/PermissionManager';
+import { isProcessRunning } from '@main/windowsApi/processes';
 import type { Tool, ToolArgs, ToolResult } from '../types';
 
 const execFileAsync = promisify(execFile);
 const log = rootLogger.child('tools.system');
+
+// Long enough for LogonUI.exe to actually appear after LockWorkStation returns
+// (measured comfortably safe, not tuned to a minimum), short enough nobody notices.
+const LOCK_VERIFY_DELAY_MS = 700;
+// Gives the spoken "Done." time to finish playing before the screen actually
+// goes down — the restart/shutdown itself is scheduled instantly; this is
+// purely a grace window for Eya's own voice, not a "you can still cancel this"
+// feature (there is no cancel tool; ordering isn't guaranteed for a voice
+// round-trip to catch it in time anyway).
+const POWER_ACTION_DELAY_SECONDS = 5;
 
 /**
  * Typed, narrow Windows system controls — never a general command shell for
@@ -24,6 +36,11 @@ export interface SystemControlDeps {
   /** null when this display doesn't expose software brightness control (common on desktop monitors). */
   getBrightness(): Promise<number | null>;
   setBrightness(percent: number): Promise<boolean>;
+  /** Resolves true once the lock has actually been observed to take effect, not just requested. */
+  lockWorkstation(): Promise<boolean>;
+  /** Resolves true if Windows accepted and scheduled the restart/shutdown — the furthest "verified" can honestly go, since the machine itself is about to go away. */
+  scheduleRestart(delaySeconds: number): Promise<boolean>;
+  scheduleShutdown(delaySeconds: number): Promise<boolean>;
 }
 
 async function powershell(script: string): Promise<string> {
@@ -106,6 +123,41 @@ export const defaultSystemControlDeps: Omit<SystemControlDeps, 'openExternal'> =
       );
       return true;
     } catch {
+      return false;
+    }
+  },
+  lockWorkstation: async () => {
+    try {
+      await execFileAsync('rundll32.exe', ['user32.dll,LockWorkStation'], { windowsHide: true });
+    } catch (err) {
+      log.warn('LockWorkStation failed to launch', { err: String(err) });
+      return false;
+    }
+    await new Promise((resolve) => setTimeout(resolve, LOCK_VERIFY_DELAY_MS));
+    // LogonUI.exe is the real lock-screen process — its presence is Windows'
+    // own confirmation the workstation actually locked, not just that the
+    // request was sent.
+    return isProcessRunning('LogonUI.exe');
+  },
+  scheduleRestart: async (delaySeconds) => {
+    try {
+      // No /f: an application that refuses to close (unsaved changes) gets to
+      // ask first, the same "polite, never force-kill" rule close_application
+      // already follows — this can mean the restart doesn't happen until the
+      // user responds to that prompt themselves, which is the point.
+      await execFileAsync('shutdown.exe', ['/r', '/t', String(delaySeconds)], { windowsHide: true });
+      return true;
+    } catch (err) {
+      log.warn('scheduling a restart failed', { err: String(err) });
+      return false;
+    }
+  },
+  scheduleShutdown: async (delaySeconds) => {
+    try {
+      await execFileAsync('shutdown.exe', ['/s', '/t', String(delaySeconds)], { windowsHide: true });
+      return true;
+    } catch (err) {
+      log.warn('scheduling a shutdown failed', { err: String(err) });
       return false;
     }
   },
@@ -271,5 +323,100 @@ export function createSystemTools(deps: SystemControlDeps): Tool[] {
     },
   };
 
-  return [openWindowsSettings, openSettingsPage, getVolume, setVolume, muteVolume, unmuteVolume, getBrightness, setBrightness];
+  const lockScreen: Tool = {
+    schema: {
+      name: 'lock_screen',
+      status: 'Locking the screen…',
+      description:
+        'Actually lock the Windows workstation right now (the real lock, same as pressing Win+L) — never open Settings for this. No confirmation needed.',
+      args: {},
+    },
+    async execute(): Promise<ToolResult> {
+      const verified = await deps.lockWorkstation();
+      return {
+        ok: verified,
+        summary: verified ? 'locked the screen' : 'lock not verified',
+        data: { verification: { verified, evidence: verified ? 'the Windows lock screen is showing' : 'the lock screen did not appear' } },
+        ...(verified ? {} : { error: 'I asked Windows to lock the screen, but could not confirm it actually did.' }),
+      };
+    },
+  };
+
+  const restartComputer: Tool = {
+    schema: {
+      name: 'restart_computer',
+      status: 'Restarting the computer…',
+      requiresConfirmation: true,
+      description:
+        'Actually restart the whole computer (never just open Settings/Power). This affects every running application, ' +
+        "not only Eya, so it ALWAYS needs the user's explicit yes first: the first call (without confirm) does nothing " +
+        'and returns exactly that question to ask. Only call again with confirm: true once the user has clearly agreed ' +
+        'in this conversation. Windows will ask individual applications with unsaved work to close politely first — it ' +
+        'is not forced.',
+      args: { confirm: { type: 'boolean', description: 'Set true only after the user has clearly agreed to restart.' } },
+    },
+    async execute(args: ToolArgs): Promise<ToolResult> {
+      if (args['confirm'] !== true) {
+        return {
+          ok: false,
+          summary: 'needs confirmation',
+          error: 'Do you want me to restart the computer? Anything unsaved in other apps may prompt you to save first.',
+          data: permissionRequest('restart_computer', 'the computer', 'This restarts the whole machine, not just Eya.'),
+        };
+      }
+      const scheduled = await deps.scheduleRestart(POWER_ACTION_DELAY_SECONDS);
+      return {
+        ok: scheduled,
+        summary: scheduled ? 'restarting the computer' : 'could not schedule the restart',
+        data: { verification: { verified: scheduled, evidence: scheduled ? 'Windows accepted the restart request' : 'Windows rejected the restart request' } },
+        ...(scheduled ? {} : { error: 'I could not get Windows to restart the computer.' }),
+      };
+    },
+  };
+
+  const shutdownComputer: Tool = {
+    schema: {
+      name: 'shutdown_computer',
+      status: 'Shutting down the computer…',
+      requiresConfirmation: true,
+      description:
+        'Actually shut the whole computer down (never just open Settings/the Start menu). This affects every running ' +
+        "application, so it ALWAYS needs the user's explicit yes first: the first call (without confirm) does nothing " +
+        'and returns exactly that question to ask. Only call again with confirm: true once the user has clearly agreed ' +
+        'in this conversation. Windows will ask individual applications with unsaved work to close politely first — it ' +
+        'is not forced.',
+      args: { confirm: { type: 'boolean', description: 'Set true only after the user has clearly agreed to shut down.' } },
+    },
+    async execute(args: ToolArgs): Promise<ToolResult> {
+      if (args['confirm'] !== true) {
+        return {
+          ok: false,
+          summary: 'needs confirmation',
+          error: 'Do you want me to shut the computer down? Anything unsaved in other apps may prompt you to save first.',
+          data: permissionRequest('shutdown_computer', 'the computer', 'This shuts down the whole machine, not just Eya.'),
+        };
+      }
+      const scheduled = await deps.scheduleShutdown(POWER_ACTION_DELAY_SECONDS);
+      return {
+        ok: scheduled,
+        summary: scheduled ? 'shutting down the computer' : 'could not schedule the shutdown',
+        data: { verification: { verified: scheduled, evidence: scheduled ? 'Windows accepted the shutdown request' : 'Windows rejected the shutdown request' } },
+        ...(scheduled ? {} : { error: 'I could not get Windows to shut the computer down.' }),
+      };
+    },
+  };
+
+  return [
+    openWindowsSettings,
+    openSettingsPage,
+    getVolume,
+    setVolume,
+    muteVolume,
+    unmuteVolume,
+    getBrightness,
+    setBrightness,
+    lockScreen,
+    restartComputer,
+    shutdownComputer,
+  ];
 }

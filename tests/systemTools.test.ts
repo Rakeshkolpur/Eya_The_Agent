@@ -28,6 +28,10 @@ function fakeDeps(overrides: Partial<SystemControlDeps> = {}): { deps: SystemCon
       brightness = percent;
       return true;
     },
+    // Real power actions are never fired in a test — these are always fakes.
+    lockWorkstation: async () => true,
+    scheduleRestart: async () => true,
+    scheduleShutdown: async () => true,
     ...overrides,
   };
   return { deps, opened };
@@ -118,5 +122,75 @@ describe('brightness', () => {
     const result = await toolMap(deps)['set_brightness']!.execute({ percent: 20 });
     expect(result.ok).toBe(false);
     expect(result.summary).toBe('not supported');
+  });
+});
+
+describe('lock_screen', () => {
+  it('locks immediately, no confirmation needed', async () => {
+    const { deps } = fakeDeps();
+    const result = await toolMap(deps)['lock_screen']!.execute({});
+    expect(result.ok).toBe(true);
+    expect(result.summary).toBe('locked the screen');
+  });
+
+  it('reports honestly when the lock could not be verified', async () => {
+    const { deps } = fakeDeps({ lockWorkstation: async () => false });
+    const result = await toolMap(deps)['lock_screen']!.execute({});
+    expect(result.ok).toBe(false);
+    expect(result.summary).toBe('lock not verified');
+  });
+});
+
+describe('restart_computer / shutdown_computer', () => {
+  it('never restarts or shuts down on the first call: it asks first, every time', async () => {
+    const { deps } = fakeDeps({
+      scheduleRestart: async () => {
+        throw new Error('should never be called without confirm: true');
+      },
+      scheduleShutdown: async () => {
+        throw new Error('should never be called without confirm: true');
+      },
+    });
+    const tools = toolMap(deps);
+    const restart = await tools['restart_computer']!.execute({});
+    expect(restart.ok).toBe(false);
+    expect(restart.data?.['status']).toBe('permission_required');
+    const shutdown = await tools['shutdown_computer']!.execute({});
+    expect(shutdown.ok).toBe(false);
+    expect(shutdown.data?.['status']).toBe('permission_required');
+  });
+
+  it('restarts only once confirm is true, and reports Windows accepted it', async () => {
+    let scheduled = false;
+    const { deps } = fakeDeps({
+      scheduleRestart: async (delaySeconds) => {
+        scheduled = true;
+        expect(delaySeconds).toBeGreaterThan(0);
+        return true;
+      },
+    });
+    const result = await toolMap(deps)['restart_computer']!.execute({ confirm: true });
+    expect(result.ok).toBe(true);
+    expect(scheduled).toBe(true);
+  });
+
+  it('shuts down only once confirm is true, and reports Windows accepted it', async () => {
+    let scheduled = false;
+    const { deps } = fakeDeps({
+      scheduleShutdown: async () => {
+        scheduled = true;
+        return true;
+      },
+    });
+    const result = await toolMap(deps)['shutdown_computer']!.execute({ confirm: true });
+    expect(result.ok).toBe(true);
+    expect(scheduled).toBe(true);
+  });
+
+  it('reports honestly when Windows refuses the restart/shutdown request', async () => {
+    const { deps } = fakeDeps({ scheduleRestart: async () => false, scheduleShutdown: async () => false });
+    const tools = toolMap(deps);
+    expect((await tools['restart_computer']!.execute({ confirm: true })).ok).toBe(false);
+    expect((await tools['shutdown_computer']!.execute({ confirm: true })).ok).toBe(false);
   });
 });

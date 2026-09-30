@@ -6,7 +6,7 @@ import { AgentEngine } from '@main/agent/AgentEngine';
 import { IntentRouter } from '@main/agent/IntentRouter';
 import { ResponseComposer } from '@main/agent/ResponseComposer';
 import { ToolRegistry } from '@main/tools/ToolRegistry';
-import { openApplicationTool } from '@main/tools/impl/openApplication';
+import { createOpenApplicationTool, defaultOpenApplicationDeps } from '@main/tools/impl/openApplication';
 import { closeApplicationTool } from '@main/tools/impl/closeApplication';
 import { createFileTools } from '@main/tools/impl/fileTools';
 import { createDocumentTool, createWebSearchTool } from '@main/tools/impl/documentTools';
@@ -94,7 +94,7 @@ async function bootstrap(): Promise<void> {
   };
 
   const tools = new ToolRegistry();
-  tools.register(openApplicationTool);
+  tools.register(createOpenApplicationTool({ ...defaultOpenApplicationDeps, openExternal: (url) => shell.openExternal(url) }));
   tools.register(closeApplicationTool);
   for (const tool of createFileTools(folders)) tools.register(tool);
   tools.register(createDocumentTool(folders, gemini));
