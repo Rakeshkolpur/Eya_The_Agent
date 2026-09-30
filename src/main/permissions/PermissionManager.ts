@@ -37,7 +37,9 @@ export type SensitiveAction =
   | 'execute_download'
   | 'change_security_settings'
   | 'financial_transaction'
-  | 'upload_private_file';
+  | 'upload_private_file'
+  | 'permanently_delete_recycle_bin_item'
+  | 'empty_recycle_bin';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   open_application: 'safe',
@@ -65,6 +67,10 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   change_security_settings: 'high_risk',
   financial_transaction: 'blocked',
   upload_private_file: 'confirm',
+  // Already in the Recycle Bin, not reintroducing anything — a lower bar than delete_folder.
+  permanently_delete_recycle_bin_item: 'confirm',
+  // Removes everything in the bin at once, not just one item the user named.
+  empty_recycle_bin: 'high_risk',
 };
 
 export interface PermissionRequest {

@@ -15,6 +15,7 @@ import { createFileOpsTools } from '@main/tools/impl/fileOpsTools';
 import { createClipboardTools } from '@main/tools/impl/clipboardTools';
 import { closeFileTool } from '@main/tools/impl/closeFile';
 import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/systemTools';
+import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
 import { launchBrowser } from '@main/windowsApi/appPaths';
 import { registerLiveBridge } from '@main/live/liveBridge';
 import { loadWakeWordDetector } from '@main/wake/loadWakeWordDetector';
@@ -113,6 +114,7 @@ async function bootstrap(): Promise<void> {
   for (const tool of createSystemTools({ ...defaultSystemControlDeps, openExternal: (url) => shell.openExternal(url) })) {
     tools.register(tool);
   }
+  for (const tool of createRecycleBinTools(folders)) tools.register(tool);
 
   const window = orb.create();
   const getSender = () => (window.isDestroyed() ? null : window.webContents);

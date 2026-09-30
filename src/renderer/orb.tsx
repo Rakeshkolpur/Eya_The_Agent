@@ -575,9 +575,16 @@ export function OrbApp(): JSX.Element {
               title="Choose Eya's voice"
               aria-label="Eya's voice"
             >
-              {VOICE_OPTIONS.map((v) => (
-                <option key={v.id} value={v.id}>{v.label}</option>
-              ))}
+              <optgroup label="Female">
+                {VOICE_OPTIONS.filter((v) => v.gender === 'female').map((v) => (
+                  <option key={v.id} value={v.id}>{v.label}</option>
+                ))}
+              </optgroup>
+              <optgroup label="Male">
+                {VOICE_OPTIONS.filter((v) => v.gender === 'male').map((v) => (
+                  <option key={v.id} value={v.id}>{v.label}</option>
+                ))}
+              </optgroup>
             </select>
           </div>
         </div>
