@@ -104,6 +104,23 @@ describe('open_file', () => {
     pathFailure = 'no association';
     expect((await run('open_file', { path: join(folders.downloads, 'letter.pdf') })).ok).toBe(false);
   });
+
+  it('can open a file outside the user folder, as long as it is not a protected location', async () => {
+    // Not under the OS tmpdir: on this machine that sits under AppData,
+    // which is (correctly) blocked everywhere. A throwaway folder next to
+    // the repo stands in for "some other accessible drive" instead.
+    const other = join(process.cwd(), 'eya-test-outside-home-tmp');
+    await mkdir(other, { recursive: true });
+    try {
+      const path = join(other, 'movie.mp4');
+      await writeFile(path, 'x');
+      const result = await run('open_file', { path });
+      expect(result.ok).toBe(true);
+      expect(openedPaths).toEqual([path]);
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('open_folder', () => {
@@ -113,11 +130,23 @@ describe('open_folder', () => {
     expect(openedPaths).toEqual([folders.downloads]);
   });
 
-  it('rejects unknown names, files and outside paths', async () => {
+  it('rejects unknown names, files and Windows internals', async () => {
     expect((await run('open_folder', { folder: 'the moon' })).ok).toBe(false);
     expect((await run('open_folder', { folder: join(folders.downloads, 'letter.pdf') })).error).toMatch(/not a folder/);
     expect((await run('open_folder', { folder: 'C:\\Windows' })).ok).toBe(false);
     expect(openedPaths).toEqual([]);
+  });
+
+  it('can open a folder outside the user folder, as long as it is not a protected location', async () => {
+    const other = join(process.cwd(), 'eya-test-outside-home-tmp');
+    await mkdir(other, { recursive: true });
+    try {
+      const result = await run('open_folder', { folder: other });
+      expect(result.ok).toBe(true);
+      expect(openedPaths).toEqual([other]);
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
   });
 });
 

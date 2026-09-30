@@ -1,4 +1,4 @@
-import { basename, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 
 export interface KnownFolders {
   readonly home: string;
@@ -43,6 +43,38 @@ const EXECUTABLE_EXTENSIONS = new Set([
   '.exe', '.bat', '.cmd', '.com', '.msi', '.msix', '.scr', '.ps1', '.psm1', '.vbs', '.vbe',
   '.js', '.jse', '.wsf', '.wsh', '.hta', '.lnk', '.reg', '.jar', '.cpl', '.dll', '.appx',
 ]);
+
+// Directory names that mean "Windows or program internals", wherever they
+// occur on any drive — never a place a user's own document/media lives.
+// Distinct from BLOCKED_DIRS (secrets): these are large system trees to
+// stay out of when searching or opening outside the home folder.
+const SYSTEM_DIR_NAMES = new Set([
+  'windows', 'program files', 'program files (x86)', 'programdata',
+  '$recycle.bin', 'system volume information', 'perflogs', 'recovery',
+  'msocache', 'config.msi', '$windows.~bt', '$windows.~ws', 'boot',
+  'documents and settings',
+]);
+
+export function isSystemDirName(name: string): boolean {
+  return SYSTEM_DIR_NAMES.has(name.toLowerCase());
+}
+
+/**
+ * True only for another account's own profile folder (`C:\Users\<someone
+ * else>`) — never for this user's own home, and never for `Public`, which
+ * Windows itself treats as shared, not private.
+ */
+export function isOtherUserProfileDir(target: string, folders: KnownFolders): boolean {
+  const full = resolve(target);
+  const home = resolve(folders.home);
+  const usersRoot = dirname(home);
+  const rel = relative(usersRoot, full);
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return false;
+  const firstSegment = rel.split(sep)[0] ?? '';
+  if (firstSegment.toLowerCase() === basename(home).toLowerCase()) return false;
+  if (firstSegment.toLowerCase() === 'public') return false;
+  return true;
+}
 
 export type PathCheck =
   | { readonly ok: true; readonly path: string }
@@ -138,6 +170,39 @@ export function checkPath(target: string, folders: KnownFolders): PathCheck {
   }
   const last = basename(full);
   if (isBlockedDirName(last) || isBlockedFileName(last)) {
+    return { ok: false, reason: 'that file is protected' };
+  }
+  return { ok: true, path: full };
+}
+
+/**
+ * The read-only counterpart to checkPath: finding, opening, playing and
+ * reading a file the user asked for wherever on the PC it actually is, not
+ * just inside the home folder. Still refuses secrets (wherever they sit),
+ * Windows/program internals, and another account's own profile. Mutating
+ * operations (create/copy/move/rename/delete) stay on checkPath's stricter
+ * home-only boundary unchanged — this one is for looking, not touching.
+ */
+export function checkReadablePath(target: string, folders: KnownFolders): PathCheck {
+  if (target.trim().length === 0) return { ok: false, reason: 'empty path' };
+  const full = resolve(target.trim());
+  const home = resolve(folders.home);
+  const rel = relative(home, full);
+  const insideHome = !(rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel));
+  if (insideHome) return checkPath(full, folders);
+
+  if (isOtherUserProfileDir(full, folders)) {
+    return { ok: false, reason: "that's another account's own folder" };
+  }
+  // segments[0] is the drive letter itself (e.g. "C:"), never a blocked name.
+  const segments = full.split(sep).filter((s) => s.length > 0);
+  for (const segment of segments.slice(1, -1)) {
+    if (isBlockedDirName(segment) || isSystemDirName(segment)) {
+      return { ok: false, reason: 'that folder is protected' };
+    }
+  }
+  const last = basename(full);
+  if (isBlockedDirName(last) || isBlockedFileName(last) || isSystemDirName(last)) {
     return { ok: false, reason: 'that file is protected' };
   }
   return { ok: true, path: full };

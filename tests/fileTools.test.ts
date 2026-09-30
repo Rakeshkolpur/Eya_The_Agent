@@ -5,12 +5,20 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createFileTools } from '../src/main/tools/impl/fileTools';
 import type { KnownFolders } from '../src/main/security/pathPolicy';
-import type { FoundFile } from '../src/main/tools/impl/fileTools';
+import type { FileSearchDeps, FoundFile } from '../src/main/tools/impl/fileTools';
 
 let home = '';
 let folders: KnownFolders;
 let find: (args: Record<string, string | number | boolean>) => ReturnType<ReturnType<typeof createFileTools>[number]['execute']>;
 let read: typeof find;
+
+// The whole-PC default now falls back to a real filesystem walk across every
+// connected drive when nothing turns up in the (real, OS-shelled-out) search
+// index — a fake with an empty drive list keeps these tests hermetic, only
+// ever touching this suite's own tmpdir, never the machine's real C:\ or the
+// developer's real files. Tests that specifically exercise the index tier or
+// multiple drives inject their own.
+const noExtraDrives: FileSearchDeps = { queryIndex: async () => [], listDrives: async () => [] };
 
 const daysAgo = (n: number): Date => new Date(Date.now() - n * 86_400_000);
 
@@ -37,7 +45,7 @@ beforeAll(async () => {
   await put('Downloads/invoice march.pdf', 'pdf', daysAgo(1));
   await put('Downloads/notes.txt', 'buy milk\nand eggs', daysAgo(3));
   await put('Desktop/resume.docx', 'docx', daysAgo(5));
-  await put('Documents/a/b/c/d/e/toodeep.pdf', 'deep', daysAgo(2));
+  await put('Documents/a/b/c/d/e/f/g/toodeep.pdf', 'deep', daysAgo(2));
   await put('Documents/a/b/shallow.pdf', 'shallow', daysAgo(4));
   await put('Downloads/node_modules/pkg/hidden.pdf', 'no', daysAgo(0));
   await put('Downloads/.env', 'KEY=secret', daysAgo(0));
@@ -53,7 +61,7 @@ beforeAll(async () => {
   await put('Videos/sized/big.pdf', 'x'.repeat(3 * 1024 * 1024), daysAgo(1));
   await put('Videos/sized/small.pdf', 'tiny', daysAgo(1));
 
-  const [findTool, readTool] = createFileTools(folders);
+  const [findTool, readTool] = createFileTools(folders, noExtraDrives);
   if (findTool === undefined || readTool === undefined) throw new Error('tools missing');
   find = (args) => findTool.execute(args);
   read = (args) => readTool.execute(args);
@@ -67,9 +75,9 @@ const names = (files: unknown): string[] => (files as FoundFile[]).map((f) => f.
 
 describe('find_file', () => {
   it('returns the newest matches first', async () => {
-    const result = await find({ extension: 'pdf' });
+    const result = await find({ folder: 'downloads', extension: 'pdf' });
     expect(result.ok).toBe(true);
-    expect(names(result.data?.['files'])).toEqual(['invoice march.pdf', 'shallow.pdf', 'report_final.pdf']);
+    expect(names(result.data?.['files'])).toEqual(['invoice march.pdf', 'report_final.pdf']);
   });
 
   it('matches every word of the query, in any order', async () => {
@@ -77,25 +85,25 @@ describe('find_file', () => {
     expect(names((await find({ query: 'march invoice', extension: '.PDF' })).data?.['files'])).toEqual(['invoice march.pdf']);
   });
 
-  it('with no filters lists the newest files across the default folders', async () => {
-    const result = await find({ limit: 2 });
-    // invoice is 1 day old, notes 3 days, shallow 4 days.
-    expect(names(result.data?.['files'])).toEqual(['invoice march.pdf', 'notes.txt']);
-  });
-
-  it('never surfaces secrets, dependency folders or things too deep', async () => {
+  it('reaches the whole user folder by default, not just Downloads/Desktop/Documents, while still excluding secrets, dependency folders and things too deep', async () => {
     const all = names((await find({ limit: 25 })).data?.['files']);
+    // Pictures and Videos: unreachable under the old three-folder default.
+    expect(all).toContain('photo.jpg');
+    expect(all).toContain('today.pdf');
     expect(all).not.toContain('.env');
     expect(all).not.toContain('secrets.txt');
     expect(all).not.toContain('hidden.pdf');
     expect(all).not.toContain('toodeep.pdf');
   });
 
-  it('can be limited to one folder, and sorted by name', async () => {
+  it('can be limited to one folder', async () => {
     const desktop = await find({ folder: 'desktop' });
     expect(names(desktop.data?.['files'])).toEqual(['resume.docx']);
-    const sorted = await find({ extension: 'pdf', sort: 'name' });
-    expect(names(sorted.data?.['files'])).toEqual(['invoice march.pdf', 'report_final.pdf', 'shallow.pdf']);
+  });
+
+  it('sorts by name when asked', async () => {
+    const sorted = await find({ folder: 'downloads', extension: 'pdf', sort: 'name' });
+    expect(names(sorted.data?.['files'])).toEqual(['invoice march.pdf', 'report_final.pdf']);
   });
 
   it('reports each file with a path, size and date', async () => {
@@ -111,11 +119,14 @@ describe('find_file', () => {
     expect(result.summary).toBe('no matching files');
   });
 
-  it('refuses unknown or outside folders', async () => {
+  it('refuses unknown folders and Windows/program internals', async () => {
     expect((await find({ folder: 'my secret stash' })).ok).toBe(false);
+    // A named folder can now be anywhere on the PC (read-only), but Windows'
+    // own internals are still refused, just with a more specific reason than
+    // plain "outside your folder" now that outside-home is otherwise allowed.
     const outside = await find({ folder: 'C:\\Windows' });
     expect(outside.ok).toBe(false);
-    expect(outside.error).toMatch(/outside/);
+    expect(outside.error).toMatch(/protected/);
   });
 
   it('respects the limit and clamps silly values', async () => {
@@ -191,6 +202,98 @@ describe('find_file: size filters', () => {
   });
 });
 
+describe('find_file: whole-PC default scope', () => {
+  it('merges an index hit with a match found on another connected drive, rather than stopping at the first one found', async () => {
+    // A real bug, caught live: a query that the index answered from the
+    // indexed (home) drive alone silently never checked a second connected
+    // drive that also genuinely had a match — the index result was trusted
+    // and the search stopped there. The two must now come back together.
+    const otherDrive = await mkdtemp(join(tmpdir(), 'eya-other-drive-'));
+    try {
+      await writeFile(join(otherDrive, 'Makthal Writ 3826.pdf'), 'x');
+      const search: FileSearchDeps = {
+        queryIndex: async () => [join(home, 'Desktop', 'resume.docx')], // stands in for "the index already found one"
+        listDrives: async () => [otherDrive],
+      };
+      const [findTool] = createFileTools(folders, search);
+      const result = await findTool!.execute({ query: 'writ', limit: 25 });
+      const found = names(result.data?.['files']);
+      expect(found).toContain('resume.docx');
+      expect(found).toContain('Makthal Writ 3826.pdf');
+    } finally {
+      await rm(otherDrive, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to a real filesystem walk when the index finds nothing', async () => {
+    const [findTool] = createFileTools(folders, noExtraDrives);
+    const result = await findTool!.execute({ query: 'notes' });
+    expect(names(result.data?.['files'])).toEqual(['notes.txt']);
+  });
+
+  it('falls back to the walk when the index throws, rather than failing the whole search', async () => {
+    const search: FileSearchDeps = {
+      queryIndex: async () => {
+        throw new Error('Windows Search service is not running');
+      },
+      listDrives: async () => [],
+    };
+    const [findTool] = createFileTools(folders, search);
+    const result = await findTool!.execute({ query: 'notes' });
+    expect(result.ok).toBe(true);
+    expect(names(result.data?.['files'])).toEqual(['notes.txt']);
+  });
+
+  it('also searches every other accessible drive, not just the user folder', async () => {
+    const otherDrive = await mkdtemp(join(tmpdir(), 'eya-other-drive-'));
+    try {
+      await mkdir(join(otherDrive, 'Media'), { recursive: true });
+      await writeFile(join(otherDrive, 'Media', 'ConCity.mp4'), 'video-bytes');
+      const search: FileSearchDeps = { queryIndex: async () => [], listDrives: async () => [otherDrive] };
+      const [findTool] = createFileTools(folders, search);
+      const result = await findTool!.execute({ query: 'con city', fileType: 'video' });
+      expect(names(result.data?.['files'])).toEqual(['ConCity.mp4']);
+    } finally {
+      await rm(otherDrive, { recursive: true, force: true });
+    }
+  });
+
+  it("stays out of another account's own profile and Windows/program internals while walking a drive, but still finds ordinary top-level content there", async () => {
+    const driveRoot = await mkdtemp(join(tmpdir(), 'eya-drive-root-'));
+    const home2 = join(driveRoot, 'Users', 'TestUser');
+    const folders2: KnownFolders = {
+      home: home2,
+      desktop: join(home2, 'Desktop'),
+      documents: join(home2, 'Documents'),
+      downloads: join(home2, 'Downloads'),
+      pictures: join(home2, 'Pictures'),
+      videos: join(home2, 'Videos'),
+      music: join(home2, 'Music'),
+      temp: join(home2, 'AppData', 'Local', 'Temp'),
+    };
+    try {
+      await mkdir(join(home2, 'Desktop'), { recursive: true });
+      await writeFile(join(home2, 'Desktop', 'legit-home-file.txt'), 'home file');
+      await mkdir(join(driveRoot, 'Users', 'OtherUser'), { recursive: true });
+      await writeFile(join(driveRoot, 'Users', 'OtherUser', 'legit-secret.txt'), 'private');
+      await mkdir(join(driveRoot, 'Windows'), { recursive: true });
+      await writeFile(join(driveRoot, 'Windows', 'legit-system.txt'), 'system');
+      await mkdir(join(driveRoot, 'TopLevel'), { recursive: true });
+      await writeFile(join(driveRoot, 'TopLevel', 'legit-drive-file.txt'), 'drive file');
+
+      const search: FileSearchDeps = { queryIndex: async () => [], listDrives: async () => [driveRoot] };
+      const [findTool] = createFileTools(folders2, search);
+      const found = names((await findTool!.execute({ query: 'legit' })).data?.['files']);
+      expect(found).toContain('legit-drive-file.txt');
+      expect(found).toContain('legit-home-file.txt');
+      expect(found).not.toContain('legit-secret.txt');
+      expect(found).not.toContain('legit-system.txt');
+    } finally {
+      await rm(driveRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('read_file', () => {
   it('reads a text file', async () => {
     const result = await read({ path: join(home, 'Downloads', 'notes.txt') });
@@ -212,10 +315,26 @@ describe('read_file', () => {
     expect(result.error).toMatch(/analyze_document/);
   });
 
-  it('refuses secrets and anything outside the home folder', async () => {
+  it('refuses secrets and Windows/program internals, wherever they are', async () => {
     expect((await read({ path: join(home, 'Downloads', '.env') })).ok).toBe(false);
     expect((await read({ path: join(home, 'Documents', 'secrets.txt') })).ok).toBe(false);
     expect((await read({ path: 'C:\\Windows\\win.ini' })).ok).toBe(false);
+  });
+
+  it('can read an ordinary text file outside the home folder too', async () => {
+    // Not under the OS tmpdir for this one: on this machine that sits under
+    // AppData, which is (correctly) blocked everywhere, home-relative or not.
+    // A throwaway folder next to the repo avoids that collision.
+    const otherDrive = join(process.cwd(), 'eya-test-outside-home-tmp');
+    await mkdir(otherDrive, { recursive: true });
+    try {
+      await writeFile(join(otherDrive, 'notes-elsewhere.txt'), 'hello from elsewhere');
+      const result = await read({ path: join(otherDrive, 'notes-elsewhere.txt') });
+      expect(result.ok).toBe(true);
+      expect(result.data?.['content']).toBe('hello from elsewhere');
+    } finally {
+      await rm(otherDrive, { recursive: true, force: true });
+    }
   });
 
   it('handles a missing file and a folder', async () => {

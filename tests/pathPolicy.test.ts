@@ -4,9 +4,12 @@ import { tmpdir } from 'node:os';
 import {
   checkItemName,
   checkPath,
+  checkReadablePath,
   isBlockedFileName,
   isExecutablePath,
   isKnownFolderRoot,
+  isOtherUserProfileDir,
+  isSystemDirName,
   resolveChildPath,
   resolveFolder,
 } from '../src/main/security/pathPolicy';
@@ -146,6 +149,79 @@ describe('resolveChildPath', () => {
 
   it('still enforces the parent folder being inside home', () => {
     expect(resolveChildPath('C:\\Windows', 'Cases', folders).ok).toBe(false);
+  });
+});
+
+describe('isSystemDirName', () => {
+  it('flags Windows/program internals, case-insensitively', () => {
+    for (const name of ['Windows', 'PROGRAM FILES', 'Program Files (x86)', 'ProgramData', '$Recycle.Bin', 'System Volume Information']) {
+      expect(isSystemDirName(name), name).toBe(true);
+    }
+  });
+
+  it('does not flag an ordinary folder that merely sounds similar', () => {
+    for (const name of ['My Programs', 'Windows Notes', 'Program']) {
+      expect(isSystemDirName(name), name).toBe(false);
+    }
+  });
+});
+
+describe('isOtherUserProfileDir', () => {
+  // A clean, synthetic "C:\Users\TestUser"-shaped home, deliberately not
+  // nested under the real OS tmpdir (which sits under AppData — a name
+  // that's legitimately blocked everywhere, and would confuse these
+  // cross-account checks with an unrelated protection). No filesystem
+  // access happens here, so the path need not actually exist.
+  const home2 = 'C:\\FakeUsers\\TestUser';
+  const folders2: KnownFolders = { ...folders, home: home2 };
+  const usersRoot = 'C:\\FakeUsers';
+
+  it('flags a sibling profile folder, not this user\'s own home', () => {
+    expect(isOtherUserProfileDir(join(usersRoot, 'someone-else', 'Documents', 'a.txt'), folders2)).toBe(true);
+    expect(isOtherUserProfileDir(join(home2, 'Documents', 'a.txt'), folders2)).toBe(false);
+  });
+
+  it('does not flag the shared Public profile', () => {
+    expect(isOtherUserProfileDir(join(usersRoot, 'Public', 'Videos', 'a.mp4'), folders2)).toBe(false);
+  });
+
+  it('does not flag a path that is not under the users root at all', () => {
+    expect(isOtherUserProfileDir('D:\\somewhere-unrelated\\a.txt', folders2)).toBe(false);
+  });
+});
+
+describe('checkReadablePath', () => {
+  it('applies the exact same rules as checkPath inside the home folder', () => {
+    expect(checkReadablePath(join(home, 'Downloads', 'report.pdf'), folders)).toEqual(checkPath(join(home, 'Downloads', 'report.pdf'), folders));
+    expect(checkReadablePath(join(home, '.ssh', 'known_hosts'), folders).ok).toBe(false);
+  });
+
+  it('allows an ordinary file or folder elsewhere on the PC, outside the home folder', () => {
+    expect(checkReadablePath('D:\\Movies\\ConCity.mp4', folders).ok).toBe(true);
+    expect(checkReadablePath('D:\\Office\\petition.pdf', folders).ok).toBe(true);
+  });
+
+  it('still blocks secrets anywhere, not just inside home', () => {
+    expect(checkReadablePath('D:\\Backup\\.env', folders).ok).toBe(false);
+    expect(checkReadablePath('D:\\Backup\\id_rsa', folders).ok).toBe(false);
+    expect(checkReadablePath('D:\\Backup\\credentials.json', folders).ok).toBe(false);
+  });
+
+  it('blocks Windows/program internals on any drive', () => {
+    expect(checkReadablePath('C:\\Windows\\System32\\cmd.exe', folders).ok).toBe(false);
+    expect(checkReadablePath('C:\\Program Files\\App\\thing.txt', folders).ok).toBe(false);
+    expect(checkReadablePath('D:\\$Recycle.Bin\\x', folders).ok).toBe(false);
+  });
+
+  it('blocks another account\'s own profile, but not the shared Public one', () => {
+    const home2 = 'C:\\FakeUsers\\TestUser';
+    const folders2: KnownFolders = { ...folders, home: home2 };
+    expect(checkReadablePath('C:\\FakeUsers\\someone-else\\Documents\\a.txt', folders2).ok).toBe(false);
+    expect(checkReadablePath('C:\\FakeUsers\\Public\\a.txt', folders2).ok).toBe(true);
+  });
+
+  it('rejects an empty path', () => {
+    expect(checkReadablePath('   ', folders).ok).toBe(false);
   });
 });
 

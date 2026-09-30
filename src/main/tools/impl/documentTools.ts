@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { basename, extname } from 'node:path';
-import { checkPath } from '@main/security/pathPolicy';
+import { checkReadablePath } from '@main/security/pathPolicy';
 import type { KnownFolders } from '@main/security/pathPolicy';
 import type { SearchSource } from '@main/providers/ai/GeminiAIProvider';
 import type { Tool, ToolArgs, ToolResult } from '../types';
@@ -64,7 +64,7 @@ export function createDocumentTool(folders: KnownFolders, brain: DocumentBrain):
       }
       if (!brain.hasKey()) return { ok: false, summary: 'no Gemini key', error: 'Reading documents needs the Gemini key.' };
 
-      const check = checkPath(path, folders);
+      const check = checkReadablePath(path, folders);
       if (!check.ok) return { ok: false, summary: 'not allowed', error: check.reason };
       const mime = mimeTypeFor(check.path);
       if (mime === undefined) {

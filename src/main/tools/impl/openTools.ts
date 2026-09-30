@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { checkPath, isExecutablePath, resolveFolder } from '@main/security/pathPolicy';
+import { checkReadablePath, isExecutablePath, resolveFolder } from '@main/security/pathPolicy';
 import type { KnownFolders } from '@main/security/pathPolicy';
 import type { Tool, ToolArgs, ToolResult } from '../types';
 
@@ -41,13 +41,15 @@ export function createOpenTools(folders: KnownFolders, deps: OpenDeps): Tool[] {
     schema: {
       name: 'open_file',
       status: 'Opening the file…',
-      description: 'Open a document, picture or other file in its default app. Cannot open programs or scripts.',
+      description:
+        'Open (or play, for a video/audio file) a document, picture or other file in its default app, anywhere on ' +
+        'the PC, not just inside the user folder. Cannot open programs or scripts.',
       args: { path: { type: 'string', required: true, description: 'Full path to the file.' } },
     },
     async execute(args): Promise<ToolResult> {
       const path = stringArg(args, 'path');
       if (path === undefined) return { ok: false, summary: 'no path', error: 'A path is required.' };
-      const check = checkPath(path, folders);
+      const check = checkReadablePath(path, folders);
       if (!check.ok) return { ok: false, summary: 'not allowed', error: check.reason };
       if (isExecutablePath(check.path)) {
         return {
@@ -72,12 +74,12 @@ export function createOpenTools(folders: KnownFolders, deps: OpenDeps): Tool[] {
     schema: {
       name: 'open_folder',
       status: 'Opening the folder…',
-      description: 'Open a folder in File Explorer.',
+      description: 'Open a folder in File Explorer, anywhere on the PC, not just inside the user folder.',
       args: {
         folder: {
           type: 'string',
           required: true,
-          description: 'downloads, desktop, documents, pictures, videos, music, home, or a full path inside the user folder.',
+          description: 'downloads, desktop, documents, pictures, videos, music, home, or a full path anywhere on the PC.',
         },
       },
     },
@@ -86,7 +88,7 @@ export function createOpenTools(folders: KnownFolders, deps: OpenDeps): Tool[] {
       if (folder === undefined) return { ok: false, summary: 'no folder', error: 'A folder is required.' };
       const resolved = resolveFolder(folder, folders);
       if (resolved === null) return { ok: false, summary: 'unknown folder', error: `I don't know a folder called "${folder}".` };
-      const check = checkPath(resolved, folders);
+      const check = checkReadablePath(resolved, folders);
       if (!check.ok) return { ok: false, summary: 'not allowed', error: check.reason };
       try {
         if (!(await fs.stat(check.path)).isDirectory()) {

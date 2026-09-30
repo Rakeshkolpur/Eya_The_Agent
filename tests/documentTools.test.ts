@@ -119,6 +119,23 @@ describe('analyze_document', () => {
     answer = '';
     expect((await tool().execute({ path: join(folders.downloads, 'order.pdf'), question: 'q' })).ok).toBe(false);
   });
+
+  it('can read a document outside the user folder too', async () => {
+    // Not under the OS tmpdir: on this machine that sits under AppData,
+    // which is (correctly) blocked everywhere. A throwaway folder next to
+    // the repo stands in for "some other accessible drive" instead.
+    const other = join(process.cwd(), 'eya-test-outside-home-tmp');
+    await mkdir(other, { recursive: true });
+    try {
+      const path = join(other, 'petition.pdf');
+      await writeFile(path, 'PDFBYTES');
+      const result = await tool().execute({ path, question: 'What is it?' });
+      expect(result.ok).toBe(true);
+      expect(calls[0]?.mime).toBe('application/pdf');
+    } finally {
+      await rm(other, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('web_search', () => {
