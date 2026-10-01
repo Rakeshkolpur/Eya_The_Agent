@@ -21,7 +21,7 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function snapshotData(s: PageSnapshot): Record<string, unknown> {
+function snapshotFields(s: PageSnapshot): Record<string, unknown> {
   return {
     url: s.url,
     title: s.title,
@@ -29,8 +29,29 @@ function snapshotData(s: PageSnapshot): Record<string, unknown> {
     links: s.links,
     buttons: s.buttons,
     inputs: s.inputs,
+    ...(s.dialogs.length > 0 ? { dialogs: s.dialogs } : {}),
     ...(s.truncated ? { truncated: true } : {}),
   };
+}
+
+/** A fresh look at the page, every time — the only state a tool result is ever built from. */
+function currentPageData(action: string, target: string | null, stateChanged: boolean, snapshot: PageSnapshot): Record<string, unknown> {
+  return {
+    action,
+    ...(target !== null ? { target } : {}),
+    stateChanged,
+    currentPage: snapshotFields(snapshot),
+  };
+}
+
+/** Best-effort look at the page before an action, purely to tell whether the action changed it — never used to decide what to click. */
+async function urlAndTitleBefore(service: BrowserAutomationService): Promise<{ url: string; title: string } | null> {
+  try {
+    const s = await service.inspectPage();
+    return { url: s.url, title: s.title };
+  } catch {
+    return null;
+  }
 }
 
 export function createBrowserTools(service: BrowserAutomationService): Tool[] {
@@ -52,7 +73,11 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
       if (url === null) return { ok: false, summary: 'bad url', error: 'That is not a normal http or https address.' };
       try {
         const snapshot = await service.openWebsite(url.href);
-        return { ok: true, summary: `opened ${snapshot.title || url.hostname}`, data: snapshotData(snapshot) };
+        return {
+          ok: true,
+          summary: `opened ${snapshot.title || url.hostname}`,
+          data: currentPageData('open', url.href, true, snapshot),
+        };
       } catch (err) {
         return { ok: false, summary: 'could not open', error: `I could not open that website: ${describeError(err)}` };
       }
@@ -72,7 +97,7 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
     async execute(): Promise<ToolResult> {
       try {
         const snapshot = await service.inspectPage();
-        return { ok: true, summary: `looked at ${snapshot.title || snapshot.url}`, data: snapshotData(snapshot) };
+        return { ok: true, summary: `looked at ${snapshot.title || snapshot.url}`, data: currentPageData('inspect', null, false, snapshot) };
       } catch {
         return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
       }
@@ -89,23 +114,27 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
         'website that is already open — never web_search or open_url for that: those search the internet or load an ' +
         'unrelated page, not the thing the user is pointing at on the page in front of them. If nothing on the page ' +
         'matches, the result tells you what actually IS there, so you can try different wording or ask the user — ' +
-        'never guess a URL instead.',
+        'never guess a URL instead. The result always reflects the page exactly as it is after this click, including ' +
+        'anything unexpected that appeared (a popup, a login prompt, a different page than you might have guessed) — ' +
+        'read it fresh each time rather than assuming what should be there.',
       args: { text: { type: 'string', required: true, description: 'The visible text of the link, button or menu item to click.' } },
     },
     async execute(args): Promise<ToolResult> {
       const text = stringArg(args, 'text');
       if (text === undefined) return { ok: false, summary: 'no text', error: 'Text to click is required.' };
+      const before = await urlAndTitleBefore(service);
       try {
         const result = await service.clickOnPage(text);
+        const stateChanged = before === null || before.url !== result.snapshot.url || before.title !== result.snapshot.title;
         if (!result.ok) {
           return {
             ok: false,
             summary: 'not found',
             error: `"${text}" isn't visible on the current page.`,
-            data: snapshotData(result.snapshot),
+            data: currentPageData('click', text, false, result.snapshot),
           };
         }
-        return { ok: true, summary: `clicked "${text}"`, data: snapshotData(result.snapshot) };
+        return { ok: true, summary: `clicked "${text}"`, data: currentPageData('click', text, stateChanged, result.snapshot) };
       } catch (err) {
         return { ok: false, summary: 'click failed', error: `I could not click that: ${describeError(err)}` };
       }
@@ -132,17 +161,19 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
       if (label === undefined || value === undefined) {
         return { ok: false, summary: 'missing arguments', error: 'A field label and a value are required.' };
       }
+      const before = await urlAndTitleBefore(service);
       try {
         const result = await service.fillOnPage(label, value);
+        const stateChanged = before === null || before.url !== result.snapshot.url || before.title !== result.snapshot.title;
         if (!result.ok) {
           return {
             ok: false,
             summary: 'not found',
             error: `No field matching "${label}" is visible on the current page.`,
-            data: snapshotData(result.snapshot),
+            data: currentPageData('fill', label, false, result.snapshot),
           };
         }
-        return { ok: true, summary: `filled "${label}"`, data: snapshotData(result.snapshot) };
+        return { ok: true, summary: `filled "${label}"`, data: currentPageData('fill', label, stateChanged, result.snapshot) };
       } catch (err) {
         return { ok: false, summary: 'fill failed', error: `I could not fill that in: ${describeError(err)}` };
       }

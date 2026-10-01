@@ -46,7 +46,12 @@ export function looksLikeChatter(text: string): boolean {
   // "hey eya ..." is addressed to us; normalizeCommand has already stripped it.
   return first.length > 0 && CHATTER_STARTERS.has(first);
 }
-const MAX_AGENT_STEPS = 8;
+// A multi-step website task (open, click, observe, fill, click, observe
+// again...) can genuinely need more tool calls than a file-finding task ever
+// did — the number isn't known in advance, since it depends on what the live
+// page actually shows at each step, not a predefined workflow. The 90s time
+// budget below is the real ceiling against a runaway loop either way.
+const MAX_AGENT_STEPS = 16;
 const AGENT_BUDGET_MS = 90_000;
 const MAX_TOOL_RESULT_CHARS = 12_000;
 

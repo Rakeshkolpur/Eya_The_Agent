@@ -12,6 +12,7 @@ function snap(overrides: Partial<PageSnapshot> = {}): PageSnapshot {
     links: ['Home', 'Cause List', 'Case Status'],
     buttons: [],
     inputs: [],
+    dialogs: [],
     truncated: false,
     ...overrides,
   };
@@ -29,6 +30,7 @@ function fakeService(options: {
   clickResult?: ActOnPageResult;
   fillResult?: ActOnPageResult;
   openError?: Error;
+  inspectSnapshot?: PageSnapshot;
 } = {}): Fake {
   const opened: string[] = [];
   const clicked: string[] = [];
@@ -43,7 +45,7 @@ function fakeService(options: {
     },
     inspectPage: async () => {
       if (!hasPage) throw new Error('no website is open yet');
-      return snap();
+      return options.inspectSnapshot ?? snap();
     },
     clickOnPage: async (text) => {
       clicked.push(text);
@@ -62,13 +64,19 @@ function toolMap(service: BrowserAutomationService): Record<string, Tool> {
   return Object.fromEntries(createBrowserTools(service).map((t) => [t.schema.name, t]));
 }
 
+function currentPage(result: { data?: Record<string, unknown> }): Record<string, unknown> {
+  return result.data?.['currentPage'] as Record<string, unknown>;
+}
+
 describe('open_website', () => {
-  it('opens a valid https url and reports the page title', async () => {
+  it('opens a valid https url and reports the page title and a fresh observation', async () => {
     const f = fakeService();
     const result = await toolMap(f.service)['open_website']!.execute({ url: 'https://tshc.gov.in' });
     expect(result.ok).toBe(true);
     expect(f.opened).toEqual(['https://tshc.gov.in/']);
-    expect(result.data?.['title']).toBe('High Court for the State of Telangana');
+    expect(currentPage(result)['title']).toBe('High Court for the State of Telangana');
+    expect(result.data?.['action']).toBe('open');
+    expect(result.data?.['stateChanged']).toBe(true);
   });
 
   it('refuses a non-http(s) address rather than passing it through', async () => {
@@ -87,11 +95,13 @@ describe('open_website', () => {
 });
 
 describe('inspect_page', () => {
-  it('returns the current page snapshot', async () => {
+  it('returns the current page snapshot, never a stale or assumed one', async () => {
     const f = fakeService({ hasPage: true });
     const result = await toolMap(f.service)['inspect_page']!.execute({});
     expect(result.ok).toBe(true);
-    expect(result.data?.['links']).toEqual(['Home', 'Cause List', 'Case Status']);
+    expect(currentPage(result)['links']).toEqual(['Home', 'Cause List', 'Case Status']);
+    expect(result.data?.['action']).toBe('inspect');
+    expect(result.data?.['stateChanged']).toBe(false);
   });
 
   it('says plainly when nothing is open yet', async () => {
@@ -103,12 +113,26 @@ describe('inspect_page', () => {
 });
 
 describe('click_on_page', () => {
-  it('clicks the requested visible text and returns the resulting page', async () => {
-    const f = fakeService({ clickResult: { ok: true, snapshot: snap({ url: 'https://tshc.gov.in/causelist', title: 'Cause List' }) } });
+  it('clicks the requested visible text and returns the resulting page, flagged as changed', async () => {
+    const f = fakeService({
+      hasPage: true,
+      inspectSnapshot: snap({ url: 'https://tshc.gov.in', title: 'High Court for the State of Telangana' }),
+      clickResult: { ok: true, snapshot: snap({ url: 'https://tshc.gov.in/causelist', title: 'Cause List' }) },
+    });
     const result = await toolMap(f.service)['click_on_page']!.execute({ text: 'Cause List' });
     expect(result.ok).toBe(true);
     expect(f.clicked).toEqual(['Cause List']);
-    expect(result.data?.['title']).toBe('Cause List');
+    expect(currentPage(result)['title']).toBe('Cause List');
+    expect(result.data?.['action']).toBe('click');
+    expect(result.data?.['target']).toBe('Cause List');
+    expect(result.data?.['stateChanged']).toBe(true);
+  });
+
+  it('reports stateChanged false for a click that did not navigate anywhere (e.g. a menu toggle)', async () => {
+    const same = snap({ url: 'https://tshc.gov.in', title: 'High Court for the State of Telangana' });
+    const f = fakeService({ hasPage: true, inspectSnapshot: same, clickResult: { ok: true, snapshot: same } });
+    const result = await toolMap(f.service)['click_on_page']!.execute({ text: 'Cause List' });
+    expect(result.data?.['stateChanged']).toBe(false);
   });
 
   it('never invents a URL or falls back to search when nothing matches — it reports what IS on the page', async () => {
@@ -118,7 +142,18 @@ describe('click_on_page', () => {
     const result = await toolMap(f.service)['click_on_page']!.execute({ text: 'Cause List' });
     expect(result.ok).toBe(false);
     expect(result.summary).toBe('not found');
-    expect(result.data?.['links']).toEqual(['Home', 'Contact Us']);
+    expect(currentPage(result)['links']).toEqual(['Home', 'Contact Us']);
+  });
+
+  it('surfaces a dialog/popup that appeared, in the current page observation', async () => {
+    const f = fakeService({
+      clickResult: {
+        ok: true,
+        snapshot: snap({ dialogs: ['(a browser popup appeared and was dismissed: "Are you sure?")'] }),
+      },
+    });
+    const result = await toolMap(f.service)['click_on_page']!.execute({ text: 'Submit' });
+    expect(currentPage(result)['dialogs']).toEqual(['(a browser popup appeared and was dismissed: "Are you sure?")']);
   });
 
   it('requires text to click', async () => {
@@ -134,6 +169,8 @@ describe('fill_on_page', () => {
     const result = await toolMap(f.service)['fill_on_page']!.execute({ label: 'Advocate Code', value: '21295' });
     expect(result.ok).toBe(true);
     expect(f.filled).toEqual([{ label: 'Advocate Code', value: '21295' }]);
+    expect(result.data?.['action']).toBe('fill');
+    expect(result.data?.['target']).toBe('Advocate Code');
   });
 
   it('reports what fields actually exist when the label does not match', async () => {
@@ -142,7 +179,7 @@ describe('fill_on_page', () => {
     });
     const result = await toolMap(f.service)['fill_on_page']!.execute({ label: 'Advocate Code', value: '21295' });
     expect(result.ok).toBe(false);
-    expect(result.data?.['inputs']).toEqual(['Case Number', 'Year']);
+    expect(currentPage(result)['inputs']).toEqual(['Case Number', 'Year']);
   });
 
   it('requires both a label and a value', async () => {

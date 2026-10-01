@@ -11,6 +11,8 @@ export interface PageSnapshot {
   readonly links: readonly string[];
   readonly buttons: readonly string[];
   readonly inputs: readonly string[];
+  /** A visible modal/dialog/alert box's own text, if one is open — e.g. a login prompt, a warning, a cookie banner. Empty when there isn't one. */
+  readonly dialogs: readonly string[];
   readonly truncated: boolean;
 }
 
@@ -38,11 +40,13 @@ export function buildSnapshot(
   rawLinks: readonly string[],
   rawButtons: readonly string[],
   rawInputs: readonly string[],
+  rawDialogs: readonly string[] = [],
 ): PageSnapshot {
   const headings = dedupeNonEmpty(rawHeadings);
   const links = dedupeNonEmpty(rawLinks);
   const buttons = dedupeNonEmpty(rawButtons);
   const inputs = dedupeNonEmpty(rawInputs);
+  const dialogs = dedupeNonEmpty(rawDialogs);
   const truncated =
     headings.length > MAX_ITEMS_PER_CATEGORY ||
     links.length > MAX_ITEMS_PER_CATEGORY ||
@@ -55,6 +59,7 @@ export function buildSnapshot(
     links: links.slice(0, MAX_ITEMS_PER_CATEGORY),
     buttons: buttons.slice(0, MAX_ITEMS_PER_CATEGORY),
     inputs: inputs.slice(0, MAX_ITEMS_PER_CATEGORY),
+    dialogs: dialogs.slice(0, MAX_ITEMS_PER_CATEGORY),
     truncated,
   };
 }

@@ -36,6 +36,13 @@ describe('buildSnapshot', () => {
     expect(snap.url).toBe('https://tshc.gov.in');
     expect(snap.title).toBe('High Court for the State of Telangana');
   });
+
+  it('defaults to no dialogs when none are given, and dedupes/caps them the same as everything else', () => {
+    const noDialogs = buildSnapshot('u', 't', [], [], [], []);
+    expect(noDialogs.dialogs).toEqual([]);
+    const withDialog = buildSnapshot('u', 't', [], [], [], [], ['Please sign in', 'Please sign in']);
+    expect(withDialog.dialogs).toEqual(['Please sign in']);
+  });
 });
 
 describe('findBestTextMatchIndex', () => {

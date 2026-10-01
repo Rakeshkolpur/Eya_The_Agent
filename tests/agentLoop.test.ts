@@ -249,7 +249,7 @@ describe('when things go wrong', () => {
     const endless = Array.from({ length: 20 }, () => step([call('find_file')]));
     const ai = new ScriptedAI(endless);
     const result = await run(engineWith(ai), 'loop forever');
-    expect(ai.seen).toHaveLength(8);
+    expect(ai.seen).toHaveLength(16);
     expect(result.ok).toBe(false);
     expect(result.spoken).toMatch(/more steps/);
   });

@@ -29,6 +29,14 @@ export interface BrowserAutomationService {
   close(): Promise<void>;
 }
 
+/** Visible on-page modal/alert boxes — a login prompt, a cookie banner, a warning — as opposed to a native browser dialog (see `lastNativeDialog`, which these never cover). */
+async function collectDialogTexts(page: Page): Promise<string[]> {
+  return page
+    .locator('[role="dialog"]:visible, [role="alertdialog"]:visible, dialog[open]:visible')
+    .allTextContents()
+    .catch(() => []);
+}
+
 /** Everything a visible, interactive, labelled form control exposes to a user looking at the page. */
 async function collectInputLabels(page: Page): Promise<string[]> {
   return page.evaluate(() => {
@@ -57,6 +65,13 @@ async function collectInputLabels(page: Page): Promise<string[]> {
 export class PlaywrightBrowserService implements BrowserAutomationService {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  // A native alert()/confirm()/prompt() is modal at the OS/browser level and
+  // would otherwise hang every subsequent Playwright call on this page
+  // forever — there is no "leave it open and ask the user" option the way
+  // there is for an on-page (DOM) dialog. Auto-dismissed (never accepted: a
+  // confirm() OK could trigger something irreversible) and surfaced in the
+  // next snapshot instead, so the model at least finds out it happened.
+  private lastNativeDialog: string | null = null;
 
   constructor(private readonly profileDir: string) {}
 
@@ -88,6 +103,11 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
     this.context ??= await this.launchContext();
     const pages = this.context.pages();
     this.page = pages[0] ?? (await this.context.newPage());
+    this.page.on('dialog', (dialog) => {
+      this.lastNativeDialog = dialog.message();
+      log.info('native browser dialog auto-dismissed', { type: dialog.type(), message: dialog.message() });
+      void dialog.dismiss();
+    });
     return this.page;
   }
 
@@ -103,7 +123,7 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
   }
 
   private async snapshot(page: Page): Promise<PageSnapshot> {
-    const [title, headings, links, buttonTexts, inputButtonValues, inputs] = await Promise.all([
+    const [title, headings, links, buttonTexts, inputButtonValues, inputs, domDialogs] = await Promise.all([
       page.title(),
       page.locator('h1:visible, h2:visible, h3:visible').allTextContents(),
       page.locator('a:visible').allTextContents(),
@@ -112,8 +132,12 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
         .locator('input[type="submit"]:visible, input[type="button"]:visible')
         .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value ?? '')),
       collectInputLabels(page),
+      collectDialogTexts(page),
     ]);
-    return buildSnapshot(page.url(), title, headings, links, [...buttonTexts, ...inputButtonValues], inputs);
+    const nativeDialog = this.lastNativeDialog;
+    this.lastNativeDialog = null; // report it once, in the very next snapshot, then stop
+    const dialogs = nativeDialog === null ? domDialogs : [`(a browser popup appeared and was dismissed: "${nativeDialog}")`, ...domDialogs];
+    return buildSnapshot(page.url(), title, headings, links, [...buttonTexts, ...inputButtonValues], inputs, dialogs);
   }
 
   async openWebsite(url: string): Promise<PageSnapshot> {
