@@ -89,9 +89,9 @@ Note that `npm run dev` rebuilds the interface live but does **not** restart the
 
 ## Important: Gemini limits
 
-A free Google AI Studio key has **daily request limits per model**, and the preview models are often "overloaded". A voice assistant spends requests quickly, so on the free tier you can run out mid-day. When that happens Eya says so ("I've used up today's free Gemini limit"), typed and spoken local commands keep working, and the offline voice takes over. Turning on billing for the project in Google AI Studio removes the practical limit.
+A free Google AI Studio key has **daily request limits per model**, and the preview models are often "overloaded". A voice assistant spends requests quickly, so on the free tier you can run out mid-day. When that happens Eya says so ("I've used up today's free Gemini limit. It resets tomorrow, or you can turn on billing in Google AI Studio") — this is now honest for `web_search` and `analyze_document` specifically too, not just the main conversation; a real gap found live, where both had their own generic "search failed"/"could not read that file" wording that swallowed the actual reason, leaving the model to improvise something vaguer ("I'm still having trouble...") instead of the real, actionable message. Typed and spoken local commands keep working regardless, and the offline voice takes over.
 
-Eya spreads load across models (limits are per model), retries "high demand" errors after a short wait, and stops asking a model whose daily quota is spent.
+Eya spreads load across models (limits are per model), retries "high demand" errors after a short wait, and stops asking a model whose daily quota is spent. If `web_search` itself fails this way while trying to find a website's URL, and the site is one Eya is genuinely confident she already knows the real address of (not a guess built from its name), she'll open it directly rather than stopping there — `open_website`'s own result (does it load, is it obviously the right site) is still the real check, so a wrong recollection surfaces immediately rather than silently succeeding. Turning on billing for the project in Google AI Studio removes the practical limit.
 
 Where the quota goes:
 

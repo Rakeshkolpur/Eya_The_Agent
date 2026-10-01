@@ -3,6 +3,7 @@ import { basename, extname } from 'node:path';
 import { checkReadablePath } from '@main/security/pathPolicy';
 import type { KnownFolders } from '@main/security/pathPolicy';
 import type { SearchSource } from '@main/providers/ai/GeminiAIProvider';
+import { describeAIFailure } from '@main/agent/AgentEngine';
 import type { Tool, ToolArgs, ToolResult } from '../types';
 
 /** The slice of the Gemini provider these tools need. */
@@ -81,7 +82,12 @@ export function createDocumentTool(folders: KnownFolders, brain: DocumentBrain):
           return { ok: false, summary: 'too large', error: 'That file is too large for me to read (over 14 MB).' };
         }
         const bytes = await fs.readFile(check.path);
-        const answer = await brain.analyzeFile(bytes.toString('base64'), mime, question);
+        let answer: string;
+        try {
+          answer = await brain.analyzeFile(bytes.toString('base64'), mime, question);
+        } catch (err) {
+          return { ok: false, summary: 'Gemini failed', error: describeAIFailure(err) };
+        }
         if (answer.length === 0) return { ok: false, summary: 'no answer', error: 'I could not get anything from that file.' };
         return {
           ok: true,
@@ -124,8 +130,8 @@ export function createWebSearchTool(brain: DocumentBrain): Tool {
           summary: 'searched the web',
           data: { answer: text.slice(0, MAX_ANSWER_CHARS), sources },
         };
-      } catch {
-        return { ok: false, summary: 'search failed', error: 'The web search failed.' };
+      } catch (err) {
+        return { ok: false, summary: 'search failed', error: describeAIFailure(err) };
       }
     },
   };
