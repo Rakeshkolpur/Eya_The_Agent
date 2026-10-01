@@ -107,7 +107,9 @@ export function createWebSearchTool(brain: DocumentBrain): Tool {
       status: 'Searching the web…',
       description:
         'Search the web with Google and get a short, sourced answer. Use it for current information, news, court orders, ' +
-        'prices, or anything you are not sure about. To just show results in a browser instead, use open_url.',
+        'prices, finding a website\'s real official URL, or anything you are not sure about. To just show results in a ' +
+        "browser instead, use open_url. NEVER use this to navigate within a website that is already open (\"go to " +
+        'Cause List", "click Sent") — that is click_on_page\'s job, on the real page, not a search.',
       args: { query: { type: 'string', required: true, description: 'What to look up.' } },
     },
     async execute(args): Promise<ToolResult> {

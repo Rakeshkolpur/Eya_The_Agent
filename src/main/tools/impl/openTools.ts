@@ -108,8 +108,10 @@ export function createOpenTools(folders: KnownFolders, deps: OpenDeps): Tool[] {
       name: 'open_url',
       status: 'Opening the page…',
       description:
-        'Open a web page in a browser. To search Google in the browser, open https://www.google.com/search?q=<url-encoded query>. ' +
-        'Only http and https addresses are allowed.',
+        "Open a web page in the user's own regular browser, just to show it to them — a one-off, not something you'll " +
+        'navigate further. To search Google in the browser, open https://www.google.com/search?q=<url-encoded query>. ' +
+        'Only http and https addresses are allowed. If you need to click around on the page afterward (navigate within ' +
+        'a site, read what\'s on it, fill a form), use open_website instead, not this.',
       args: {
         url: { type: 'string', required: true, description: 'The full https:// address.' },
         browser: {

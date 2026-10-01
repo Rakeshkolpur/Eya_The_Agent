@@ -42,7 +42,11 @@ export type SensitiveAction =
   | 'empty_recycle_bin'
   | 'lock_screen'
   | 'restart_computer'
-  | 'shutdown_computer';
+  | 'shutdown_computer'
+  | 'open_website'
+  | 'inspect_page'
+  | 'click_on_page'
+  | 'fill_on_page';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   open_application: 'safe',
@@ -79,6 +83,12 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   // Interrupts every other running application on the machine, not just Eya.
   restart_computer: 'high_risk',
   shutdown_computer: 'high_risk',
+  // Reading and clicking around a page a human could see and click themselves.
+  open_website: 'safe',
+  inspect_page: 'safe',
+  click_on_page: 'safe',
+  // Typing into a visible field, not submitting anything destructive by itself.
+  fill_on_page: 'safe',
 };
 
 export interface PermissionRequest {

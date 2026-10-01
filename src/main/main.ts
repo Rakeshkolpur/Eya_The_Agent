@@ -1,3 +1,4 @@
+import { join } from 'node:path';
 import { app, clipboard, ipcMain, session, shell } from 'electron';
 import { OrbWindow } from '@main/windows/OrbWindow';
 import { GlobalShortcutManager } from '@main/shortcuts/GlobalShortcut';
@@ -16,6 +17,8 @@ import { createClipboardTools } from '@main/tools/impl/clipboardTools';
 import { closeFileTool } from '@main/tools/impl/closeFile';
 import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/systemTools';
 import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
+import { createBrowserTools } from '@main/tools/impl/browserTools';
+import { PlaywrightBrowserService } from '@main/browser/BrowserAutomationService';
 import { launchBrowser } from '@main/windowsApi/appPaths';
 import { registerLiveBridge } from '@main/live/liveBridge';
 import { loadWakeWordDetector } from '@main/wake/loadWakeWordDetector';
@@ -115,6 +118,8 @@ async function bootstrap(): Promise<void> {
     tools.register(tool);
   }
   for (const tool of createRecycleBinTools(folders)) tools.register(tool);
+  const browserService = new PlaywrightBrowserService(join(app.getPath('userData'), 'browser-profile'));
+  for (const tool of createBrowserTools(browserService)) tools.register(tool);
 
   const window = orb.create();
   const getSender = () => (window.isDestroyed() ? null : window.webContents);
@@ -193,6 +198,7 @@ async function bootstrap(): Promise<void> {
     shortcuts.unregisterAll();
     speechStream.cancelAll();
     void tts.dispose();
+    void browserService.close();
   });
   app.on('second-instance', () => orb.show());
 }
