@@ -59,6 +59,7 @@ export type SensitiveAction =
   | 'list_browser_tabs'
   | 'switch_browser_tab'
   | 'connect_chrome'
+  | 'take_screenshot'
   | 'browser_sensitive_click';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
@@ -119,6 +120,8 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   switch_browser_tab: 'safe',
   // Starts a short, user-initiated pairing window; nothing connects without the extension the user installed.
   connect_chrome: 'safe',
+  // Saves a NEW image of the page the user asked for into their own Desktop; never overwrites, and the picture is never shown to the assistant.
+  take_screenshot: 'safe',
   // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
   browser_sensitive_click: 'confirm',
 };

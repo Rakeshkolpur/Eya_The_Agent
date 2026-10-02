@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { BrowserSessionManager, parseBrowserMode } from '../src/main/browser/BrowserSessionManager';
 import type { BrowserLauncher, BrowserMode, ManagedBridge, UserBrowser } from '../src/main/browser/BrowserSessionManager';
-import type { BrowserAutomationService } from '../src/main/browser/BrowserAutomationService';
+import type { BrowserAutomationService, BrowserCapture, ScreenshotImage } from '../src/main/browser/BrowserAutomationService';
 import { BrowserUnavailableError } from '../src/main/browser/errors';
 import type { PageSnapshot } from '../src/main/browser/pageSnapshot';
 import type { BridgeInfo } from '../src/main/chrome/ChromeBridge';
@@ -97,7 +97,9 @@ function rig(
   const world = new BrowserWorldTracker(() => clock.now);
   const inspectQueue = new Map<BrowserName, PageSnapshot[]>();
 
-  const userService = (browser: BrowserName): UserBrowser => ({
+  const shot = (environment: 'your_browser' | 'eya_browser', browser?: BrowserName): ScreenshotImage => ({ bytes: Buffer.from('png'), mime: 'image/png', url: 'https://x.example/', title: browser ?? 'eya', environment, ...(browser !== undefined ? { browser } : {}) });
+
+  const userService = (browser: BrowserName): UserBrowser & BrowserCapture => ({
     openWebsite: async (url) => (calls.push(`${browser}:open:${url}`), snap(`${browser} page`, { url })),
     inspectPage: async () => {
       calls.push(`${browser}:inspect`);
@@ -113,6 +115,7 @@ function rig(
     reload: async () => (calls.push(`${browser}:reload`), { ok: true as const, snapshot: snap(`${browser} page`) }),
     scroll: async (d) => (calls.push(`${browser}:scroll:${d}`), { ok: true as const, snapshot: snap(`${browser} page`) }),
     searchWeb: async () => (calls.push(`${browser}:search`), []),
+    screenshot: async () => (calls.push(`${browser}:screenshot`), shot('your_browser', browser)),
     close: async () => undefined,
     listTabs: async () => (calls.push(`${browser}:tabs`), world.tabsOf(browser).map((t) => ({ browser, tabId: t.tabId, title: t.title, url: t.url, active: t.active, openedByEya: false, workingHere: false }))),
     switchToTab: async (id) => (calls.push(`${browser}:switch:${id}`), snap(`${browser} tab ${id}`)),
@@ -133,8 +136,9 @@ function rig(
       reload: ok("reload"),
       scroll: ok("scroll"),
       searchWeb: async () => (calls.push(name + ":searchWeb"), []),
+      screenshot: async () => (calls.push(name + ":screenshot"), shot('eya_browser')),
       close: async () => undefined,
-    };
+    } as BrowserAutomationService & BrowserCapture;
   };
 
   const launcher: BrowserLauncher = {
@@ -613,5 +617,75 @@ describe('an extension that needs a reload (installed, on, but the old version)'
     const r = rig({ knocking: ['edge'], outdated: ['edge'] });
     const err = await caught(r.manager.inspectPage());
     expect(err.detail.why).toBe('needs_reload');
+  });
+});
+
+describe('taking a screenshot of the page that is open', () => {
+  it('photographs the tab in front in the connected browser, even though Eya never opened a page', async () => {
+    const r = rig({ connected: ['chrome'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://user-opened.example/' }]);
+    const image = await r.manager.screenshot();
+    expect(r.calls).toEqual(['chrome:screenshot']);
+    expect(image).toMatchObject({ browser: 'chrome', environment: 'your_browser' });
+  });
+
+  it('with Chrome and Edge both connected, it is the browser the user is in (the focused window), not a guess', async () => {
+    const r = rig({ connected: ['chrome', 'edge'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://a.example/' }], false);
+    r.setTabs('edge', [{ tabId: 1, url: 'https://b.example/' }], true);
+    expect((await r.manager.screenshot()).browser).toBe('edge');
+    expect(r.calls).toEqual(['edge:screenshot']);
+  });
+
+  it('when only one browser is connected it is that one, whichever the user last touched', async () => {
+    const r = rig({ connected: ['edge'] });
+    r.setTabs('edge', [{ tabId: 1, url: 'https://b.example/' }]);
+    expect((await r.manager.screenshot()).browser).toBe('edge');
+  });
+
+  it('after Eya opened a site, the picture is of that browser', async () => {
+    const r = rig({ connected: ['chrome', 'edge'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://tshc.gov.in/' }], true);
+    r.setTabs('edge', [{ tabId: 1, url: 'https://other.example/' }], false);
+    await r.manager.openWebsite('https://tshc.gov.in/');
+    r.calls.length = 0;
+    expect((await r.manager.screenshot()).browser).toBe('chrome');
+  });
+
+  it('with no browser connected it says why — the same reasons as everything else — and never reaches for another window', async () => {
+    const r = rig({ knocking: ['edge'], outdated: ['edge'] });
+    const err = await caught(r.manager.screenshot());
+    expect(err.detail.why).toBe('needs_reload');
+    const none = rig();
+    expect((await caught(none.manager.screenshot())).detail.why).toBe('not_connected');
+    expect(r.calls.concat(none.calls)).toEqual([]);
+  });
+
+  it('if the task is in Eya\'s own separate window (the user agreed to that), that window is the one photographed', async () => {
+    const r = rig({ connected: ['chrome'] });
+    await r.manager.openWebsite('https://x.example/', { isolated: true });
+    r.calls.length = 0;
+    const image = await r.manager.screenshot();
+    expect(r.calls).toEqual(['isolated:screenshot']);
+    expect(image.environment).toBe('eya_browser');
+  });
+
+  it('mode eya_browser photographs Eya\'s own window, as every other action does in that mode', async () => {
+    const r = rig({ mode: 'eya_browser' });
+    expect((await r.manager.screenshot()).environment).toBe('eya_browser');
+  });
+
+  it('a connection that cannot take pictures says so instead of failing strangely', async () => {
+    const r = rig({ connected: ['chrome'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/' }]);
+    const bare = new BrowserSessionManager({
+      bridge: r.bridge,
+      world: r.world,
+      isolated: { close: async () => undefined } as unknown as BrowserAutomationService,
+      launcher: { installed: async () => [], running: async () => [], launch: async () => false },
+      mode: 'user_browser',
+      createService: () => ({ close: async () => undefined }) as unknown as UserBrowser,
+    });
+    await expect(bare.screenshot()).rejects.toThrow(/not available/);
   });
 });

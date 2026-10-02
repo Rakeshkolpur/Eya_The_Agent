@@ -19,6 +19,7 @@ import { closeFileTool } from '@main/tools/impl/closeFile';
 import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/systemTools';
 import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
 import { createBrowserTools } from '@main/tools/impl/browserTools';
+import { createScreenshotTool } from '@main/tools/impl/screenshotTool';
 import { PlaywrightBrowserService } from '@main/browser/PlaywrightBrowserService';
 import { BrowserSessionManager, parseBrowserMode } from '@main/browser/BrowserSessionManager';
 import { createBrowserLauncher } from '@main/browser/browserLauncher';
@@ -193,6 +194,7 @@ async function bootstrap(): Promise<void> {
   for (const tool of createBrowserTools(browserService, undefined, { tabs: browserService, connector: chromeConnector, session: browserService })) {
     tools.register(tool);
   }
+  tools.register(createScreenshotTool({ capture: browserService, folders }));
 
   const window = orb.create();
   const getSender = () => (window.isDestroyed() ? null : window.webContents);

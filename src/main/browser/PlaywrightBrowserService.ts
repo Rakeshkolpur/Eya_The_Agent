@@ -2,10 +2,12 @@ import { ChromeBrowserService } from '@main/chrome/ChromeBrowserService';
 import type {
   ActOnPageResult,
   BrowserAutomationService,
+  BrowserCapture,
   ClickGate,
   FillOptions,
   FindOnPageResult,
   ReadPageResult,
+  ScreenshotImage,
   ScrollDirection,
 } from './BrowserAutomationService';
 import { PlaywrightPageHost } from './PlaywrightPageHost';
@@ -18,7 +20,7 @@ import type { WebSearchHit } from './webSearchResults';
  * user's everyday one, so nothing in it starts signed in. All the real work is the same service and the same page
  * script that drive the user's own browser through the extension; only the transport differs.
  */
-export class PlaywrightBrowserService implements BrowserAutomationService {
+export class PlaywrightBrowserService implements BrowserAutomationService, BrowserCapture {
   private readonly host: PlaywrightPageHost;
   private readonly inner: ChromeBrowserService;
 
@@ -59,6 +61,9 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
   }
   searchWeb(query: string): Promise<WebSearchHit[]> {
     return this.inner.searchWeb(query);
+  }
+  screenshot(): Promise<ScreenshotImage> {
+    return this.inner.screenshot();
   }
   async close(): Promise<void> {
     await this.host.close();

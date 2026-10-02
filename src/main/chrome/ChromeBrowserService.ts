@@ -3,13 +3,17 @@ import { rootLogger } from '@main/logging/logger';
 import type {
   ActOnPageResult,
   BrowserAutomationService,
+  BrowserCapture,
   BrowserTabControl,
   ClickGate,
   FillOptions,
   FindOnPageResult,
   ReadPageResult,
+  ScreenshotImage,
   ScrollDirection,
 } from '@main/browser/BrowserAutomationService';
+import { decodeImageDataUrl } from '@main/browser/screenshotImage';
+import { redactUrl } from '@main/browser/redactUrl';
 import type { BrowserName } from './protocol';
 import { withExtras } from '@main/browser/pageSnapshot';
 import { BrowserUnavailableError } from '@main/browser/errors';
@@ -101,7 +105,7 @@ export interface PageAgentServiceOptions {
 const DEFAULT_UNAVAILABLE =
   'Eya has lost her connection to your browser. Make sure the browser is open with the Eya Browser Bridge extension turned on (or ask Eya to "connect my browser").';
 
-export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl {
+export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl, BrowserCapture {
   private readonly environment: BrowserEnvironment;
   private readonly unavailableMessage: string;
   private readonly browserName: BrowserName | undefined;
@@ -305,6 +309,35 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
     }
     if (lastError !== undefined) throw lastError instanceof Error ? lastError : new Error(String(lastError));
     return [];
+  }
+
+  /**
+   * A picture of the page showing in the browser right now (the tab in front, or the one Eya is on in her own window).
+   * Only what is visible — the browser gives an extension no way to capture the whole scroll length without a permission
+   * this one declines. The image is validated, never interpreted, and never leaves this machine.
+   */
+  async screenshot(): Promise<ScreenshotImage> {
+    let raw: Record<string, unknown>;
+    try {
+      raw = asRecord(await this.call('screenshot', {}, 30_000));
+    } catch (err) {
+      // An extension from before screenshots existed does not know the request.
+      if (err instanceof BridgeError && err.code === 'extension_error' && /unknown request/i.test(err.message)) {
+        throw new Error(
+          "The Eya extension in this browser is from before screenshots existed. Ask the user to reload it once: open the browser's extensions page and click the circular reload arrow on \"Eya Browser Bridge\".",
+        );
+      }
+      throw err;
+    }
+    const image = decodeImageDataUrl(raw['dataUrl']);
+    if (image === null) throw new Error('The browser did not return a usable picture of the page.');
+    return {
+      ...image,
+      url: typeof raw['url'] === 'string' ? redactUrl(raw['url']) : '',
+      title: typeof raw['title'] === 'string' ? raw['title'].slice(0, 200) : '',
+      environment: this.environment,
+      ...(this.browserName !== undefined ? { browser: this.browserName } : {}),
+    };
   }
 
   async listTabs(): Promise<BrowserTabInfo[]> {

@@ -24,7 +24,7 @@ import type { PageSnapshot } from '../../src/main/browser/pageSnapshot';
 import type { ActOnPageResult } from '../../src/main/browser/BrowserAutomationService';
 import { startTestSite } from '../fixtures/chrome-test-site/server.mjs';
 import { registerJourneyScenarios } from './sharedScenarios';
-import { findBrowserExe, prepareExtensionCopy, sleep, startTestBrowser, waitFor } from './liveSupport';
+import { findBrowserExe, prepareExtensionCopy, sleep, startTestBrowser, userCloseTab, userOpenTab, waitFor } from './liveSupport';
 import type { TestBrowser } from './liveSupport';
 
 const live = process.env['EYA_LIVE_BROWSER'] === '1';
@@ -95,7 +95,7 @@ describe.skipIf(!live || findBrowserExe(KIND) === undefined)('Eya Browser Bridge
 
   it('paired with the real extension in a real browser', () => {
     expect(bridge.isConnected(EXPECTED_BROWSER)).toBe(true);
-    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.2.0' });
+    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.3.0' });
     expect(secrets.hashes.get(EXPECTED_BROWSER)).toBeDefined();
   });
 
@@ -257,6 +257,41 @@ describe.skipIf(!live || findBrowserExe(KIND) === undefined)('Eya Browser Bridge
   it('refuses to open anything but a normal web address', async () => {
     await expect(bridge.request('open_url', { url: 'file:///C:/Windows/win.ini' }, undefined, EXPECTED_BROWSER)).rejects.toThrow(/http/);
     await expect(bridge.request('open_url', { url: 'javascript:alert(1)' }, undefined, EXPECTED_BROWSER)).rejects.toThrow(/http|valid/);
+  }, 30_000);
+
+  it('takes a real screenshot of the page in front: a real PNG of the window, and the page itself is left alone', async () => {
+    await svc.openWebsite(`${base}/orders.html`);
+    const before = await svc.inspectPage();
+    const shot = await svc.screenshot();
+    expect(shot.mime).toBe('image/png');
+    expect(shot.bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(true);
+    expect(shot.width ?? 0).toBeGreaterThan(300);
+    expect(shot.height ?? 0).toBeGreaterThan(200);
+    expect(shot.bytes.length).toBeGreaterThan(3000); // a rendered page, not an empty frame
+    expect(shot.url).toContain('/orders.html');
+    expect(shot.title).toBe(before.title);
+    expect(shot).toMatchObject({ environment: 'your_browser', browser: EXPECTED_BROWSER });
+    const after = await svc.inspectPage();
+    expect({ url: after.url, title: after.title }).toEqual({ url: before.url, title: before.title });
+  }, 30_000);
+
+  it('photographs a page the USER opened themselves — one Eya never touched — as long as it is the one in front', async () => {
+    await userOpenTab(9334, `${base}/forms.html`);
+    await sleep(1500); // the tab loads and comes to the front; the browser allows about two captures a second
+    const shot = await svc.screenshot();
+    expect(shot.url).toContain('/forms.html');
+    expect(shot.bytes.subarray(1, 4).toString('ascii')).toBe('PNG');
+    await userCloseTab(9334, '/forms.html');
+    await sleep(700);
+  }, 30_000);
+
+  it('says plainly that a browser-internal page cannot be photographed', async () => {
+    const tabs = await svc.listTabs();
+    const internal = tabs.find((t) => t.url === '' || /^(about|edge|chrome):/.test(t.url));
+    if (internal === undefined) return; // no internal tab left open in this run
+    await svc.switchToTab(internal.tabId);
+    await sleep(700);
+    await expect(svc.screenshot()).rejects.toThrow(/browser page|not a website|private window|would not take/i);
   }, 30_000);
 
   it('reconnects by itself after the bridge restarts, using the stored secret (no new pairing)', async () => {

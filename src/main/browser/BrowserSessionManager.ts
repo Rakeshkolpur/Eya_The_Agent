@@ -6,12 +6,14 @@ import type { BrowserName } from '@main/chrome/protocol';
 import type {
   ActOnPageResult,
   BrowserAutomationService,
+  BrowserCapture,
   BrowserTabControl,
   ClickGate,
   FillOptions,
   FindOnPageResult,
   OpenWebsiteOptions,
   ReadPageResult,
+  ScreenshotImage,
   ScrollDirection,
 } from './BrowserAutomationService';
 import { selectBrowser } from './browserSelection';
@@ -151,7 +153,7 @@ function needsReload(browsers: readonly BrowserName[]): BrowserUnavailableError 
  *   - notices when the user changed something themselves, and says so instead of carrying on from a stale picture;
  *   - can wait, then carry on by itself, while the user signs in or completes a check.
  */
-export class BrowserSessionManager implements BrowserAutomationService, BrowserTabControl {
+export class BrowserSessionManager implements BrowserAutomationService, BrowserTabControl, BrowserCapture {
   private pinned: Pinned = null;
   private readonly services = new Map<BrowserName, UserBrowser>();
   private readonly lastActionAt = new Map<BrowserName, number>();
@@ -504,6 +506,31 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
   ): Promise<{ readonly closed: boolean; readonly remainingTabs: number }> {
     const target = this.browserForTab(tabId, options.browser);
     return this.service(target).closeTab(tabId, { ...(options.allowUserTab !== undefined ? { allowUserTab: options.allowUserTab } : {}) });
+  }
+
+  // ---------------------------------------------------------------- screenshot
+  /**
+   * A picture of the web page the user is looking at: the tab in front in the browser they are using (which is the one
+   * Eya opened, if she just did), or — only if that is what the task is in — Eya's own window. It reads nothing from the
+   * page, so it works for any page the user has open, not just ones Eya opened.
+   */
+  async screenshot(): Promise<ScreenshotImage> {
+    const pinned = this.pinned;
+    if (pinned?.kind === 'isolated' || (pinned === null && this.deps.mode === 'eya_browser')) {
+      const own = this.deps.isolated as Partial<BrowserCapture>;
+      if (typeof own.screenshot !== 'function') throw new Error('Screenshots are not available in this window.');
+      return own.screenshot();
+    }
+    const connected = this.deps.bridge.connectedBrowsers();
+    const active = this.deps.world.activeBrowser();
+    const browser =
+      active !== null && connected.includes(active) ? active : pinned?.kind === 'user' && connected.includes(pinned.browser) ? pinned.browser : connected[0];
+    if (browser === undefined) throw this.notConnectedError();
+    const svc = this.service(browser) as Partial<BrowserCapture>;
+    if (typeof svc.screenshot !== 'function') throw new Error('Screenshots are not available through this browser connection.');
+    const image = await svc.screenshot();
+    log.info('screenshot taken', { browser, bytes: image.bytes.length });
+    return { ...image, browser };
   }
 
   // ------------------------------------------------------- status and waiting

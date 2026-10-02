@@ -23,7 +23,7 @@ Use Chrome *and* Edge? Add the extension to both, then say "connect my browser" 
 each browser separately, and both stay connected at the same time.
 
 **After updating Eya, reload the extension** (the circular arrow on its card). Each connection starts with a
-version check (protocol 2, extension 0.2.0); an older extension is refused with a plain message on the options
+version check (protocol 2, extension 0.3.0); an older extension is refused with a plain message on the options
 page asking you to reload it.
 
 The toolbar icon shows **ON** when Eya is connected. The extension's options page shows status.
@@ -43,6 +43,11 @@ go back, forward, reload, follow a link that opens a new tab, notice a download 
 landed, open a site (reusing a tab you already have for it, else a new tab in this same browser), list
 your tabs and windows, switch to one, close a tab Eya opened (one you opened is refused unless Eya says you agreed).
 Every action ends with a fresh look at the page so Eya works from what is really there, not from what she expected.
+
+**Screenshots:** when you ask Eya for one, the extension takes a picture of the tab in front (what is visible in the window)
+and hands it to Eya, who saves it on your Desktop. It uses the browser's own capture call under the access it already has — no new
+permission — touches nothing in the page, and cannot capture browser pages (`chrome://`, `edge://`) or private windows. Needs
+extension 0.3.0: reload the extension once after updating Eya.
 
 **What it tells Eya about the browser itself:** when it connects it says which browser and version it is, its
 extension version, what it can do, and which windows and tabs are open (address and title only; private windows

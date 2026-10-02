@@ -21,6 +21,7 @@ import {
   listTabs,
   openUrl,
   resolveTabId,
+  screenshotTab,
   snapshotBrowser,
   startTabEventTracking,
   waitTabComplete,
@@ -47,6 +48,7 @@ const CAPABILITIES = [
   'scroll',
   'close_tab',
   'search_page',
+  'screenshot',
   'events',
   'downloads',
 ];
@@ -141,6 +143,9 @@ async function perform(op, args) {
 
     case 'close_tab':
       return closeTab(args.tabId, args.allowUserTab === true);
+
+    case 'screenshot':
+      return screenshotTab(args.tabId);
 
     case 'search_page': {
       // A background tab that closes again: searching never disturbs the tabs you are using.

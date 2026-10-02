@@ -172,7 +172,7 @@ function applyChallenge(base: ToolResult, snapshot: PageSnapshot): ToolResult {
   return { ...base, data };
 }
 
-function unavailable(err: BrowserUnavailableError): ToolResult {
+export function unavailable(err: BrowserUnavailableError): ToolResult {
   return {
     ok: false,
     summary: err.detail.why === 'needs_reload' ? 'extension needs a reload' : 'browser not connected',

@@ -64,7 +64,7 @@ describe('the browser extension manifest', () => {
 
   it('every request the desktop side can send is one the extension answers', () => {
     const worker = readFileSync(join(root, 'service-worker.js'), 'utf8');
-    for (const op of ['ping', 'list_tabs', 'focus_tab', 'focus_window', 'open_url', 'observe', 'click', 'fill', 'scroll', 'back', 'forward', 'reload', 'close_tab', 'search_page']) {
+    for (const op of ['ping', 'list_tabs', 'focus_tab', 'focus_window', 'open_url', 'observe', 'click', 'fill', 'scroll', 'back', 'forward', 'reload', 'close_tab', 'search_page', 'screenshot']) {
       expect(worker, op).toContain(`case '${op}'`);
     }
   });

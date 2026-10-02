@@ -108,6 +108,17 @@ describe.skipIf(!live)(`Eya's own window (${channel}): the same page script, dri
     expect((await svc.openWebsite(`${base}/spa.html`)).links).toContain('Alpha order');
   }, 90_000);
 
+  it('takes a real screenshot of the page in its own window (stamped as Eya\'s window, not the user\'s browser)', async () => {
+    await svc.openWebsite(`${base}/orders.html`);
+    const shot = await svc.screenshot();
+    expect(shot.mime).toBe('image/png');
+    expect(shot.bytes.subarray(1, 4).toString('ascii')).toBe('PNG');
+    expect(shot.width ?? 0).toBeGreaterThan(300);
+    expect(shot.bytes.length).toBeGreaterThan(3000);
+    expect(shot.url).toContain('/orders.html');
+    expect(shot.environment).toBe('eya_browser');
+  }, 60_000);
+
   it('reads a search-results page in a throwaway tab', async () => {
     const hits = await svc.searchWeb('anything'); // goes to the real search engines; may be empty offline, but must not throw
     expect(Array.isArray(hits)).toBe(true);

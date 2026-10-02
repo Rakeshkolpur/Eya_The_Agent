@@ -1,4 +1,4 @@
-import type { PageSnapshot, SnapshotTable } from './pageSnapshot';
+import type { BrowserEnvironment, PageSnapshot, SnapshotTable } from './pageSnapshot';
 import type { ActionEffects, BrowserTabInfo } from './pageEffects';
 import type { WebSearchHit } from './webSearchResults';
 
@@ -79,6 +79,25 @@ export interface BrowserAutomationService {
   /** A web search read from a real results page in a throwaway tab — never touches the page currently open. */
   searchWeb(query: string): Promise<WebSearchHit[]>;
   close(): Promise<void>;
+}
+
+/** A picture of what a browser tab is showing right now. Never sent to the AI model: it is only ever saved for the user. */
+export interface ScreenshotImage {
+  readonly bytes: Buffer;
+  readonly mime: 'image/png' | 'image/jpeg';
+  readonly width?: number;
+  readonly height?: number;
+  /** The page's address (credential-looking query parts stripped) and title, for naming the file and telling the user. */
+  readonly url: string;
+  readonly title: string;
+  /** Whose browser it came from. */
+  readonly environment: BrowserEnvironment;
+  readonly browser?: 'chrome' | 'edge' | 'other';
+}
+
+/** Taking a picture of the web page that is open — the one the user is looking at. */
+export interface BrowserCapture {
+  screenshot(): Promise<ScreenshotImage>;
 }
 
 /** Seeing and choosing between the user's own browser tabs — only possible through the user's real browser. */

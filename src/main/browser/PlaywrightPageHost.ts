@@ -387,6 +387,17 @@ export class PlaywrightPageHost {
         return this.reply(page, { ok: true });
       }
 
+      case 'screenshot': {
+        const page = this.pageFor(args['tabId']);
+        const png = await page.screenshot({ type: 'png', timeout: 15_000 });
+        return {
+          tabId: this.ids.get(page) ?? null,
+          url: redactUrl(page.url()),
+          title: (await page.title().catch(() => '')).slice(0, 200),
+          dataUrl: `data:image/png;base64,${png.toString('base64')}`,
+        };
+      }
+
       case 'search_page': {
         this.context ??= await this.launch();
         const tab = await this.context.newPage();

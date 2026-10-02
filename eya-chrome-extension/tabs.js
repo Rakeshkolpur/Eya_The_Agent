@@ -260,6 +260,39 @@ export async function listTabs() {
     }));
 }
 
+// The link to Eya carries at most 8 MB per message; base64 inflates by a third, so a PNG over this is resent as a JPEG.
+const MAX_PNG_DATA_URL = 6_000_000;
+
+/**
+ * A picture of what a tab is showing — the tab the user is looking at (front tab of the window they last used) unless a tab
+ * is named. Only what is visible: capturing the whole scroll length would need a permission this extension does not ask for.
+ * Reads nothing from the page and touches nothing in it; the picture goes to Eya and nowhere else.
+ */
+export async function screenshotTab(tabId) {
+  let tab;
+  if (typeof tabId === 'number') {
+    tab = await chrome.tabs.get(tabId);
+  } else {
+    const [front] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    tab = front ?? (await chrome.tabs.query({ active: true }))[0];
+  }
+  if (tab?.id === undefined) throw new Error('There is no open web page to take a screenshot of.');
+  if (tab.incognito) throw new Error('That page is in a private window, which Eya cannot see.');
+  const url = tab.url || tab.pendingUrl || '';
+  if (!/^https?:/i.test(url)) {
+    throw new Error('That is a browser page (not a website), and the browser does not let any extension take a picture of it.');
+  }
+  if (!tab.active) await focusTab(tab.id); // a tab can only be photographed while it is the one showing
+  let dataUrl;
+  try {
+    dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+    if (dataUrl.length > MAX_PNG_DATA_URL) dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 92 });
+  } catch (err) {
+    throw new Error(`The browser would not take a picture of that window (is it minimised?): ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return { tabId: tab.id, url: redactedUrl(url), title: (tab.title ?? '').slice(0, 200), dataUrl };
+}
+
 /** Closes a tab. Only one Eya opened herself, unless the caller says the user agreed to closing one of theirs. */
 export async function closeTab(tabId, allowUserTab) {
   if (!allowUserTab && !(await isEyaTab(tabId))) {

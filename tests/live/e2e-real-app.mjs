@@ -182,6 +182,14 @@ try {
   const dlPath = r.data?.path;
   check('download verified on disk, data.path set', r.ok && typeof dlPath === 'string' && existsSync(dlPath) && readFileSync(dlPath, 'utf8') === 'eya test download\n' && r.data?.download?.verified === true, r);
 
+  // 8b. screenshot: a real PNG of the page in front, saved on the REAL Desktop by the real tool, then removed again
+  await tool('open_website', { url: `${base}/menu.html` });
+  r = await tool('take_screenshot', { name: 'Eya e2e screenshot check' });
+  const shotPath = r.data?.path;
+  const shotIsPng = typeof shotPath === 'string' && existsSync(shotPath) && readFileSync(shotPath).subarray(1, 4).toString('ascii') === 'PNG';
+  check('take_screenshot saves a real PNG on the Desktop and tells the model only where', r.ok === true && shotIsPng && r.data?.folder === 'Desktop' && r.data?.verified === true && !JSON.stringify(r).includes('iVBOR'), r);
+  if (typeof shotPath === 'string') rmSync(shotPath, { force: true }); // our own test file: do not leave it on the user's Desktop
+
   // 9. tabs
   r = await tool('list_browser_tabs');
   check('list_browser_tabs sees tabs by id/title/url', r.ok && Array.isArray(r.data?.tabs) && r.data.tabs.length >= 1 && r.data.tabs.every((t) => typeof t.tabId === 'number'), r);

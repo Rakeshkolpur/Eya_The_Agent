@@ -19,10 +19,13 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'node:http';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { ChromeBridge } from '../../src/main/chrome/ChromeBridge';
 import type { SecretStore } from '../../src/main/chrome/ChromeBridge';
 import { BrowserWorldTracker } from '../../src/main/chrome/browserWorld';
 import { BrowserSessionManager } from '../../src/main/browser/BrowserSessionManager';
+import { createScreenshotTool } from '../../src/main/tools/impl/screenshotTool';
 import type { BrowserLauncher } from '../../src/main/browser/BrowserSessionManager';
 import type { BrowserAutomationService } from '../../src/main/browser/BrowserAutomationService';
 import type { BrowserName } from '../../src/main/chrome/protocol';
@@ -136,8 +139,8 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
     expect(bridge.connectedBrowsers()).toEqual(['chrome', 'edge']);
     const c = bridge.handshakeOf('chrome');
     const e = bridge.handshakeOf('edge');
-    expect(c).toMatchObject({ browser: 'chrome', protocolVersion: 2, extensionVersion: '0.2.0' });
-    expect(e).toMatchObject({ browser: 'edge', protocolVersion: 2, extensionVersion: '0.2.0' });
+    expect(c).toMatchObject({ browser: 'chrome', protocolVersion: 2, extensionVersion: '0.3.0' });
+    expect(e).toMatchObject({ browser: 'edge', protocolVersion: 2, extensionVersion: '0.3.0' });
     expect(c?.browserVersion).toMatch(/^\d+\./);
     expect(c?.capabilities).toEqual(expect.arrayContaining(['observe', 'click', 'scroll', 'events', 'close_tab']));
     expect(world.state('chrome')?.connected).toBe(true);
@@ -321,6 +324,37 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
     expect(manager.pinnedBrowser()).toBe('edge');
     const shared = [...world.tabsOf('chrome')].map((t) => t.tabId).find((id) => world.tabsOf('edge').some((t) => t.tabId === id));
     if (shared !== undefined) await expect(manager.switchToTab(shared)).rejects.toThrow(/say which browser/);
+  }, 60_000);
+
+  it('"take a screenshot": the page in front is saved as a real PNG on the Desktop, and only its location reaches Eya', async () => {
+    // A throwaway home under the repo (the path policy blocks AppData, where the system temp folder lives).
+    const home = mkdtempSync(join(process.cwd(), '.eya-shot-live-'));
+    try {
+      const desktop = join(home, 'Desktop');
+      mkdirSync(desktop);
+      const folders = { home, desktop, documents: join(home, 'Documents'), downloads: join(home, 'Downloads'), pictures: join(home, 'Pictures'), videos: join(home, 'Videos'), music: join(home, 'Music'), temp: join(home, 'Temp') };
+      await manager.openWebsite(`${base}/orders.html`);
+      await sleep(1200);
+      const tool = createScreenshotTool({ capture: manager, folders });
+      const r = note(await tool.execute({}));
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      const path = String(r.data?.['path']);
+      expect(path.startsWith(desktop)).toBe(true);
+      expect(existsSync(path)).toBe(true);
+      const bytes = readFileSync(path);
+      expect(bytes.subarray(1, 4).toString('ascii')).toBe('PNG');
+      expect(bytes.length).toBeGreaterThan(3000);
+      expect(r.data).toMatchObject({ folder: 'Desktop', verified: true, environment: 'your_browser', format: 'PNG' });
+      expect(String(r.data?.['fileName'])).toMatch(/^Screenshot - 127\.0\.0\.1 - \d{4}-\d{2}-\d{2} \d{2}\.\d{2}\.\d{2}\.png$/);
+      expect(JSON.stringify(r)).not.toContain('iVBORw0KGgo'); // the picture itself never reaches the result
+      // and asking again straight away saves a second file instead of replacing the first
+      await sleep(1100);
+      const again = await tool.execute({});
+      expect(again.ok).toBe(true);
+      expect(again.data?.['path']).not.toBe(path);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   }, 60_000);
 
   it('nothing secret ever reached Eya: not the session cookie, not the password the user typed', () => {
