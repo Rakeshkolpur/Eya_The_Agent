@@ -274,7 +274,7 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     if (knocking.length > 0) throw needsPairing(knocking);
     throw new BrowserUnavailableError(
       `I opened the page in the user's ${NAME[target]}, but the Eya Browser Bridge extension in it did not answer — it is probably not installed there or is switched off. ` +
-        `Tell the user: open the browser's extensions page, turn on Developer mode, and make sure "Eya Browser Bridge" is added and switched on (say "connect my browser" and Eya will open the page for them). ` +
+        `Tell the user: open the browser's extensions page, turn on Developer mode, and make sure "Eya Browser Bridge" is added and switched on (say "connect my browser"; if the extension is not in the browser at all, ask Eya to show them its folder).` +
         'Nothing was opened in any other browser, and a separate Eya browser window is only used if the user says that is fine.',
       { why: 'no_extension' },
     );

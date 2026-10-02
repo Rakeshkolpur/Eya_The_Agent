@@ -92,10 +92,39 @@ describe('connect my browser', () => {
     expect(r.alreadyConnected).toBe(false);
   });
 
-  it('never connects within the wait: says it is waiting for the user, and (if it had not yet) opens the help', async () => {
-    const { connector, log } = setup({ paired: ['chrome'] });
+  it('an extension set up before that does not connect is NOT a missing extension: nothing is opened in the file manager or browser', async () => {
+    const { connector, bridge, log } = setup({ paired: ['chrome', 'edge'] });
     const r = await connector.connect(5000);
-    expect(r).toMatchObject({ connected: false, helpOpened: true, browsers: [], extensionFolder: 'C:\\app\\eya-chrome-extension' });
+    expect(r).toMatchObject({ connected: false, helpOpened: false, extensionSeen: true, browsers: [] });
+    expect(log).toEqual([]);
+    expect(bridge.windows).toBe(1); // the window still opens, so a reloaded extension can pair
+  });
+
+  it('an old extension that is knocking but refused (waiting to pair) is also installed: no pop-ups, however many times it is asked', async () => {
+    const { connector, log } = setup({ knocking: ['chrome'] });
+    for (let i = 0; i < 3; i++) expect(await connector.connect(3000)).toMatchObject({ connected: false, helpOpened: false, extensionSeen: true });
+    expect(log).toEqual([]);
+  });
+
+  it('a first install (nothing ever seen) gets the page and folder once — asking again the same run does not reopen them', async () => {
+    const { connector, log } = setup();
+    expect(await connector.connect(2000)).toMatchObject({ connected: false, helpOpened: true, extensionSeen: false });
+    expect(log).toEqual(['page', 'folder:C:\\app\\eya-chrome-extension']);
+    expect(await connector.connect(2000)).toMatchObject({ connected: false, helpOpened: false, extensionSeen: false });
+    expect(await connector.connect(2000)).toMatchObject({ helpOpened: false });
+    expect(log).toHaveLength(2);
+  });
+
+  it('opens the page and folder on request even when an extension is known — that is the user asking to see it', async () => {
+    const { connector, log } = setup({ paired: ['chrome'] });
+    const r = await connector.connect(2000, { showInstallHelp: true });
+    expect(r).toMatchObject({ helpOpened: true, extensionSeen: true });
+    expect(log).toEqual(['page', 'folder:C:\\app\\eya-chrome-extension']);
+  });
+
+  it('even when already connected, a request to see the folder is honoured', async () => {
+    const { connector, log } = setup({ alreadyConnected: ['chrome'], paired: ['chrome'] });
+    await connector.connect(2000, { showInstallHelp: true });
     expect(log).toEqual(['page', 'folder:C:\\app\\eya-chrome-extension']);
   });
 

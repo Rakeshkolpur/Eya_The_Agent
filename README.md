@@ -56,7 +56,7 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 | `fill_on_page` | Fills a visible form field or drop-down by its label or placeholder; `submit: true` presses Enter for a search box with no button. Never types into a password, card or one-time-code field. |
 | `go_back` / `go_forward` / `reload_page` | The browser's Back, Forward and Reload buttons. |
 | `scroll_page` | Scrolls the page (or its main scrollable panel) down, up, to the top or to the bottom, and says plainly when there is no further to go. |
-| `connect_chrome` | Connects Eya to your own browser(s): opens the one-time pairing window — which pairs Chrome and Edge together if both have the extension — and, the first time, the extensions page and the extension folder. |
+| `connect_chrome` | Connects Eya to your own browser(s): opens the one-time pairing window — which pairs Chrome and Edge together if both have the extension — and — only if Eya has never seen the extension, and once per run — the extensions page and the extension folder. An extension that was set up before but isn't answering opens nothing: Eya says what to check (browser open, extension on, reload after an update). `showExtensionFolder` opens the folder on request. |
 | `browser_status` | Which browsers are connected, what each has open (hosts only), which one you are in right now. |
 | `list_browser_tabs` / `switch_browser_tab` | Lists the tabs open in each connected browser (title, address and which browser; tab numbers repeat between browsers) and switches to one. |
 | `close_browser_tab` | Closes a tab Eya opened. A tab you opened yourself is refused until you have clearly said yes. |

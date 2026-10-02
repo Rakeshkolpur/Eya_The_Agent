@@ -306,7 +306,7 @@ describe('optional tools', () => {
     closeTab: async () => ({ closed: true, remainingTabs: 0 }),
   };
   const connectorStub = {
-    connect: async () => ({ connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: false }),
+    connect: async () => ({ connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: true }),
   };
 
   it('tab, status and connect tools exist only when the user\'s browser can be reached', () => {
@@ -356,19 +356,58 @@ describe('optional tools', () => {
 
   it('connect_chrome reports every browser it connected, or exactly what the user still has to do', async () => {
     const f = fake();
-    const both = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const, 'edge' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: true }) } });
+    const both = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const, 'edge' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: true, extensionSeen: true }) } });
     expect(await both['connect_chrome']!.execute({})).toMatchObject({ ok: true, summary: 'connected chrome and edge', data: { connected: true, browsers: ['chrome', 'edge'] } });
 
-    const partial = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const], stillWaiting: ['edge' as const], extensionFolder: 'x', helpOpened: false }) } });
+    const partial = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const], stillWaiting: ['edge' as const], extensionFolder: 'x', helpOpened: false, extensionSeen: true }) } });
     expect((await partial['connect_chrome']!.execute({})).data).toMatchObject({ notYetConnected: ['edge'] });
 
-    const waiting = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: true }) } });
+    const waiting = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: true, extensionSeen: false }) } });
     const r = await waiting['connect_chrome']!.execute({});
     expect(r.ok).toBe(false);
     expect(r.summary).toBe('waiting for you');
     expect(r.error).toMatch(/Load unpacked/);
     expect(r.error).toMatch(/eya-chrome-extension/);
     expect(r.data).toMatchObject({ connected: false, extensionFolder: 'C:\\app\\eya-chrome-extension' });
+  });
+
+  it('connect_chrome, for an extension that was set up before but is not answering: says nothing needs installing, opens nothing, tells what to check', async () => {
+    const f = fake();
+    const t = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: false, extensionSeen: true }) } });
+    const r = await t['connect_chrome']!.execute({});
+    expect(r.ok).toBe(false);
+    expect(r.summary).toBe('extension not answering');
+    expect(r.error).toMatch(/nothing needs installing again/);
+    expect(r.error).toMatch(/did not open/);
+    expect(r.error).toMatch(/reload/i);
+    expect(r.error).not.toMatch(/choose the folder/i);
+    expect(r.data).toMatchObject({ connected: false, extensionInstalled: true });
+    expect(JSON.stringify(r.data?.['steps'])).not.toMatch(/Load unpacked/);
+  });
+
+  it('connect_chrome tells the user the folder was already shown this run instead of pretending it just opened it', async () => {
+    const f = fake();
+    const t = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: false }) } });
+    const r = await t['connect_chrome']!.execute({});
+    expect(r.error).toMatch(/already opened/);
+    expect(r.error).toMatch(/did not open them again/);
+  });
+
+  it('connect_chrome opens the folder only when asked: showExtensionFolder is passed through, and is false by default', async () => {
+    const f = fake();
+    const seen: unknown[] = [];
+    const t = tools(f, {
+      connector: {
+        connect: async (_wait?: number, options?: unknown) => {
+          seen.push(options);
+          return { connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: true };
+        },
+      },
+    });
+    await t['connect_chrome']!.execute({});
+    await t['connect_chrome']!.execute({ showExtensionFolder: true });
+    await t['connect_chrome']!.execute({ showExtensionFolder: 'yes' });
+    expect(seen).toEqual([{ showInstallHelp: false }, { showInstallHelp: true }, { showInstallHelp: false }]);
   });
 });
 

@@ -789,12 +789,19 @@ export function createBrowserTools(
           'real tabs. Call this when the user asks to connect or use their own browser, when a result says a browser extension is running but ' +
           'not connected, or when a task needs their signed-in accounts and no browser is connected. The first time, the user has to add the ' +
           'Eya Browser Bridge extension themselves (the result says exactly how); after that it connects on its own. Every browser whose ' +
-          'extension is running is connected in one go.',
-        args: {},
+          'extension is running is connected in one go. It does NOT keep opening the extensions page and the extension folder: that happens ' +
+          'only when the extension has never been seen, and once per run. Set showExtensionFolder only when the user asks to see the folder ' +
+          'or says the extension is not installed in their browser.',
+        args: {
+          showExtensionFolder: {
+            type: 'boolean',
+            description: "Open the browser's extensions page and the extension folder. Only when the user asked for it, or says the extension is missing from their browser.",
+          },
+        },
       },
-      async execute(): Promise<ToolResult> {
+      async execute(args): Promise<ToolResult> {
         try {
-          const r = await connector.connect();
+          const r = await connector.connect(undefined, { showInstallHelp: args['showExtensionFolder'] === true });
           if (r.connected) {
             return {
               ok: true,
@@ -806,6 +813,29 @@ export function createBrowserTools(
               },
             };
           }
+          if (r.extensionSeen && !r.helpOpened) {
+            // Set up before, just not answering now: nothing is missing, so nothing was opened and nothing needs installing again.
+            return {
+              ok: false,
+              summary: 'extension not answering',
+              error:
+                'The Eya Browser Bridge extension was set up before, so nothing needs installing again — it just is not answering right now. ' +
+                'I did not open the extensions page or the folder. Ask the user to check three things: the browser is open; the extension is switched on ' +
+                'and Developer mode is on at its extensions page; and, if the extension says it needs an update, to click its reload button (a newer Eya ' +
+                'needs the extension reloaded once). Then they can say "connect my browser" again. If the extension is not in the browser at all, ' +
+                'say so and I will open its folder.',
+              data: {
+                connected: false,
+                extensionInstalled: true,
+                steps: [
+                  'Make sure the browser (Chrome or Edge) is open.',
+                  'At chrome://extensions or edge://extensions, make sure Developer mode is on and "Eya Browser Bridge" is switched on.',
+                  'If it says it needs an update, or after updating Eya, click its reload button.',
+                  'Say "connect my browser" again.',
+                ],
+              },
+            };
+          }
           return {
             ok: false,
             summary: 'waiting for you',
@@ -813,7 +843,7 @@ export function createBrowserTools(
               'Your browser has not connected yet. ' +
               (r.helpOpened
                 ? "I opened the browser's extensions page and the extension folder. One time only: turn on Developer mode (and leave it on — the browser switches an unpacked extension off at its next restart if it is off), click Load unpacked, and choose the folder called eya-chrome-extension. "
-                : '') +
+                : 'I already opened the extensions page and the extension folder earlier, so I did not open them again; the extension still has to be added once. ') +
               'Once that is done it connects by itself — tell me and I will check.',
             data: {
               connected: false,

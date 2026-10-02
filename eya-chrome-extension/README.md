@@ -9,7 +9,9 @@ It is plain JavaScript on purpose: there is no build step. The browser loads thi
 ## Install (one time, about 30 seconds)
 
 A browser only lets *you* add an unpacked extension, so this part can't be automated.
-Saying **"connect my browser"** to Eya opens the extensions page and this folder for you.
+Saying **"connect my browser"** to Eya opens the extensions page and this folder for you — but only the very first
+time, when Eya has never seen the extension (and once per run of Eya). If it is already added and just not answering,
+Eya opens nothing and tells you what to check; ask her to "show me the extension folder" if you ever need it again.
 
 1. Open `edge://extensions` (Edge) or `chrome://extensions` (Chrome).
 2. Turn on **Developer mode**, and **leave it on**. With it off, the browser switches an

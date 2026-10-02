@@ -3,10 +3,14 @@ import type { BrowserName } from './protocol';
 /**
  * "Connect my browser": the user-initiated step that lets the Eya Browser Bridge
  * extension (in Chrome, in Edge, or in both) pair with this app. It opens a short
- * pairing window on the bridge and, when no extension has ever shown up, opens the
- * browser's extensions page and the extension's folder so the one-time "Load
- * unpacked" is two clicks. It cannot do that install for the user — browsers only
- * allow it from the user's own hands — and says so rather than pretending.
+ * pairing window on the bridge and, only when no extension has ever shown up (never
+ * paired, never knocked), opens the browser's extensions page and the extension's
+ * folder so the one-time "Load unpacked" is two clicks — once per run of Eya, never
+ * again just because a browser is slow to answer. An extension that was set up before
+ * but is not connecting right now is not a missing extension: nothing is opened for it,
+ * and the user is told what to check. The user can still ask for the folder outright.
+ * It cannot do the install for the user — browsers only allow it from the user's own
+ * hands — and says so rather than pretending.
  *
  * Every browser whose extension is running gets paired in the same window, so
  * connecting Chrome and Edge is one request, not two.
@@ -29,12 +33,19 @@ export interface ChromeConnectResult {
   /** Browsers whose extension is running but did not get paired in time. */
   readonly stillWaiting: readonly BrowserName[];
   readonly extensionFolder: string;
-  /** The extensions page and the extension folder were opened for the user. */
+  /** The extensions page and the extension folder were opened for the user (this call). */
   readonly helpOpened: boolean;
+  /** An extension has been paired, or has tried to connect, before: it is installed, so a failure to connect is not "not installed". */
+  readonly extensionSeen: boolean;
+}
+
+export interface ConnectOptions {
+  /** The user asked to see the extension folder: open it (and the extensions page) even though an extension is known. */
+  readonly showInstallHelp?: boolean;
 }
 
 export interface ChromeConnector {
-  connect(waitMs?: number): Promise<ChromeConnectResult>;
+  connect(waitMs?: number, options?: ConnectOptions): Promise<ChromeConnectResult>;
 }
 
 export interface ConnectorDeps {
@@ -55,12 +66,15 @@ export function createChromeConnector(deps: ConnectorDeps): ChromeConnector {
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? Date.now;
 
+  // The folder pops up in the user's file manager, so it must not repeat: at most once per run of Eya, unless asked for.
+  let helpShownThisRun = false;
+
   return {
-    async connect(waitMs = DEFAULT_WAIT_MS): Promise<ChromeConnectResult> {
+    async connect(waitMs = DEFAULT_WAIT_MS, options: ConnectOptions = {}): Promise<ChromeConnectResult> {
       const base = { extensionFolder: deps.extensionFolder };
       const connectedAtStart = deps.bridge.connectedBrowsers();
-      if (connectedAtStart.length > 0 && deps.bridge.waitingToPair().length === 0) {
-        return { ...base, connected: true, alreadyConnected: true, browsers: connectedAtStart, stillWaiting: [], helpOpened: false };
+      if (connectedAtStart.length > 0 && deps.bridge.waitingToPair().length === 0 && options.showInstallHelp !== true) {
+        return { ...base, connected: true, alreadyConnected: true, browsers: connectedAtStart, stillWaiting: [], helpOpened: false, extensionSeen: true };
       }
 
       // Open for pairing in every case: it covers a first install, a second browser, and a reinstalled extension that lost its secret.
@@ -68,12 +82,14 @@ export function createChromeConnector(deps: ConnectorDeps): ChromeConnector {
       let helpOpened = false;
       const openHelp = async () => {
         helpOpened = true;
+        helpShownThisRun = true;
         await deps.openExtensionsPage().catch(() => undefined);
         await deps.revealFolder(deps.extensionFolder).catch(() => undefined);
       };
-      // Has any extension ever shown itself? If so it is simply a matter of letting it connect; if not, help the user add it.
+      // Has any extension ever shown itself (paired before, or knocking now)? If so it is installed and it is simply a matter of
+      // letting it connect — nothing is opened. Only a truly first install gets the page and the folder, and only once per run.
       const known = Object.values(deps.bridge.info().browsers).some((b) => b !== undefined) || deps.bridge.waitingToPair().length > 0;
-      if (!known) await openHelp();
+      if (options.showInstallHelp === true || (!known && !helpShownThisRun)) await openHelp();
 
       const deadline = now() + waitMs;
       let firstConnectedAt: number | null = connectedAtStart.length > 0 ? now() : null;
@@ -86,8 +102,9 @@ export function createChromeConnector(deps: ConnectorDeps): ChromeConnector {
 
       const browsers = deps.bridge.connectedBrowsers();
       const stillWaiting = deps.bridge.waitingToPair();
-      if (browsers.length === 0 && !helpOpened) await openHelp();
-      return { ...base, connected: browsers.length > 0, alreadyConnected: false, browsers, stillWaiting, helpOpened };
+      // No last-resort pop-up here: a browser that has not answered yet (closed, asleep, an old extension waiting for its reload)
+      // is not a missing extension, and the user is told what to check instead.
+      return { ...base, connected: browsers.length > 0, alreadyConnected: false, browsers, stillWaiting, helpOpened, extensionSeen: known || stillWaiting.length > 0 || browsers.length > 0 };
     },
   };
 }
