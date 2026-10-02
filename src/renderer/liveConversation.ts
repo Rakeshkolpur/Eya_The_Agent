@@ -1,4 +1,5 @@
 import type { LiveConfig } from '../shared/ipcContract';
+import { liveLimitMessage } from '../shared/quotaReset';
 import { FrameBatcher, floatToPcm16 } from './pcm';
 import type { PcmPlayback } from './pcmPlayer';
 import { LIVE_INPUT_RATE } from './liveProtocol';
@@ -56,7 +57,7 @@ export function describeOpenFailure(err: unknown): string {
   if (err instanceof LiveOpenError) {
     const detail = `${err.reason} ${err.message}`;
     if (/quota|exhaust|resource|rate|limit|429/i.test(detail)) {
-      return 'Live voice has hit its usage limit right now.';
+      return liveLimitMessage(detail, new Date());
     }
     if (err.kind === 'timeout') return 'Live voice took too long to connect.';
   }

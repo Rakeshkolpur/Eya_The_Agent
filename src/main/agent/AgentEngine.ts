@@ -13,6 +13,7 @@ import type { ResponseComposer } from './ResponseComposer';
 import { cleanForSpeech } from './speechText';
 import { systemPrompt } from './prompts';
 import { ACK_WORKING, INTENT_CONFIDENCE_THRESHOLD } from '@shared/constants';
+import { limitMessage } from '@shared/quotaReset';
 
 const log = rootLogger.child('agent');
 
@@ -65,13 +66,22 @@ function classifyAIFailure(err: unknown): FailureKind {
   return 'other';
 }
 
-/** A reason for a model failure that is honest about what actually went wrong. */
-export function describeAIFailure(err: unknown): string {
+/** How long Google said to wait on a per-minute limit, if the error carries it. */
+function retryHint(err: unknown): number | undefined {
+  const ms = (err as { retryAfterMs?: unknown } | null)?.retryAfterMs;
+  return typeof ms === 'number' && Number.isFinite(ms) && ms >= 0 ? ms : undefined;
+}
+
+/**
+ * A reason for a model failure that is honest about what actually went wrong — and, for a limit, WHEN it comes back,
+ * by Google's own stated wait, in the user's own time (a per-minute limit as "about N seconds").
+ */
+export function describeAIFailure(err: unknown, now: Date = new Date()): string {
   switch (classifyAIFailure(err)) {
     case 'daily':
-      return "I've used up today's free Gemini limit. It resets tomorrow, or you can turn on billing in Google AI Studio.";
+      return limitMessage({ daily: true, retryAfterMs: retryHint(err) }, now);
     case 'rate':
-      return "I've hit Gemini's usage limit for now. Give me a minute and try again.";
+      return limitMessage({ daily: false, retryAfterMs: retryHint(err) }, now);
     case 'overloaded':
       return 'Gemini is overloaded at the moment. Try again in a moment.';
     default:

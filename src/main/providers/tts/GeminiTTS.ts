@@ -37,7 +37,7 @@ export class GeminiTTSError extends Error {
   }
 }
 
-// A per-day cap resets at midnight Pacific; there's no point asking sooner.
+// A per-day cap is spent for hours (measured on the text models: Google's own wait ends at midnight UTC); re-check at most this often.
 const DAILY_QUOTA_COOLDOWN_MS = 30 * 60_000;
 
 /** Splits an SSE byte stream into event payloads; returns the unfinished tail. */

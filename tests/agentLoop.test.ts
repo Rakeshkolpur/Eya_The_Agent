@@ -415,10 +415,41 @@ describe('voice input', () => {
   });
 });
 
-describe('daily limit wording', () => {
-  it('is distinct from a momentary rate limit', () => {
-    expect(describeAIFailure(new Error('gemini daily quota exhausted (429) for x'))).toMatch(/resets tomorrow/);
-    expect(describeAIFailure(new Error('gemini http 429: slow down'))).toMatch(/Give me a minute/);
+describe('limit wording: always says when it comes back', () => {
+  // 2 Oct 2026, 16:34 UTC. Measured against the real API: a spent daily limit answered "wait 26755 s", which ends at 00:00 UTC.
+  const now = new Date('2026-10-02T16:34:04Z');
+  const timeWords = /(at|around) .+ (today|tomorrow|on \w+)/;
+
+  it('the daily limit says when it comes back by the wait Google itself stated, not "tomorrow"', () => {
+    const err = Object.assign(new Error('gemini daily quota exhausted (429) for every model'), { retryAfterMs: 26_755_000 });
+    const said = describeAIFailure(err, now);
+    expect(said).toMatch(/used up today's free Gemini limit/);
+    expect(said).toMatch(/comes back at .+ (today|tomorrow)/);
+    expect(said).toMatch(/billing/);
+    expect(said).not.toMatch(/resets tomorrow/);
+  });
+
+  it('the daily limit with no stated wait still names a time, as "around"', () => {
+    const said = describeAIFailure(new Error('gemini daily quota exhausted (429) for x'), now);
+    expect(said).toMatch(/comes back around .+ (today|tomorrow)/);
+  });
+
+  it('a per-minute limit uses the wait Google named', () => {
+    const err = Object.assign(new Error('gemini http 429: slow down'), { retryAfterMs: 34_000 });
+    expect(describeAIFailure(err, now)).toBe("I've hit Gemini's usage limit for a moment. Try again in about 34 seconds.");
+    const long = Object.assign(new Error('gemini http 429: slow down'), { retryAfterMs: 200_000 });
+    expect(describeAIFailure(long, now)).toMatch(/about 4 minutes/);
+  });
+
+  it('a limit with no stated wait gives both honest possibilities, with the daily time', () => {
+    const said = describeAIFailure(new Error('gemini http 429: slow down'), now);
+    expect(said).toMatch(/about a minute/);
+    expect(said).toMatch(new RegExp('daily limit, which comes back ' + timeWords.source));
+  });
+
+  it('the other failures are unchanged', () => {
+    expect(describeAIFailure(new Error('gemini http 503: high demand'), now)).toMatch(/overloaded/);
+    expect(describeAIFailure(new TypeError('fetch failed'), now)).toBe("I couldn't reach the language model.");
   });
 });
 

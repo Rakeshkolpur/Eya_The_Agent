@@ -434,3 +434,109 @@ function makeResponse(body: unknown): Response {
     headers: { 'content-type': 'application/json' },
   });
 }
+
+describe('when every model is limited: the error says the real best case', () => {
+  type LimitError = Error & { retryAfterMs?: number; dailyQuota?: boolean };
+  const complete = async (provider: GeminiAIProvider): Promise<LimitError> => {
+    try {
+      await provider.complete([{ role: 'user', content: 'x' }], []);
+    } catch (e) {
+      return e as LimitError;
+    }
+    throw new Error('expected the call to fail');
+  };
+  const perMinute = (seconds: number) =>
+    new Response(JSON.stringify({ error: { code: 429, status: 'RESOURCE_EXHAUSTED', details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: `${seconds}s` }] } }), { status: 429 });
+  // Like the real API's: the daily cap's answer also says how long to wait (measured: 26755 s, ending at midnight UTC).
+  const daily = (seconds = 26755) =>
+    new Response(
+      JSON.stringify({ error: { code: 429, details: [{ violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel-FreeTier' }] }, { '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: `${seconds}s` }] } }),
+      { status: 429 },
+    );
+  const unnamed = () => new Response('You exceeded your current quota, please check your plan and billing details.', { status: 429 });
+  const opts = { retryDelaysMs: [5, 5], models: ['m1', 'm2', 'm3'] };
+
+  it('the first model is out for the day but the others only need a moment: it says how long, not "tomorrow"', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => (String(input).includes('/m1:') ? daily() : perMinute(40))) as unknown as typeof fetch;
+    const err = await complete(new GeminiAIProvider(opts));
+    expect(err.message).not.toMatch(/daily quota/);
+    expect(err.dailyQuota).toBe(false);
+    expect(err.retryAfterMs).toBeGreaterThan(38_000);
+    expect(err.retryAfterMs).toBeLessThanOrEqual(40_000);
+  });
+
+  it('uses the soonest any model will be back', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const u = String(input);
+      return u.includes('/m1:') ? perMinute(55) : u.includes('/m2:') ? perMinute(20) : perMinute(90);
+    }) as unknown as typeof fetch;
+    const err = await complete(new GeminiAIProvider(opts));
+    expect(err.retryAfterMs).toBeGreaterThan(18_000);
+    expect(err.retryAfterMs).toBeLessThanOrEqual(20_000);
+  });
+
+  it('with no wait named by Google, says so (nothing invented)', async () => {
+    globalThis.fetch = vi.fn(async () => unnamed()) as unknown as typeof fetch;
+    const err = await complete(new GeminiAIProvider(opts));
+    expect(err.message).toMatch(/429/);
+    expect(err.retryAfterMs).toBeUndefined();
+    expect(err.dailyQuota).toBe(false);
+  });
+
+  it('every model out for the day: the daily error, flagged, and an instant answer next time', async () => {
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1;
+      return daily();
+    }) as unknown as typeof fetch;
+    const provider = new GeminiAIProvider(opts);
+    const err = await complete(provider);
+    expect(err.message).toMatch(/daily quota exhausted/);
+    expect(err.dailyQuota).toBe(true);
+    calls = 0;
+    const again = await complete(provider);
+    expect(again.message).toMatch(/daily quota exhausted/);
+    expect(calls).toBe(0);
+  });
+
+  it('the daily error carries the wait Google gave — the soonest any model is back — even on the instant repeat answer', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const u = String(input);
+      return u.includes('/m1:') ? daily(26755) : u.includes('/m2:') ? daily(20000) : daily(26000);
+    }) as unknown as typeof fetch;
+    const provider = new GeminiAIProvider(opts);
+    const first = await complete(provider);
+    expect(first.dailyQuota).toBe(true);
+    expect(first.retryAfterMs).toBeGreaterThan(19_000_000);
+    expect(first.retryAfterMs).toBeLessThanOrEqual(20_000_000);
+    const again = await complete(provider); // no request is sent now, and it still knows
+    expect(again.dailyQuota).toBe(true);
+    expect(again.retryAfterMs).toBeGreaterThan(19_000_000);
+    expect(again.retryAfterMs).toBeLessThanOrEqual(first.retryAfterMs as number);
+  });
+
+  it('a daily limit that Google names no wait for gives the daily error with no wait (nothing invented)', async () => {
+    globalThis.fetch = vi.fn(
+      async () => new Response('{"error":{"code":429,"details":[{"violations":[{"quotaId":"GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}]}}', { status: 429 }),
+    ) as unknown as typeof fetch;
+    const err = await complete(new GeminiAIProvider(opts));
+    expect(err.dailyQuota).toBe(true);
+    expect(err.retryAfterMs).toBeUndefined();
+  });
+
+  it('a model that is merely overloaded is not reported as a limit: the first model\'s own error stands', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => (String(input).includes('/m1:') ? new Response('overloaded', { status: 503 }) : perMinute(30))) as unknown as typeof fetch;
+    const err = await complete(new GeminiAIProvider(opts));
+    expect(err.message).toMatch(/503/);
+    expect(err.retryAfterMs).toBeUndefined();
+  });
+
+  it('the wording the user hears follows from it', async () => {
+    const { describeAIFailure } = await import('../src/main/agent/AgentEngine');
+    const now = new Date('2026-10-02T15:00:00Z');
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => (String(input).includes('/m1:') ? daily() : perMinute(40))) as unknown as typeof fetch;
+    expect(describeAIFailure(await complete(new GeminiAIProvider(opts)), now)).toMatch(/Try again in about \d+ seconds/);
+    globalThis.fetch = vi.fn(async () => daily()) as unknown as typeof fetch;
+    expect(describeAIFailure(await complete(new GeminiAIProvider(opts)), now)).toMatch(/comes back at .+ (today|tomorrow)/);
+  });
+});

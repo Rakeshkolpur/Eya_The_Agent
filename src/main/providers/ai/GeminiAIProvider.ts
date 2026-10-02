@@ -105,7 +105,8 @@ class GeminiHttpError extends Error {
   }
 }
 
-// A per-day cap resets at midnight Pacific; there's no point asking sooner.
+// A per-day cap is spent for hours: re-check every half hour at most (in case billing was switched on), sooner only if
+// Google itself says it comes back sooner. Measured: its 429 carries the wait, which for this cap ends at midnight UTC.
 const DAILY_QUOTA_COOLDOWN_MS = 30 * 60_000;
 
 const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
@@ -173,6 +174,12 @@ export class GeminiAIProvider implements AIProvider {
   private readonly dailyLimitUntil = new Map<string, number>();
   /** Why each model last failed, so retries can skip the ones that can't recover soon. */
   private readonly lastFailure = new Map<string, number>();
+  /**
+   * Each model whose LAST failure was a rate/quota limit (429): whether it is the daily cap, and — for a per-minute limit —
+   * when Google said it would work again. Lets the error the user hears describe the real best case across ALL models
+   * ("back in 40 seconds") rather than only the first model's failure ("used up for today").
+   */
+  private readonly limitState = new Map<string, { readonly daily: boolean; readonly retryAt?: number }>();
 
   constructor(overrides?: Partial<GeminiConfig>) {
     this.cfg = {
@@ -364,9 +371,9 @@ export class GeminiAIProvider implements AIProvider {
     // A spent daily quota is skipped outright, even on a retry round.
     const usable = models.filter((m) => (this.dailyLimitUntil.get(m) ?? 0) <= now);
     if (usable.length === 0) {
-      return Promise.reject(
-        new GeminiHttpError(429, 'gemini daily quota exhausted (429) for every model', undefined, true),
-      );
+      // Every model's day is spent. Say so, and when Google said it comes back; never anything vaguer.
+      const spent = this.finalError(models, undefined);
+      return Promise.reject(spent instanceof GeminiHttpError ? spent : new GeminiHttpError(429, 'gemini daily quota exhausted (429) for every model', undefined, true));
     }
     let order: string[];
     if (ignoreCooldowns) {
@@ -411,6 +418,7 @@ export class GeminiAIProvider implements AIProvider {
             if (settled) return;
             this.cachedAvailability = true;
             this.lastFailure.delete(model);
+            this.limitState.delete(model);
             finish(model);
             resolve({ data, model, ms: Date.now() - started });
           },
@@ -421,8 +429,17 @@ export class GeminiAIProvider implements AIProvider {
             firstError ??= err;
             const status = err instanceof GeminiHttpError ? err.status : 0;
             this.lastFailure.set(model, status);
+            if (status === 429 && err instanceof GeminiHttpError) {
+              this.limitState.set(model, {
+                daily: err.dailyQuota,
+                ...(err.retryAfterMs !== undefined ? { retryAt: Date.now() + err.retryAfterMs } : {}),
+              });
+            } else {
+              this.limitState.delete(model);
+            }
             if (err instanceof GeminiHttpError && err.dailyQuota) {
-              this.dailyLimitUntil.set(model, Date.now() + DAILY_QUOTA_COOLDOWN_MS);
+              const sooner = err.retryAfterMs !== undefined ? Math.max(5_000, err.retryAfterMs) : DAILY_QUOTA_COOLDOWN_MS;
+              this.dailyLimitUntil.set(model, Date.now() + Math.min(DAILY_QUOTA_COOLDOWN_MS, sooner));
             }
             const coolMs = status === 404 ? 600_000 : status === 429 ? 60_000 : 15_000;
             this.skipUntil.set(model, Date.now() + coolMs);
@@ -435,7 +452,7 @@ export class GeminiAIProvider implements AIProvider {
             if (!launch() && running === 0) {
               finish(null);
               this.cachedAvailability = false;
-              reject(firstError instanceof Error ? firstError : new Error('No Gemini models available'));
+              reject(this.finalError(models, firstError));
             }
           },
         );
@@ -451,6 +468,30 @@ export class GeminiAIProvider implements AIProvider {
         }, hedgeAfterMs);
       }
     });
+  }
+
+  /**
+   * The error to give up with. When EVERY model is limited (429) it says what the user needs to hear — the daily cap, or
+   * the soonest a per-minute limit clears — instead of whichever model happened to fail first. Anything else is the first
+   * model's own error, as before.
+   */
+  private finalError(models: readonly string[], firstError: unknown): Error {
+    const limited = models.flatMap((m) => {
+      const state = this.limitState.get(m);
+      return state === undefined ? [] : [state];
+    });
+    if (limited.length === models.length && limited.length > 0) {
+      const now = Date.now();
+      // The soonest ANY model is back, by Google's own word — never a guess at when a limit resets.
+      const waits = limited.flatMap((s) => (s.retryAt !== undefined ? [Math.max(0, s.retryAt - now)] : []));
+      const retryAfterMs = waits.length > 0 ? Math.min(...waits) : undefined;
+      if (limited.every((s) => s.daily)) {
+        return new GeminiHttpError(429, 'gemini daily quota exhausted (429) for every model', retryAfterMs, true);
+      }
+      const message = firstError instanceof Error ? firstError.message : 'gemini http 429: rate limited';
+      return new GeminiHttpError(429, message.startsWith('gemini daily') ? 'gemini http 429: rate limited' : message, retryAfterMs, false);
+    }
+    return firstError instanceof Error ? firstError : new Error('No Gemini models available');
   }
 
   private async callModel(model: string, body: unknown, signal: AbortSignal): Promise<GeminiResponse> {

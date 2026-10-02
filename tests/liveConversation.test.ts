@@ -190,7 +190,10 @@ describe('starting a conversation', () => {
   it('explains honestly when no model will open, and leaves the microphone alone', async () => {
     const r = rig({ sessions: [new LiveOpenError('closed', 'closed', 1011, 'Resource has been exhausted (quota)')] });
     const result = await r.conv.start();
-    expect(result).toEqual({ ok: false, reason: 'Live voice has hit its usage limit right now.' });
+    expect(result.ok).toBe(false);
+    const reason = (result as { reason: string }).reason;
+    expect(reason).toMatch(/Live voice has hit its usage limit right now/);
+    expect(reason).toMatch(/daily limit should come back around .+ (today|tomorrow)/); // and says when, in the user's own time
     expect(r.conv.active).toBe(false);
     expect(r.sink()).toBeNull();
     expect(r.sessions).toHaveLength(2); // tried both models
