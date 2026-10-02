@@ -1,5 +1,6 @@
 import { parseWebUrl } from './openTools';
 import type { BrowserAutomationService } from '@main/browser/BrowserAutomationService';
+import { LoopGuard, pageFingerprint } from '@main/browser/loopGuard';
 import type { PageSnapshot } from '@main/browser/pageSnapshot';
 import type { Tool, ToolArgs, ToolResult } from '../types';
 
@@ -34,27 +35,56 @@ function snapshotFields(s: PageSnapshot): Record<string, unknown> {
   };
 }
 
+interface PageChange {
+  /** Anything the model could see on the page differs from before — including a menu that just expanded. */
+  readonly stateChanged: boolean;
+  /** The address itself moved, as opposed to the same page rearranging. */
+  readonly navigated: boolean;
+}
+
 /** A fresh look at the page, every time — the only state a tool result is ever built from. */
-function currentPageData(action: string, target: string | null, stateChanged: boolean, snapshot: PageSnapshot): Record<string, unknown> {
+function currentPageData(action: string, target: string | null, change: PageChange, snapshot: PageSnapshot): Record<string, unknown> {
   return {
     action,
     ...(target !== null ? { target } : {}),
-    stateChanged,
+    stateChanged: change.stateChanged,
+    navigated: change.navigated,
     currentPage: snapshotFields(snapshot),
   };
 }
 
-/** Best-effort look at the page before an action, purely to tell whether the action changed it — never used to decide what to click. */
-async function urlAndTitleBefore(service: BrowserAutomationService): Promise<{ url: string; title: string } | null> {
+function changeBetween(before: PageSnapshot | null, after: PageSnapshot): PageChange {
+  if (before === null) return { stateChanged: true, navigated: true };
+  return { stateChanged: pageFingerprint(before) !== pageFingerprint(after), navigated: before.url !== after.url };
+}
+
+/**
+ * Best-effort look at the page just before an action — used only to tell
+ * whether the action changed anything and whether it is a repeat of one that
+ * already went nowhere, never to decide what to click.
+ */
+async function lookBefore(service: BrowserAutomationService): Promise<PageSnapshot | null> {
   try {
-    const s = await service.inspectPage();
-    return { url: s.url, title: s.title };
+    return await service.inspectPage();
   } catch {
     return null;
   }
 }
 
-export function createBrowserTools(service: BrowserAutomationService): Tool[] {
+/** Handed back instead of repeating an action that has already gone nowhere: the live page, so the model can choose something genuinely different. */
+function loopResult(verb: string, display: string, action: string, snapshot: PageSnapshot, tries: number): ToolResult {
+  return {
+    ok: false,
+    summary: 'repeating itself',
+    error:
+      `I've already tried ${verb} "${display}" ${tries} times from this exact page and it either did nothing or came ` +
+      'straight back here. Doing it again will not help — pick a genuinely different link, button or wording from what ' +
+      'is on the page below, or tell the user plainly what you are seeing and ask.',
+    data: { ...currentPageData(action, display, { stateChanged: false, navigated: false }, snapshot), loopDetected: true },
+  };
+}
+
+export function createBrowserTools(service: BrowserAutomationService, guard: LoopGuard = new LoopGuard()): Tool[] {
   const openWebsite: Tool = {
     schema: {
       name: 'open_website',
@@ -76,7 +106,7 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
         return {
           ok: true,
           summary: `opened ${snapshot.title || url.hostname}`,
-          data: currentPageData('open', url.href, true, snapshot),
+          data: currentPageData('open', url.href, { stateChanged: true, navigated: true }, snapshot),
         };
       } catch (err) {
         return { ok: false, summary: 'could not open', error: `I could not open that website: ${describeError(err)}` };
@@ -97,7 +127,11 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
     async execute(): Promise<ToolResult> {
       try {
         const snapshot = await service.inspectPage();
-        return { ok: true, summary: `looked at ${snapshot.title || snapshot.url}`, data: currentPageData('inspect', null, false, snapshot) };
+        return {
+          ok: true,
+          summary: `looked at ${snapshot.title || snapshot.url}`,
+          data: currentPageData('inspect', null, { stateChanged: false, navigated: false }, snapshot),
+        };
       } catch {
         return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
       }
@@ -122,19 +156,27 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
     async execute(args): Promise<ToolResult> {
       const text = stringArg(args, 'text');
       if (text === undefined) return { ok: false, summary: 'no text', error: 'Text to click is required.' };
-      const before = await urlAndTitleBefore(service);
+      const before = await lookBefore(service);
+      if (before !== null) {
+        const fingerprint = pageFingerprint(before);
+        if (guard.isLoop(fingerprint, 'click', text)) return loopResult('clicking', text, 'click', before, guard.maxRepeats);
+        guard.record(fingerprint, 'click', text);
+      }
       try {
         const result = await service.clickOnPage(text);
-        const stateChanged = before === null || before.url !== result.snapshot.url || before.title !== result.snapshot.title;
         if (!result.ok) {
           return {
             ok: false,
             summary: 'not found',
             error: `"${text}" isn't visible on the current page.`,
-            data: currentPageData('click', text, false, result.snapshot),
+            data: currentPageData('click', text, { stateChanged: false, navigated: false }, result.snapshot),
           };
         }
-        return { ok: true, summary: `clicked "${text}"`, data: currentPageData('click', text, stateChanged, result.snapshot) };
+        return {
+          ok: true,
+          summary: `clicked "${text}"`,
+          data: currentPageData('click', text, changeBetween(before, result.snapshot), result.snapshot),
+        };
       } catch (err) {
         return { ok: false, summary: 'click failed', error: `I could not click that: ${describeError(err)}` };
       }
@@ -161,19 +203,30 @@ export function createBrowserTools(service: BrowserAutomationService): Tool[] {
       if (label === undefined || value === undefined) {
         return { ok: false, summary: 'missing arguments', error: 'A field label and a value are required.' };
       }
-      const before = await urlAndTitleBefore(service);
+      const before = await lookBefore(service);
+      if (before !== null) {
+        const fingerprint = pageFingerprint(before);
+        // The value is part of what makes this attempt "the same one": typing a different value is a new try.
+        if (guard.isLoop(fingerprint, 'fill', `${label}=${value}`)) {
+          return loopResult('filling in', label, 'fill', before, guard.maxRepeats);
+        }
+        guard.record(fingerprint, 'fill', `${label}=${value}`);
+      }
       try {
         const result = await service.fillOnPage(label, value);
-        const stateChanged = before === null || before.url !== result.snapshot.url || before.title !== result.snapshot.title;
         if (!result.ok) {
           return {
             ok: false,
             summary: 'not found',
             error: `No field matching "${label}" is visible on the current page.`,
-            data: currentPageData('fill', label, false, result.snapshot),
+            data: currentPageData('fill', label, { stateChanged: false, navigated: false }, result.snapshot),
           };
         }
-        return { ok: true, summary: `filled "${label}"`, data: currentPageData('fill', label, stateChanged, result.snapshot) };
+        return {
+          ok: true,
+          summary: `filled "${label}"`,
+          data: currentPageData('fill', label, changeBetween(before, result.snapshot), result.snapshot),
+        };
       } catch (err) {
         return { ok: false, summary: 'fill failed', error: `I could not fill that in: ${describeError(err)}` };
       }
