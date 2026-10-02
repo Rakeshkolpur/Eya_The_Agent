@@ -14,6 +14,45 @@ export interface PageSnapshot {
   /** A visible modal/dialog/alert box's own text, if one is open — e.g. a login prompt, a warning, a cookie banner. Empty when there isn't one. */
   readonly dialogs: readonly string[];
   readonly truncated: boolean;
+  /** Plain text of the page's main area (capped) — what a person would read, as opposed to what they could click. */
+  readonly visibleText?: string;
+  readonly tables?: readonly SnapshotTable[];
+  /** The control that has keyboard focus, by name. Sensitive fields are never named. */
+  readonly focused?: string;
+  readonly scroll?: { readonly y: number; readonly max: number; readonly atBottom: boolean };
+  /** Present when the page is showing a CAPTCHA / bot check / verification-code prompt / sign-in wall. */
+  readonly challenge?: PageChallenge;
+  /** Plain-language caveats about this look at the page (still loading, frames that can't be seen into, …). */
+  readonly notes?: readonly string[];
+  /** Which browser this is: the user's own signed-in one, or Eya's separate automation window. */
+  readonly environment?: BrowserEnvironment;
+}
+
+export type BrowserEnvironment = 'your_browser' | 'eya_browser';
+
+export interface SnapshotTable {
+  readonly caption?: string;
+  readonly headers: readonly string[];
+  readonly rows: readonly (readonly string[])[];
+  readonly totalRows: number;
+}
+
+export type ChallengeKind = 'captcha' | 'bot_check' | 'mfa' | 'login';
+
+export interface PageChallenge {
+  readonly kind: ChallengeKind;
+  readonly hint: string;
+}
+
+/** Everything beyond the plain lists, all optional — only the richer browser fills these in. */
+export interface SnapshotExtras {
+  readonly visibleText?: string;
+  readonly tables?: readonly SnapshotTable[];
+  readonly focused?: string;
+  readonly scroll?: { readonly y: number; readonly max: number; readonly atBottom: boolean };
+  readonly challenge?: PageChallenge;
+  readonly notes?: readonly string[];
+  readonly environment?: BrowserEnvironment;
 }
 
 const MAX_ITEMS_PER_CATEGORY = 40;
@@ -41,6 +80,7 @@ export function buildSnapshot(
   rawButtons: readonly string[],
   rawInputs: readonly string[],
   rawDialogs: readonly string[] = [],
+  extras: SnapshotExtras = {},
 ): PageSnapshot {
   const headings = dedupeNonEmpty(rawHeadings);
   const links = dedupeNonEmpty(rawLinks);
@@ -61,6 +101,23 @@ export function buildSnapshot(
     inputs: inputs.slice(0, MAX_ITEMS_PER_CATEGORY),
     dialogs: dialogs.slice(0, MAX_ITEMS_PER_CATEGORY),
     truncated,
+    ...(extras.visibleText !== undefined && extras.visibleText !== '' ? { visibleText: extras.visibleText } : {}),
+    ...(extras.tables !== undefined && extras.tables.length > 0 ? { tables: extras.tables } : {}),
+    ...(extras.focused !== undefined ? { focused: extras.focused } : {}),
+    ...(extras.scroll !== undefined ? { scroll: extras.scroll } : {}),
+    ...(extras.challenge !== undefined ? { challenge: extras.challenge } : {}),
+    ...(extras.notes !== undefined && extras.notes.length > 0 ? { notes: extras.notes } : {}),
+    ...(extras.environment !== undefined ? { environment: extras.environment } : {}),
+  };
+}
+
+/** The same snapshot with extra notes appended and/or the environment stamped on. */
+export function withExtras(snapshot: PageSnapshot, extras: { notes?: readonly string[]; environment?: BrowserEnvironment }): PageSnapshot {
+  const notes = [...(snapshot.notes ?? []), ...(extras.notes ?? [])];
+  return {
+    ...snapshot,
+    ...(notes.length > 0 ? { notes } : {}),
+    ...(extras.environment !== undefined ? { environment: extras.environment } : {}),
   };
 }
 

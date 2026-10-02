@@ -1,0 +1,17 @@
+<!doctype html><html><head><title>Courts Portal</title><style>
+ #drawer{display:none;position:absolute;top:50px;left:0;background:#eee;padding:10px}
+ #drawer.open{display:block}
+ #sub{display:none;padding-left:16px}
+ #sub.open{display:block}
+ .burger{cursor:pointer;border:1px solid #333;padding:4px 8px;display:inline-block}
+</style></head><body>
+<div class="burger" role="button" aria-label="Open menu" aria-expanded="false" id="burger" tabindex="0">&#9776;</div>
+<div id="drawer"><a href="/menu.html#home">Home</a>
+ <div><span id="services" role="button" tabindex="0" aria-expanded="false">Services</span>
+  <div id="sub"><a href="/causelist.html">Cause List</a> <a href="/orders.html">Orders</a></div></div></div>
+<main><h1>Courts Portal</h1><p>Welcome. Use the menu.</p></main>
+<script>
+ const b=document.getElementById('burger'),d=document.getElementById('drawer'),s=document.getElementById('services'),sub=document.getElementById('sub');
+ b.onclick=()=>{d.classList.toggle('open');b.setAttribute('aria-expanded',d.classList.contains('open'))};
+ s.onclick=()=>{sub.classList.toggle('open');s.setAttribute('aria-expanded',sub.classList.contains('open'))};
+</script></body></html>

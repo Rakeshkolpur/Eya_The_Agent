@@ -1,0 +1,7 @@
+<!doctype html><html><head><title>Slow page</title></head><body><main><h1>Slow page</h1><div id="list">Loading…</div>
+<button id="more" onclick="load()">Load more</button></main>
+<script>
+ async function load(){document.getElementById('list').textContent='Loading…';const r=await fetch('/api/delayed');const j=await r.json();
+  document.getElementById('list').innerHTML=j.items.map(i=>'<a href="/orders.html">'+i+'</a>').join(' ');}
+ load();
+</script></body></html>

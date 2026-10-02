@@ -56,6 +56,7 @@ function fakeService(options: {
       filled.push({ label, value });
       return options.fillResult ?? { ok: true, snapshot: snap() };
     },
+    goBack: async () => ({ ok: true, snapshot: snap() }),
     searchWeb: async () => [],
     close: async () => undefined,
   };
@@ -262,6 +263,7 @@ describe('loop protection', () => {
         return { ok: true, snapshot: snap({ headings: [`Page ${page}`] }) };
       },
       fillOnPage: async () => ({ ok: true, snapshot: snap() }),
+      goBack: async () => ({ ok: true, snapshot: snap() }),
       searchWeb: async () => [],
       close: async () => undefined,
     };

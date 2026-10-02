@@ -1,0 +1,9 @@
+<!doctype html><html><head><title>Shadow page</title></head><body><main><h1>Shadow page</h1>
+<my-widget></my-widget>
+<div id="fake" style="cursor:pointer;border:1px solid #333;display:inline-block;padding:6px">Fancy div button</div>
+<p id="out"></p></main>
+<script>
+ class W extends HTMLElement{connectedCallback(){const r=this.attachShadow({mode:'open'});r.innerHTML='<button id="b">Shadow action</button>';r.getElementById('b').onclick=()=>{document.getElementById('out').textContent+=' shadow clicked'}}}
+ customElements.define('my-widget',W);
+ document.getElementById('fake').onclick=()=>{document.getElementById('out').textContent+=' div clicked'};
+</script></body></html>

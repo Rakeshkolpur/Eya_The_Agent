@@ -3,6 +3,8 @@ import type { BrowserContext, Page } from 'playwright-core';
 import { rootLogger } from '@main/logging/logger';
 import { buildSnapshot, findBestTextMatchIndex } from './pageSnapshot';
 import type { PageSnapshot } from './pageSnapshot';
+import type { ActionEffects, BrowserTabInfo } from './pageEffects';
+import { SEARCH_ENGINE_URLS } from './searchEngines';
 import { cleanSearchHits } from './webSearchResults';
 import type { RawSearchHit, WebSearchHit } from './webSearchResults';
 
@@ -12,25 +14,51 @@ const NAV_TIMEOUT_MS = 20_000;
 const SETTLE_TIMEOUT_MS = 5000;
 const CLICK_TIMEOUT_MS = 10_000;
 
+/** The control a click resolved to, as the user would read it. */
+export interface ClickTarget {
+  readonly name: string;
+  readonly role: string;
+}
+
+/** Given what a click would hit, says why it needs the user's yes first — or null to go ahead. */
+export type ClickGate = (target: ClickTarget) => string | null;
+
+export interface FillOptions {
+  /** Press Enter after typing (for search boxes that have no button). */
+  readonly submit?: boolean;
+}
+
 export type ActOnPageResult =
-  | { readonly ok: true; readonly snapshot: PageSnapshot }
-  | { readonly ok: false; readonly reason: 'not_found'; readonly snapshot: PageSnapshot };
+  | { readonly ok: true; readonly snapshot: PageSnapshot; readonly effects?: ActionEffects }
+  | { readonly ok: false; readonly reason: 'not_found'; readonly snapshot: PageSnapshot }
+  /** The control is something the user must approve first (a purchase, a send, a delete…). Nothing was clicked. */
+  | { readonly ok: false; readonly reason: 'needs_confirmation'; readonly why: string; readonly target: string; readonly snapshot: PageSnapshot }
+  /** Only the user can do this part (a CAPTCHA, a verification code, a password field). Nothing was done. */
+  | { readonly ok: false; readonly reason: 'needs_user'; readonly message: string; readonly snapshot: PageSnapshot }
+  /** The page would not let it happen (something covering the control, a disabled button, an option that isn't there). */
+  | { readonly ok: false; readonly reason: 'could_not'; readonly message: string; readonly snapshot: PageSnapshot };
 
 /**
- * One persistent, visible browser window Eya reuses across the whole
- * session — a human-in-front-of-the-browser model, not a headless scraper.
- * Deliberately a single current page, not full multi-tab tracking: good
- * enough for "open a site, then navigate within it", and a much smaller
- * surface to get right than tracking every tab of the user's own browser.
+ * The thing Eya browses with. Two implementations sit behind this: the user's
+ * own signed-in browser (through the Eya Browser Bridge extension) and a
+ * separate Playwright-driven window of Eya's own. Both work from the live page
+ * — look, pick something that is really there, act, look again.
  */
 export interface BrowserAutomationService {
   openWebsite(url: string): Promise<PageSnapshot>;
   inspectPage(): Promise<PageSnapshot>;
-  clickOnPage(text: string): Promise<ActOnPageResult>;
-  fillOnPage(label: string, value: string): Promise<ActOnPageResult>;
+  clickOnPage(text: string, gate?: ClickGate): Promise<ActOnPageResult>;
+  fillOnPage(label: string, value: string, options?: FillOptions): Promise<ActOnPageResult>;
+  goBack(): Promise<ActOnPageResult>;
   /** A web search read from a real results page in a throwaway tab — never touches the page currently open. */
   searchWeb(query: string): Promise<WebSearchHit[]>;
   close(): Promise<void>;
+}
+
+/** Seeing and choosing between the user's own browser tabs — only possible through the user's real browser. */
+export interface BrowserTabControl {
+  listTabs(): Promise<BrowserTabInfo[]>;
+  switchToTab(tabId: number): Promise<PageSnapshot>;
 }
 
 // Tried in order: DuckDuckGo's plain-HTML page first (simple, stable markup,
@@ -42,10 +70,16 @@ interface SearchEngine {
   extract(): RawSearchHit[];
 }
 
+const ENGINE_URL = (name: string) => {
+  const found = SEARCH_ENGINE_URLS.find((e) => e.name === name);
+  if (found === undefined) throw new Error(`unknown search engine ${name}`);
+  return (q: string) => found.url(q);
+};
+
 const SEARCH_ENGINES: readonly SearchEngine[] = [
   {
     name: 'duckduckgo',
-    url: (q) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
+    url: ENGINE_URL('duckduckgo'),
     extract: () =>
       Array.from(document.querySelectorAll('.result')).map((r) => ({
         title: r.querySelector('a.result__a')?.textContent,
@@ -55,7 +89,7 @@ const SEARCH_ENGINES: readonly SearchEngine[] = [
   },
   {
     name: 'bing',
-    url: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
+    url: ENGINE_URL('bing'),
     extract: () =>
       Array.from(document.querySelectorAll('li.b_algo')).map((li) => ({
         title: li.querySelector('h2 a')?.textContent,
@@ -197,7 +231,7 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
     return this.snapshot(this.currentPageOrThrow());
   }
 
-  async clickOnPage(text: string): Promise<ActOnPageResult> {
+  async clickOnPage(text: string, gate?: ClickGate): Promise<ActOnPageResult> {
     const page = this.currentPageOrThrow();
     // Each candidate pool keeps its own locator, so a match is re-selected by
     // INDEX on that exact same locator (`.nth(i)`) rather than re-queried by
@@ -213,20 +247,31 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
     ]);
 
     let target = null as ReturnType<typeof linksLocator.nth> | null;
+    let matched: ClickTarget | null = null;
     const linkIndex = findBestTextMatchIndex(text, linkTexts);
     if (linkIndex !== null) {
       target = linksLocator.nth(linkIndex);
+      matched = { name: linkTexts[linkIndex] ?? text, role: 'link' };
     } else {
       const buttonIndex = findBestTextMatchIndex(text, buttonTexts);
       if (buttonIndex !== null) {
         target = buttonsLocator.nth(buttonIndex);
+        matched = { name: buttonTexts[buttonIndex] ?? text, role: 'button' };
       } else {
         const inputIndex = findBestTextMatchIndex(text, inputButtonValues);
-        if (inputIndex !== null) target = inputButtonsLocator.nth(inputIndex);
+        if (inputIndex !== null) {
+          target = inputButtonsLocator.nth(inputIndex);
+          matched = { name: inputButtonValues[inputIndex] ?? text, role: 'button' };
+        }
       }
     }
-    if (target === null) {
+    if (target === null || matched === null) {
       return { ok: false, reason: 'not_found', snapshot: await this.snapshot(page) };
+    }
+    const cleanName = matched.name.replace(/\s+/g, ' ').trim();
+    const why = gate?.({ name: cleanName, role: matched.role }) ?? null;
+    if (why !== null) {
+      return { ok: false, reason: 'needs_confirmation', why, target: cleanName, snapshot: await this.snapshot(page) };
     }
     await target.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => undefined);
     await target.click({ timeout: CLICK_TIMEOUT_MS });
@@ -234,7 +279,16 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
     return { ok: true, snapshot: await this.snapshot(page) };
   }
 
-  async fillOnPage(label: string, value: string): Promise<ActOnPageResult> {
+  async goBack(): Promise<ActOnPageResult> {
+    const page = this.currentPageOrThrow();
+    const response = await page.goBack({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => null);
+    await this.settle(page);
+    const snapshot = await this.snapshot(page);
+    if (response === null) return { ok: false, reason: 'could_not', message: 'There is nothing to go back to in this window.', snapshot };
+    return { ok: true, snapshot };
+  }
+
+  async fillOnPage(label: string, value: string, options: FillOptions = {}): Promise<ActOnPageResult> {
     const page = this.currentPageOrThrow();
     const byLabel = page.getByLabel(label, { exact: false });
     const byPlaceholder = page.getByPlaceholder(label, { exact: false });
@@ -246,7 +300,20 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
     if (tag === 'select') {
       await target.selectOption({ label: value }).catch(() => target.selectOption(value));
     } else {
+      const type = ((await target.getAttribute('type')) ?? '').toLowerCase();
+      if (type === 'password') {
+        return {
+          ok: false,
+          reason: 'needs_user',
+          message: 'That is a password field. Eya never types passwords — the user has to enter it themselves.',
+          snapshot: await this.snapshot(page),
+        };
+      }
       await target.fill(value);
+      if (options.submit === true) {
+        await target.press('Enter');
+        await this.settle(page);
+      }
     }
     return { ok: true, snapshot: await this.snapshot(page) };
   }

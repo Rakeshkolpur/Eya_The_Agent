@@ -46,7 +46,12 @@ export type SensitiveAction =
   | 'open_website'
   | 'inspect_page'
   | 'click_on_page'
-  | 'fill_on_page';
+  | 'fill_on_page'
+  | 'go_back'
+  | 'list_browser_tabs'
+  | 'switch_browser_tab'
+  | 'connect_chrome'
+  | 'browser_sensitive_click';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   open_application: 'safe',
@@ -89,6 +94,14 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   click_on_page: 'safe',
   // Typing into a visible field, not submitting anything destructive by itself.
   fill_on_page: 'safe',
+  go_back: 'safe',
+  // Titles of the user's open tabs reach the assistant only when it asks for them while carrying out a request.
+  list_browser_tabs: 'safe',
+  switch_browser_tab: 'safe',
+  // Starts a short, user-initiated pairing window; nothing connects without the extension the user installed.
+  connect_chrome: 'safe',
+  // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
+  browser_sensitive_click: 'confirm',
 };
 
 export interface PermissionRequest {

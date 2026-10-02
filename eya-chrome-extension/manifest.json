@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Eya Browser Bridge",
+  "version": "0.1.0",
+  "description": "Lets the Eya desktop assistant on this PC see and operate your own browser tabs, using the sessions you are already signed in to. Talks only to Eya on this computer (127.0.0.1).",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp4FuqXTbTn5YjgYDYhkubfWlMiah9sCG0hxksWIw483zJ+t551B+F4Z5na6y6/6uqyjlqDJQ5Wjf6uwVfWK8Y882z+cgdI8nhx2IaaNMnHsBCozb9Vs3UVD6bU13p5yohpXkqQp80Ts8VYxz1/aS40UTP22SkaB4+d0b/rjn0YhmSWJwXQdU3DanfqYZ6xrgTlmlyOG2iDwFLu7h2O4uzV+3TPOes1S6SUeHP21zgyJqOSh7b+KbiPdv6pEBNH6Nq6stPxYw7wddwM8GYaMxMWi6360F3oiU2xuqa/CvEsAx+T5z6PMJViyxkPl/4GWDyOvEcAmarjo1dPmDUhkPowIDAQAB",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms",
+    "downloads"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "options_page": "options/options.html",
+  "action": {
+    "default_title": "Eya Browser Bridge - click for status"
+  }
+}

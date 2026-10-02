@@ -9,7 +9,8 @@ import type { PageSnapshot } from './pageSnapshot';
  */
 export function pageFingerprint(s: PageSnapshot): string {
   return createHash('sha1')
-    .update(JSON.stringify([s.url, s.title, s.headings, s.links, s.buttons, s.inputs, s.dialogs]))
+    // Text and tables count too: a search that only swaps the results text (no new links) is still a change.
+    .update(JSON.stringify([s.url, s.title, s.headings, s.links, s.buttons, s.inputs, s.dialogs, s.visibleText ?? '', s.tables ?? []]))
     .digest('hex');
 }
 

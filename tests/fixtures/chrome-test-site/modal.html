@@ -1,0 +1,8 @@
+<!doctype html><html><head><title>Modal page</title><style>
+ #overlay{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center}
+ #box{background:#fff;padding:20px}
+</style></head><body>
+<main><h1>Modal page</h1><button id="under" onclick="document.getElementById('res').textContent='under clicked'">Continue to account</button><p id="res"></p></main>
+<div id="overlay"><div id="box" role="dialog" aria-modal="true"><p>We use cookies to improve your experience.</p>
+<button onclick="document.getElementById('overlay').remove()">Accept cookies</button></div></div>
+</body></html>
