@@ -84,6 +84,19 @@ export function defaultScreenshotName(url: string, when: Date, mime: 'image/png'
   return `Screenshot - ${host !== '' ? host : 'web page'} - ${timestampForFileName(when)}${extensionFor(mime)}`;
 }
 
+/** A window title made safe to put in a file name (Windows forbids < > : " / \ | ? * and control characters). */
+export function safeNameLabel(text: string, limit = 60): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = text.replace(/[<>:"/\\|?*\x00-\x1f]+/g, ' ');
+  return cleaned.replace(/\s+/g, ' ').trim().replace(/^[. ]+|[. ]+$/g, '').slice(0, limit).replace(/[. ]+$/g, '');
+}
+
+/** "Screenshot 2026-10-02 21.45.10.png" for the screen, "Screenshot - Notepad - 2026-10-02 21.45.10.png" for a named window. */
+export function labelledScreenshotName(label: string, when: Date, mime: 'image/png' | 'image/jpeg'): string {
+  const safe = safeNameLabel(label);
+  return safe === '' ? `Screenshot ${timestampForFileName(when)}${extensionFor(mime)}` : `Screenshot - ${safe} - ${timestampForFileName(when)}${extensionFor(mime)}`;
+}
+
 /** A name the user (or the model for them) asked for, without a directory, and with the right extension on it. */
 export function customScreenshotName(requested: string, mime: 'image/png' | 'image/jpeg'): string {
   const stem = requested.trim().replace(/\.(png|jpe?g)$/i, '').trim();

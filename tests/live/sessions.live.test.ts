@@ -19,7 +19,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import type { Server } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { ChromeBridge } from '../../src/main/chrome/ChromeBridge';
 import type { SecretStore } from '../../src/main/chrome/ChromeBridge';
@@ -336,7 +336,11 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
       await manager.openWebsite(`${base}/orders.html`);
       await sleep(1200);
       const tool = createScreenshotTool({ capture: manager, folders });
-      const r = note(await tool.execute({}));
+      // It asks first: until the user says yes, nothing is captured or saved.
+      const asked = await tool.execute({ target: 'page' });
+      expect(asked.summary).toBe('needs confirmation');
+      expect(readdirSync(desktop)).toEqual([]);
+      const r = note(await tool.execute({ target: 'page', confirm: true }));
       expect(r.ok, JSON.stringify(r)).toBe(true);
       const path = String(r.data?.['path']);
       expect(path.startsWith(desktop)).toBe(true);
@@ -349,7 +353,7 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
       expect(JSON.stringify(r)).not.toContain('iVBORw0KGgo'); // the picture itself never reaches the result
       // and asking again straight away saves a second file instead of replacing the first
       await sleep(1100);
-      const again = await tool.execute({});
+      const again = await tool.execute({ target: 'page', confirm: true });
       expect(again.ok).toBe(true);
       expect(again.data?.['path']).not.toBe(path);
     } finally {

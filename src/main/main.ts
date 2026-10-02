@@ -1,6 +1,8 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { app, clipboard, ipcMain, session, shell } from 'electron';
+import { app, clipboard, desktopCapturer, ipcMain, screen, session, shell } from 'electron';
+import { createScreenCapture } from '@main/screen/screenCapture';
+import { queryWindowSize } from '@main/screen/windowSize';
 import { OrbWindow } from '@main/windows/OrbWindow';
 import { GlobalShortcutManager } from '@main/shortcuts/GlobalShortcut';
 import { IpcRouter } from '@main/ipc/ipcRouter';
@@ -194,7 +196,19 @@ async function bootstrap(): Promise<void> {
   for (const tool of createBrowserTools(browserService, undefined, { tabs: browserService, connector: chromeConnector, session: browserService })) {
     tools.register(tool);
   }
-  tools.register(createScreenshotTool({ capture: browserService, folders }));
+  tools.register(
+    createScreenshotTool({
+      capture: browserService,
+      folders,
+      // The screen the mouse is on, or any application's window, through Electron's own capturer.
+      screen: createScreenCapture({
+        getSources: (options) => desktopCapturer.getSources(options),
+        cursorDisplay: () => screen.getDisplayNearestPoint(screen.getCursorScreenPoint()),
+        // The capturer enlarges a window's picture to whatever size it is asked for, so ask Windows for the window's real size first.
+        windowSize: (sourceId) => queryWindowSize(sourceId),
+      }),
+    }),
+  );
 
   const window = orb.create();
   const getSender = () => (window.isDestroyed() ? null : window.webContents);

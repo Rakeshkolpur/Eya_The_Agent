@@ -18,6 +18,9 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// The real Desktop folder (OneDrive may have moved it), to prove nothing is saved before the user has said yes.
+const desktopDir = execFileSync('powershell', ['-NoProfile', '-Command', '[Environment]::GetFolderPath("Desktop")']).toString().trim();
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..').replace(/\\/g, '/');
 const { startTestSite } = await import(pathToFileURL(`${root}/tests/fixtures/chrome-test-site/server.mjs`).href);
 
@@ -184,7 +187,10 @@ try {
 
   // 8b. screenshot: a real PNG of the page in front, saved on the REAL Desktop by the real tool, then removed again
   await tool('open_website', { url: `${base}/menu.html` });
-  r = await tool('take_screenshot', { name: 'Eya e2e screenshot check' });
+  // (The page target, because the test browser has no window on the real screen. The screen/window targets are checked separately.)
+  r = await tool('take_screenshot', { target: 'page', name: 'Eya e2e screenshot check' });
+  check('take_screenshot asks first and captures nothing until told yes', r.ok === false && r.summary === 'needs confirmation' && r.data?.status === 'permission_required' && r.data?.action === 'take_screenshot' && !existsSync(`${desktopDir}/Eya e2e screenshot check.png`), r);
+  r = await tool('take_screenshot', { target: 'page', name: 'Eya e2e screenshot check', confirm: true });
   const shotPath = r.data?.path;
   const shotIsPng = typeof shotPath === 'string' && existsSync(shotPath) && readFileSync(shotPath).subarray(1, 4).toString('ascii') === 'PNG';
   check('take_screenshot saves a real PNG on the Desktop and tells the model only where', r.ok === true && shotIsPng && r.data?.folder === 'Desktop' && r.data?.verified === true && !JSON.stringify(r).includes('iVBOR'), r);

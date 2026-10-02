@@ -120,8 +120,9 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   switch_browser_tab: 'safe',
   // Starts a short, user-initiated pairing window; nothing connects without the extension the user installed.
   connect_chrome: 'safe',
-  // Saves a NEW image of the page the user asked for into their own Desktop; never overwrites, and the picture is never shown to the assistant.
-  take_screenshot: 'safe',
+  // A screen can show anything (messages, banking, another app's private content), so Eya asks first. Saves a NEW image on the
+  // user's own Desktop; never overwrites, and the picture is never shown to the assistant.
+  take_screenshot: 'confirm',
   // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
   browser_sensitive_click: 'confirm',
 };
