@@ -17,6 +17,13 @@ Saying **"connect my browser"** to Eya opens the extensions page and this folder
 3. Click **Load unpacked** and choose this folder (`eya-chrome-extension`).
 4. Say "connect my browser" to Eya once. After that it reconnects by itself whenever both are running.
 
+Use Chrome *and* Edge? Add the extension to both, then say "connect my browser" once: one pairing window pairs
+each browser separately, and both stay connected at the same time.
+
+**After updating Eya, reload the extension** (the circular arrow on its card). Each connection starts with a
+version check (protocol 2, extension 0.2.0); an older extension is refused with a plain message on the options
+page asking you to reload it.
+
 The toolbar icon shows **ON** when Eya is connected. The extension's options page shows status.
 
 Works the same in **Chrome** and **Edge** (tested in both, version 154). There is no way to install it into Chrome
@@ -29,10 +36,17 @@ Chrome Web Store as an unlisted extension; that needs a developer account and is
 
 For the page Eya is working in: look at it (headings, links, buttons, fields, readable text, tables — including
 links held by menus that are closed until hovered or opened), search the whole page for some words, read its text,
-click something by its visible text, type into a field, press Enter in a search box, go back,
-follow a link that opens a new tab, notice a download and report where it landed, open a site
-(reusing a tab you already have for it), list your tabs and switch to one. Every action ends with a
-fresh look at the page so Eya works from what is really there, not from what she expected.
+click something by its visible text, type into a field, press Enter in a search box, scroll,
+go back, forward, reload, follow a link that opens a new tab, notice a download and report where it
+landed, open a site (reusing a tab you already have for it, else a new tab in this same browser), list
+your tabs and windows, switch to one, close a tab Eya opened (one you opened is refused unless Eya says you agreed).
+Every action ends with a fresh look at the page so Eya works from what is really there, not from what she expected.
+
+**What it tells Eya about the browser itself:** when it connects it says which browser and version it is, its
+extension version, what it can do, and which windows and tabs are open (address and title only; private windows
+are left out). While connected it reports tabs opening, closing, being switched to and navigating, windows gaining
+focus, and downloads starting — each marked as done by Eya or by you, so Eya notices when you changed something
+between her steps. It reports no page contents, cookies, form values or history.
 
 ## What it will never do
 
@@ -52,7 +66,8 @@ fresh look at the page so Eya works from what is really there, not from what she
 - The Eya side accepts only a handshake whose `Origin` is this extension's own, which a web page
   cannot forge, and — after the one-time pairing you start from Eya — only a connection that
   presents the secret it was given then. That secret lives in this extension's own storage;
-  Eya keeps only a hash of it.
+  Eya keeps only a hash of it, separately for Chrome and for Edge, so one browser's secret is
+  useless to the other.
 - There is no unauthenticated way to send it a command.
 - "Forget pairing" on the options page (or Eya's side) invalidates it.
 
@@ -78,13 +93,15 @@ There are no content scripts: nothing runs on any page until Eya asks for someth
 - Controls inside another site's iframe (a payment widget, an embedded sign-in) can't be seen into.
   Same-site frames and shadow DOM can.
 - Browser-internal pages (`edge://…`, the extensions store) can't be read by any extension.
-- One browser at a time is connected to Eya.
+- Eya's clicks do not defeat a site's security: there is nothing here that hides automation, solves a
+  CAPTCHA, or copies a session out of your browser — a page that needs *you* waits for you.
 - Incognito / InPrivate windows are not visible unless you allow the extension there yourself.
 
 ## Files
 
-`manifest.json` · `service-worker.js` (requests → actions) · `bridge.js` (the local connection) ·
-`tabs.js` (tab choice, reuse, downloads) · `actions.js` (act → settle → follow → look again) ·
+`manifest.json` · `service-worker.js` (requests → actions) · `bridge.js` (the local connection and handshake) ·
+`events.js` (live tab, window and download events) ·
+`tabs.js` (tab choice, reuse, downloads, who-did-it tagging) · `actions.js` (act → settle → follow → look again) ·
 `injected.js` (the part that runs inside a page) · `options/` (status page).
 
 The extension ID is fixed by the public `key` in `manifest.json` so Eya can insist that a connection

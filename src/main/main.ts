@@ -20,12 +20,13 @@ import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/sy
 import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
 import { createBrowserTools } from '@main/tools/impl/browserTools';
 import { PlaywrightBrowserService } from '@main/browser/PlaywrightBrowserService';
-import { SwitchingBrowserService, parseBrowserMode } from '@main/browser/browserRouter';
+import { BrowserSessionManager, parseBrowserMode } from '@main/browser/BrowserSessionManager';
+import { createBrowserLauncher } from '@main/browser/browserLauncher';
 import { ChromeBridge, FileSecretStore } from '@main/chrome/ChromeBridge';
-import { ChromeBrowserService } from '@main/chrome/ChromeBrowserService';
+import { BrowserWorldTracker } from '@main/chrome/browserWorld';
 import { createChromeConnector } from '@main/chrome/chromeConnector';
 import { openExtensionsPage } from '@main/chrome/extensionsPage';
-import { launchBrowser } from '@main/windowsApi/appPaths';
+import { findAppExe, launchBrowser } from '@main/windowsApi/appPaths';
 import { registerLiveBridge } from '@main/live/liveBridge';
 import { loadWakeWordDetector } from '@main/wake/loadWakeWordDetector';
 import type { KnownFolders } from '@main/security/pathPolicy';
@@ -107,23 +108,51 @@ async function bootstrap(): Promise<void> {
   tools.register(closeApplicationTool);
   for (const tool of createFileTools(folders)) tools.register(tool);
   tools.register(createDocumentTool(folders, gemini));
-  // One browser service for everything: web_search borrows it as a fallback
-  // when Gemini's own search allowance is spent, and the website tools below
-  // drive it. Behind it sit two browsers: the user's own signed-in one (through
-  // the Eya Browser Bridge extension, whenever it is connected) and Eya's own
-  // separate window. EYA_BROWSER_MODE = auto | user_chrome | eya_browser.
-  const chromeBridge = new ChromeBridge({ secrets: new FileSecretStore(join(app.getPath('userData'), 'chrome-bridge.json')) });
-  void chromeBridge.start();
+  // Browser tasks happen in the user's OWN Chrome / Edge — their profile, their tabs, their sign-ins — through the Eya
+  // Browser Bridge extension. One session manager decides which browser, reuses their tabs, and never quietly swaps in a
+  // separate browser. Eya's own window (a separate, signed-out profile) exists only for when the user explicitly agrees to
+  // it; a second, invisible one does web-search lookups when no browser of theirs is connected.
+  // EYA_BROWSER_MODE = user_browser (default) | eya_browser | auto. EYA_PREFERRED_BROWSER = chrome | edge.
+  const bridgePort = Number(process.env['EYA_BRIDGE_PORT']);
+  const chromeBridge = new ChromeBridge({
+    secrets: new FileSecretStore(join(app.getPath('userData'), 'chrome-bridge.json')),
+    ...(Number.isInteger(bridgePort) && bridgePort > 0 ? { port: bridgePort } : {}),
+  });
+  const browserWorld = new BrowserWorldTracker();
+  browserWorld.attach(chromeBridge);
+  chromeBridge.onConnectionChange((e) => log.info(`${e.browser === 'edge' ? 'Edge' : e.browser === 'chrome' ? 'Chrome' : 'Browser'} extension: ${e.connected ? 'CONNECTED' : 'DISCONNECTED'}`));
+  void chromeBridge.start().then(() => {
+    setTimeout(() => {
+      const info = chromeBridge.info();
+      log.info('browser extensions at startup', {
+        connected: chromeBridge.connectedBrowsers(),
+        waitingToPair: info.waitingToPair,
+        paired: Object.entries(info.browsers).filter(([, b]) => b?.paired === true).map(([n]) => n),
+      });
+    }, 6000);
+  });
   const browserMode = parseBrowserMode(process.env['EYA_BROWSER_MODE']);
-  log.info('browser mode', { browserMode });
-  const browserService = new SwitchingBrowserService({
-    user: new ChromeBrowserService(chromeBridge),
-    eya: new PlaywrightBrowserService({
+  const preferredEnv = (process.env['EYA_PREFERRED_BROWSER'] ?? '').toLowerCase();
+  log.info('browser mode', { browserMode, ...(preferredEnv !== '' ? { preferred: preferredEnv } : {}) });
+  const browserService = new BrowserSessionManager({
+    bridge: chromeBridge,
+    world: browserWorld,
+    isolated: new PlaywrightBrowserService({
       profileDir: join(app.getPath('userData'), 'browser-profile'),
       downloadsDir: app.getPath('downloads'),
     }),
-    isUserBrowserConnected: () => chromeBridge.isConnected(),
+    lookup: new PlaywrightBrowserService({
+      profileDir: join(app.getPath('userData'), 'lookup-profile'),
+      downloadsDir: join(app.getPath('userData'), 'lookup-downloads'),
+      headless: true,
+    }),
+    launcher: createBrowserLauncher({
+      findExe: findAppExe,
+      launch: (browser, url) => launchBrowser(browser, url),
+      listProcessNames: defaultOpenApplicationDeps.listRunningProcessNames,
+    }),
     mode: browserMode,
+    preferred: preferredEnv === 'chrome' || preferredEnv === 'edge' ? preferredEnv : null,
   });
   const extensionFolder =
     [join(app.getAppPath(), 'eya-chrome-extension'), join(process.resourcesPath ?? '', 'eya-chrome-extension')].find((p) => existsSync(p)) ??
@@ -158,7 +187,7 @@ async function bootstrap(): Promise<void> {
     tools.register(tool);
   }
   for (const tool of createRecycleBinTools(folders)) tools.register(tool);
-  for (const tool of createBrowserTools(browserService, undefined, { tabs: browserService, connector: chromeConnector })) {
+  for (const tool of createBrowserTools(browserService, undefined, { tabs: browserService, connector: chromeConnector, session: browserService })) {
     tools.register(tool);
   }
 
@@ -189,6 +218,7 @@ async function bootstrap(): Promise<void> {
     composer,
     tts,
     context,
+    browserContext: () => browserWorld.summary(),
     ...(ai !== undefined ? { ai } : {}),
     ...(gemini.hasKey() ? { gemini } : {}),
   });

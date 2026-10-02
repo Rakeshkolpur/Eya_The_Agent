@@ -5,17 +5,27 @@
  * does not come from this extension's own origin, and — after the one-time
  * pairing the user starts from Eya — any connection that does not present the
  * secret it was given then. The secret lives in this extension's own storage.
+ *
+ * The first thing sent is a handshake: which browser this is and its version,
+ * which protocol and extension version this is, what it can do, and what is open
+ * in the browser right now (windows, tabs, which tab is in front). After that the
+ * extension keeps Eya up to date with live events.
  */
 export const BRIDGE_URL = 'ws://127.0.0.1:47821/eya-bridge';
+/** Bumped together with the desktop side whenever the messages change incompatibly. */
+export const PROTOCOL_VERSION = 2;
 const PING_MS = 20000;
 const MAX_BACKOFF_MS = 15000;
 
 export class Bridge {
-  constructor({ onRequest, onStatus, version, browserName }) {
+  constructor({ onRequest, onStatus, version, browserName, browserVersion, capabilities, getSnapshot }) {
     this.onRequest = onRequest;
     this.onStatus = onStatus;
     this.version = version;
     this.browserName = browserName;
+    this.browserVersion = browserVersion;
+    this.capabilities = capabilities;
+    this.getSnapshot = getSnapshot;
     this.ws = null;
     this.backoffMs = 1500;
     this.retryTimer = null;
@@ -49,12 +59,22 @@ export class Bridge {
 
     ws.onopen = async () => {
       const { eyaSecret } = await chrome.storage.local.get('eyaSecret');
+      let snapshot = { tabs: [], windows: [] };
+      try {
+        snapshot = await this.getSnapshot();
+      } catch {
+        // the handshake still goes ahead; the first events will fill the picture in
+      }
       console.info(`[eya-bridge] connected to Eya, saying hello (${eyaSecret ? 'with' : 'without'} a stored pairing)`);
       this.send({
         t: 'hello',
         ext: chrome.runtime.id,
-        version: this.version,
+        protocolVersion: PROTOCOL_VERSION,
+        extensionVersion: this.version,
         browser: this.browserName,
+        browserVersion: this.browserVersion,
+        capabilities: this.capabilities,
+        ...snapshot,
         ...(eyaSecret ? { secret: eyaSecret } : {}),
       });
     };
@@ -91,6 +111,11 @@ export class Bridge {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(obj));
   }
 
+  /** A live browser event for Eya; dropped silently when not connected (the next handshake carries the full picture). */
+  sendEvent(name, data) {
+    if (this.status === 'connected') this.send({ t: 'event', name, data });
+  }
+
   async handle(msg) {
     switch (msg.t) {
       case 'paired':
@@ -101,9 +126,12 @@ export class Bridge {
         this.markReady();
         break;
       case 'refused':
-        // Not paired yet (or the pairing window is closed): wait politely rather than hammer.
+        // Not paired yet, a stale secret, or a version mismatch: wait politely rather than hammer.
         if (msg.reason === 'bad_secret') await chrome.storage.local.remove('eyaSecret');
-        this.setStatus(msg.reason === 'not_pairing' ? 'waiting_for_pairing' : `refused:${msg.reason}`);
+        this.setStatus(
+          msg.reason === 'not_pairing' ? 'waiting_for_pairing' : msg.reason === 'incompatible' ? 'incompatible' : `refused:${msg.reason}`,
+          msg.detail ?? '',
+        );
         this.backoffMs = MAX_BACKOFF_MS;
         break;
       case 'ping':

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { EYA_EXTENSION_ID, EXTENSION_ORIGIN, BRIDGE_PORT, BRIDGE_PATH } from '../src/main/chrome/protocol';
+import { EYA_EXTENSION_ID, EXTENSION_ORIGIN, BRIDGE_PORT, BRIDGE_PATH, PROTOCOL_VERSION, REQUIRED_CAPABILITIES } from '../src/main/chrome/protocol';
 
 const root = join(process.cwd(), 'eya-chrome-extension');
 const manifest = JSON.parse(readFileSync(join(root, 'manifest.json'), 'utf8')) as Record<string, unknown>;
@@ -37,7 +37,7 @@ describe('the browser extension manifest', () => {
   });
 
   it('ships every file it references', () => {
-    for (const rel of ['service-worker.js', 'bridge.js', 'tabs.js', 'actions.js', 'injected.js', 'options/options.html', 'options/options.js']) {
+    for (const rel of ['service-worker.js', 'bridge.js', 'events.js', 'tabs.js', 'actions.js', 'injected.js', 'options/options.html', 'options/options.js']) {
       expect(existsSync(join(root, rel)), rel).toBe(true);
     }
     expect(existsSync(join(root, manifest['options_page'] as string))).toBe(true);
@@ -46,12 +46,36 @@ describe('the browser extension manifest', () => {
   it('only ever dials the loopback address and port the desktop side listens on', () => {
     const bridgeSource = readFileSync(join(root, 'bridge.js'), 'utf8');
     expect(bridgeSource).toContain(`ws://127.0.0.1:${BRIDGE_PORT}${BRIDGE_PATH}`);
-    for (const file of ['service-worker.js', 'bridge.js', 'tabs.js', 'actions.js', 'injected.js', 'options/options.js']) {
+    for (const file of ['service-worker.js', 'bridge.js', 'events.js', 'tabs.js', 'actions.js', 'injected.js', 'options/options.js']) {
       const source = readFileSync(join(root, file), 'utf8');
       expect(source, file).not.toMatch(/fetch\(\s*['"`]https?:/);
       expect(source, file).not.toMatch(/XMLHttpRequest/);
       expect(source, file).not.toMatch(/chrome\.cookies/);
     }
+  });
+
+  it('speaks the same protocol version as the desktop side, and offers every ability the desktop requires (they cannot drift apart)', () => {
+    const bridgeSource = readFileSync(join(root, 'bridge.js'), 'utf8');
+    expect(bridgeSource).toMatch(new RegExp(`PROTOCOL_VERSION = ${PROTOCOL_VERSION};`));
+    const worker = readFileSync(join(root, 'service-worker.js'), 'utf8');
+    const listed = /const CAPABILITIES = \[([\s\S]*?)\];/.exec(worker)?.[1] ?? '';
+    for (const capability of REQUIRED_CAPABILITIES) expect(listed, capability).toContain(`'${capability}'`);
+  });
+
+  it('every request the desktop side can send is one the extension answers', () => {
+    const worker = readFileSync(join(root, 'service-worker.js'), 'utf8');
+    for (const op of ['ping', 'list_tabs', 'focus_tab', 'focus_window', 'open_url', 'observe', 'click', 'fill', 'scroll', 'back', 'forward', 'reload', 'close_tab', 'search_page']) {
+      expect(worker, op).toContain(`case '${op}'`);
+    }
+  });
+
+  it('reports the browser\'s tabs and windows in its handshake, and forwards live events', () => {
+    expect(readFileSync(join(root, 'bridge.js'), 'utf8')).toMatch(/\.\.\.snapshot/);
+    const events = readFileSync(join(root, 'events.js'), 'utf8');
+    for (const name of ['tab_created', 'tab_removed', 'tab_activated', 'tab_updated', 'navigation_started', 'navigation_completed', 'window_focused', 'window_created', 'window_removed', 'download_created']) {
+      expect(events, name).toContain(`'${name}'`);
+    }
+    expect(events).toContain('incognito'); // private windows are never reported
   });
 
   it('the page script has no module-level dependencies (it is serialised into the page as source text)', () => {

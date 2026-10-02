@@ -52,6 +52,9 @@ function fake(over: {
       return unwrap(over.fill?.(label) ?? { ok: true as const, snapshot: page });
     },
     goBack: async () => unwrap(over.back?.() ?? { ok: true as const, snapshot: page }),
+    goForward: async () => ({ ok: true as const, snapshot: page }),
+    reload: async () => ({ ok: true as const, snapshot: page }),
+    scroll: async () => ({ ok: true as const, snapshot: page }),
     findOnPage: async (query) => ({ url: '', title: '', query, matches: [], textMatches: [], totalControls: 0 }),
     readPage: async () => ({ url: '', title: '', text: '', offset: 0, nextOffset: null, totalChars: 0 }),
     searchWeb: async () => [],
@@ -297,54 +300,214 @@ describe('a browser that is not connected', () => {
 });
 
 describe('optional tools', () => {
-  it('tab tools and connect_chrome exist only when the user\'s browser can be reached', () => {
+  const tabsStub = {
+    listTabs: async () => [],
+    switchToTab: async () => snap(),
+    closeTab: async () => ({ closed: true, remainingTabs: 0 }),
+  };
+  const connectorStub = {
+    connect: async () => ({ connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: false }),
+  };
+
+  it('tab, status and connect tools exist only when the user\'s browser can be reached', () => {
     const f = fake();
     const bare = Object.keys(tools(f));
-    expect(bare).toEqual(['open_website', 'inspect_page', 'find_on_page', 'read_page', 'click_on_page', 'fill_on_page', 'go_back']);
+    expect(bare).toEqual(['open_website', 'inspect_page', 'find_on_page', 'read_page', 'click_on_page', 'fill_on_page', 'scroll_page', 'go_back', 'go_forward', 'reload_page']);
     const full = Object.keys(
       tools(f, {
-        tabs: { listTabs: async () => [], switchToTab: async () => snap() },
-        connector: { connect: async () => ({ connected: true, alreadyConnected: true, extensionFolder: 'x', helpOpened: false }) },
+        tabs: tabsStub,
+        connector: connectorStub,
+        session: { describe: () => ({ mode: 'user_browser', browsers: [], waitingToPair: [], pairingOpen: false, workingIn: null }), waitForUserChange: async () => ({ changed: false, snapshot: snap() }) },
       }),
     );
-    expect(full).toEqual(expect.arrayContaining(['list_browser_tabs', 'switch_browser_tab', 'connect_chrome']));
+    expect(full).toEqual(
+      expect.arrayContaining(['list_browser_tabs', 'switch_browser_tab', 'close_browser_tab', 'browser_status', 'wait_for_user_in_browser', 'connect_chrome']),
+    );
   });
 
-  it('lists tabs by id, title and address, and switches by id', async () => {
+  it('lists tabs with the browser each is in, and switches by id (and browser)', async () => {
     const f = fake();
+    const switched: Array<[number, string | undefined]> = [];
     const t = tools(f, {
       tabs: {
+        ...tabsStub,
         listTabs: async () => [
-          { tabId: 3, title: 'Inbox', url: 'https://mail.example/', active: true, openedByEya: false, workingHere: false },
-          { tabId: 4, title: 'Docs', url: 'https://docs.example/', active: false, openedByEya: true, workingHere: true },
+          { browser: 'chrome', tabId: 3, title: 'Inbox', url: 'https://mail.example/', active: true, openedByEya: false, workingHere: false },
+          { browser: 'edge', tabId: 4, title: 'Docs', url: 'https://docs.example/', active: false, openedByEya: true, workingHere: true },
         ],
-        switchToTab: async (id) => snap({ title: `tab ${id}` }),
+        switchToTab: async (id, browser) => {
+          switched.push([id, browser]);
+          return snap({ title: `tab ${id}` });
+        },
       },
     });
     const listed = await t['list_browser_tabs']!.execute({});
     expect(listed.summary).toBe('2 tabs open');
     expect(listed.data?.['tabs']).toEqual([
-      { tabId: 3, title: 'Inbox', url: 'https://mail.example/', activeInBrowser: true },
-      { tabId: 4, title: 'Docs', url: 'https://docs.example/', eyaIsHere: true },
+      { browser: 'chrome', tabId: 3, title: 'Inbox', url: 'https://mail.example/', activeInBrowser: true },
+      { browser: 'edge', tabId: 4, title: 'Docs', url: 'https://docs.example/', eyaIsHere: true, openedByEya: true },
     ]);
-    const switched = await t['switch_browser_tab']!.execute({ tab_id: 4 });
-    expect(switched.ok).toBe(true);
-    expect(switched.summary).toBe('switched to tab 4');
+    const result = await t['switch_browser_tab']!.execute({ tab_id: 4, browser: 'edge' });
+    expect(result.ok).toBe(true);
+    expect(result.summary).toBe('switched to tab 4');
+    expect(switched).toEqual([[4, 'edge']]);
     expect((await t['switch_browser_tab']!.execute({})).ok).toBe(false);
   });
 
-  it('connect_chrome reports connection, or exactly what the user still has to do', async () => {
+  it('connect_chrome reports every browser it connected, or exactly what the user still has to do', async () => {
     const f = fake();
-    const connected = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browser: 'edge', extensionFolder: 'x', helpOpened: true }) } });
-    expect(await connected['connect_chrome']!.execute({})).toMatchObject({ ok: true, summary: 'connected', data: { connected: true, browser: 'edge' } });
+    const both = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const, 'edge' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: true }) } });
+    expect(await both['connect_chrome']!.execute({})).toMatchObject({ ok: true, summary: 'connected chrome and edge', data: { connected: true, browsers: ['chrome', 'edge'] } });
 
-    const waiting = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: true }) } });
+    const partial = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const], stillWaiting: ['edge' as const], extensionFolder: 'x', helpOpened: false }) } });
+    expect((await partial['connect_chrome']!.execute({})).data).toMatchObject({ notYetConnected: ['edge'] });
+
+    const waiting = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: true }) } });
     const r = await waiting['connect_chrome']!.execute({});
     expect(r.ok).toBe(false);
     expect(r.summary).toBe('waiting for you');
     expect(r.error).toMatch(/Load unpacked/);
     expect(r.error).toMatch(/eya-chrome-extension/);
     expect(r.data).toMatchObject({ connected: false, extensionFolder: 'C:\\app\\eya-chrome-extension' });
+  });
+});
+
+describe('the user\'s browser is the default; Eya\'s own window only when asked for', () => {
+  it('open_website passes isolated only when the model sets it (after the user agreed), and says why a browser is unavailable', async () => {
+    const calls: Array<{ url: string; options: unknown }> = [];
+    const f = fake();
+    const service: BrowserAutomationService = {
+      ...f.service,
+      openWebsite: async (url, options) => {
+        calls.push({ url, options });
+        if (calls.length === 3) throw new BrowserUnavailableError('The extension in the user\'s Chrome is running but is not connected.', { why: 'needs_pairing', needsPairing: ['chrome'] });
+        return snap({ url });
+      },
+    };
+    const open = createBrowserTools(service)[0]!;
+    await open.execute({ url: 'https://a.example' });
+    await open.execute({ url: 'https://b.example', isolated: true });
+    const blocked = await open.execute({ url: 'https://c.example' });
+    expect(calls.map((c) => c.options)).toEqual([undefined, { isolated: true }, undefined]);
+    expect(blocked.ok).toBe(false);
+    expect(blocked.summary).toBe('browser not connected');
+    expect(blocked.data).toMatchObject({ browserUnavailable: true, why: 'needs_pairing', needsPairing: ['chrome'] });
+  });
+});
+
+describe('scroll, forward, reload and closing tabs', () => {
+  it('scroll_page needs a direction, scrolls, and reports the page that is showing afterwards', async () => {
+    const scrolled: Array<[string, number | undefined]> = [];
+    const f = fake();
+    const service: BrowserAutomationService = {
+      ...f.service,
+      scroll: async (direction, amount) => {
+        scrolled.push([direction, amount]);
+        return { ok: true, snapshot: snap({ visibleText: 'further down' }) };
+      },
+    };
+    const t = Object.fromEntries(createBrowserTools(service).map((x) => [x.schema.name, x]));
+    expect((await t['scroll_page']!.execute({})).ok).toBe(false);
+    const r = await t['scroll_page']!.execute({ direction: 'down', amount: 400 });
+    expect(r.ok).toBe(true);
+    expect(scrolled).toEqual([['down', 400]]);
+    expect((r.data?.['currentPage'] as Record<string, unknown>)['visibleText']).toBe('further down');
+  });
+
+  it('go_forward and reload_page act and show the resulting page', async () => {
+    const f = fake();
+    const t = tools(f);
+    expect((await t['go_forward']!.execute({})).data).toMatchObject({ action: 'forward' });
+    expect((await t['reload_page']!.execute({})).data).toMatchObject({ action: 'reload' });
+  });
+
+  it('a tab Eya opened closes at once; one the user opened asks first, and only a yes (confirm) closes it', async () => {
+    const closed: Array<{ id: number; allowUserTab: boolean | undefined }> = [];
+    const f = fake();
+    const t = tools(f, {
+      tabs: {
+        listTabs: async () => [
+          { browser: 'chrome', tabId: 1, title: 'My bank', url: 'https://bank.example/', active: true, openedByEya: false, workingHere: false },
+          { browser: 'chrome', tabId: 2, title: 'Search results', url: 'https://s.example/', active: false, openedByEya: true, workingHere: true },
+        ],
+        switchToTab: async () => snap(),
+        closeTab: async (id, options) => {
+          closed.push({ id, allowUserTab: options?.allowUserTab });
+          return { closed: true, remainingTabs: 1 };
+        },
+      },
+    });
+    const own = await t['close_browser_tab']!.execute({ tab_id: 2 });
+    expect(own.ok).toBe(true);
+    expect(closed).toEqual([{ id: 2, allowUserTab: false }]);
+
+    const theirs = await t['close_browser_tab']!.execute({ tab_id: 1 });
+    expect(theirs.ok).toBe(false);
+    expect(theirs.summary).toBe('needs confirmation');
+    expect(theirs.data).toMatchObject({ status: 'permission_required', action: 'close_browser_tab' });
+    expect(closed).toHaveLength(1); // nothing more was closed
+
+    const agreed = await t['close_browser_tab']!.execute({ tab_id: 1, confirm: true });
+    expect(agreed.ok).toBe(true);
+    expect(closed[1]).toEqual({ id: 1, allowUserTab: true });
+
+    expect((await t['close_browser_tab']!.execute({ tab_id: 99 })).summary).toBe('no such tab');
+  });
+});
+
+describe('browser_status and wait_for_user_in_browser', () => {
+  const overview = {
+    mode: 'user_browser' as const,
+    browsers: [
+      { browser: 'chrome' as const, connected: true, paired: true, extensionVersion: '0.2.0', tabs: 5, inUse: true },
+      { browser: 'edge' as const, connected: false, paired: true },
+    ],
+    waitingToPair: [],
+    pairingOpen: false,
+    workingIn: 'your_browser' as const,
+    workingBrowser: 'chrome' as const,
+  };
+
+  it('browser_status says which browsers are connected, and what to do when none is', async () => {
+    const f = fake();
+    const ok = tools(f, { session: { describe: () => overview, waitForUserChange: async () => ({ changed: false, snapshot: snap() }) } });
+    const r = await ok['browser_status']!.execute({});
+    expect(r.summary).toBe('chrome connected');
+    expect(r.data).toMatchObject({ workingIn: 'your_browser', workingBrowser: 'chrome' });
+
+    const none = tools(f, { session: { describe: () => ({ ...overview, browsers: [], workingIn: null }), waitForUserChange: async () => ({ changed: false, snapshot: snap() }) } });
+    const r2 = await none['browser_status']!.execute({});
+    expect(r2.summary).toBe('no browser connected');
+    expect(String(r2.data?.['hint'])).toMatch(/connect_chrome/);
+
+    const knocking = tools(f, { session: { describe: () => ({ ...overview, browsers: [], waitingToPair: ['edge'], workingIn: null }), waitForUserChange: async () => ({ changed: false, snapshot: snap() }) } });
+    expect((await knocking['browser_status']!.execute({})).data).toMatchObject({ extensionRunningButNotConnected: ['edge'] });
+  });
+
+  it('wait_for_user_in_browser returns the page as it now is when the user finishes, or says it is still waiting', async () => {
+    const f = fake();
+    const waits: number[] = [];
+    let finished = false;
+    const t = tools(f, {
+      session: {
+        describe: () => overview,
+        waitForUserChange: async (ms) => {
+          waits.push(ms ?? 0);
+          return finished
+            ? { changed: true, cleared: 'login', snapshot: snap({ title: 'My account', url: 'https://x.example/account' }) }
+            : { changed: false, snapshot: snap({ challenge: { kind: 'login', hint: 'h' } }) };
+        },
+      },
+    });
+    const waiting = await t['wait_for_user_in_browser']!.execute({});
+    expect(waiting.ok).toBe(true);
+    expect(waiting.data).toMatchObject({ stillWaiting: true });
+
+    finished = true;
+    const done = await t['wait_for_user_in_browser']!.execute({ seconds: 99 });
+    expect(done.data).toMatchObject({ userFinished: true, cleared: 'login' });
+    expect((done.data?.['currentPage'] as { title: string }).title).toBe('My account');
+    expect(waits).toEqual([25_000, 30_000]); // default 25s, never more than 30s per call
   });
 });
 

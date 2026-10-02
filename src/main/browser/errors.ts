@@ -3,8 +3,18 @@
  * did not have that button": this one means stop and tell the user, never
  * quietly carry on in some other browser.
  */
+export interface BrowserUnavailableDetail {
+  /** Browsers whose extension is running and wants to connect, but has not been paired with Eya yet. */
+  readonly needsPairing?: readonly ('chrome' | 'edge' | 'other')[];
+  /** Why, in one machine-readable word: not_connected | needs_pairing | no_browser | no_extension | lost_connection | needs_update. */
+  readonly why?: string;
+}
+
 export class BrowserUnavailableError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly detail: BrowserUnavailableDetail = {},
+  ) {
     super(message);
     this.name = 'BrowserUnavailableError';
   }

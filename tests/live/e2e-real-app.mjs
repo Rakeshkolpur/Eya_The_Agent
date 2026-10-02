@@ -1,17 +1,19 @@
 // End to end: the REAL running Eya app (debug instance on CDP :9222) -> its real tool registry ->
-// SwitchingBrowserService -> ChromeBridge -> the real extension in a real (temporary-profile) Edge.
+// BrowserSessionManager -> ChromeBridge -> the real extension in a real (temporary-profile) Chrome or Edge.
 //
 // Run it (Windows, Edge installed):
 //   1. Start a SEPARATE debug Eya with its own user-data dir, so it doesn't collide with one you use:
+//        set EYA_BRIDGE_PORT=47835
 //        npx electron-vite dev -- --remote-debugging-port=9222 --user-data-dir=%TEMP%\eya-e2e-userdata
-//      (stop any Eya already holding port 47821 first; this test opens a pairing window and pairs a throwaway Edge)
+//      (EYA_BRIDGE_PORT keeps this test instance off port 47821, so an Eya you really use is not disturbed; the
+//       extension is loaded from a copy of the folder that dials the same test port)
 //   2. node tests/live/e2e-real-app.mjs
 //   3. Stop that debug Eya.
-// Side effects, by design: `connect_chrome` opens edge://extensions and the extension folder on your desktop.
+// Side effects, by design: `connect_chrome` opens the browser's extensions page and the extension folder on your desktop.
 // It launches a temporary headless Edge profile (deleted afterwards) and never touches your own browser profile.
 // EYA_E2E_NO_DEVMODE=1 skips switching Developer mode on, to reproduce Edge disabling the unpacked extension at restart.
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -74,7 +76,11 @@ const edgePath = (wantEdge
   ? [join(process.env['ProgramFiles(x86)'] ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'), join(process.env['ProgramFiles'] ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe')]
   : [join(process.env['ProgramFiles'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'), join(process.env['ProgramFiles(x86)'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'), join(process.env['LOCALAPPDATA'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe')]
 ).find(existsSync);
-const extPath = `${root}/eya-chrome-extension`.replace(/\//g, '\\');
+const bridgePort = Number(process.env.EYA_BRIDGE_PORT ?? 47835);
+const extCopy = mkdtempSync(join(tmpdir(), 'eya-e2e-ext-'));
+cpSync(`${root}/eya-chrome-extension`, extCopy, { recursive: true });
+writeFileSync(join(extCopy, 'bridge.js'), readFileSync(join(extCopy, 'bridge.js'), 'utf8').replace('ws://127.0.0.1:47821/', `ws://127.0.0.1:${bridgePort}/`));
+const extPath = extCopy;
 let edge = null;
 // Edge honours --load-extension. Chrome 137+ ignores it, so the first launch loads the unpacked extension over the
 // debugging protocol — standing in for the user's "Load unpacked" click. A later launch of the same profile relies on
@@ -107,7 +113,7 @@ try {
   await sleep(1500);
   await startEdge(true);
   const conn = await connecting;
-  check('connect_chrome pairs the browser', conn.ok === true && conn.data?.connected === true && conn.data?.browser === expectedBrowser, conn);
+  check('connect_chrome pairs the browser', conn.ok === true && conn.data?.connected === true && Array.isArray(conn.data?.browsers) && conn.data.browsers.includes(expectedBrowser), conn);
 
   // What the user does on the extensions page: Developer mode ON (required to see "Load unpacked" at all).
   // Without it, Edge disables an unpacked extension at its next restart (measured separately).
@@ -300,6 +306,7 @@ try {
   ws.close();
   await sleep(500);
   rmSync(profile, { recursive: true, force: true });
+  rmSync(extCopy, { recursive: true, force: true });
   rmSync(downloads, { recursive: true, force: true });
 }
 console.log(failures === 0 ? '\nE2E ALL PASSED' : `\nE2E ${failures} FAILED`);

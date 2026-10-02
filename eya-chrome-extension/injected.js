@@ -698,6 +698,50 @@ export async function eyaPageAgent(command, params) {
     return { ok: true, from };
   }
 
+  function forwardOp() {
+    const from = location.href;
+    history.forward();
+    return { ok: true, from };
+  }
+
+  /** Scroll the page (or, on a page that scrolls inside a panel instead, the biggest scrollable panel in view). */
+  function scrollOp(p) {
+    const direction = ['up', 'down', 'top', 'bottom'].includes(p?.direction) ? p.direction : 'down';
+    const viewport = window.innerHeight;
+    const amount = Number(p?.amount) > 0 ? Number(p.amount) : Math.round(viewport * 0.85);
+    let target = null; // null = the window itself
+    const root = document.scrollingElement || document.documentElement;
+    if (root.scrollHeight <= viewport + 8) {
+      let best = 0;
+      for (const el of document.querySelectorAll('*')) {
+        const style = getComputedStyle(el);
+        if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 8 && isVisible(el)) {
+          const area = el.clientWidth * el.clientHeight;
+          if (area > best) {
+            best = area;
+            target = el;
+          }
+        }
+      }
+    }
+    const read = () => (target ? { y: target.scrollTop, max: target.scrollHeight - target.clientHeight } : { y: window.scrollY, max: root.scrollHeight - viewport });
+    const before = read();
+    const to = (top) => (target ? target.scrollTo({ top, behavior: 'instant' }) : window.scrollTo({ top, behavior: 'instant' }));
+    if (direction === 'top') to(0);
+    else if (direction === 'bottom') to(before.max + 10_000);
+    else to(before.y + (direction === 'up' ? -amount : amount));
+    const after = read();
+    return {
+      ok: true,
+      moved: Math.abs(after.y - before.y) > 1,
+      y: Math.round(after.y),
+      max: Math.round(Math.max(0, after.max)),
+      atTop: after.y <= 1,
+      atBottom: after.y >= after.max - 2,
+      inPanel: target !== null,
+    };
+  }
+
   // -------------------------------------------------------------- quiet wait
   function ensureObserver() {
     if (state.observer) return;
@@ -773,6 +817,10 @@ export async function eyaPageAgent(command, params) {
       return pressOp(params);
     case 'back':
       return backOp();
+    case 'forward':
+      return forwardOp();
+    case 'scroll':
+      return scrollOp(params);
     case 'waitQuiet':
       return waitQuiet(params);
     case 'extractSearch':

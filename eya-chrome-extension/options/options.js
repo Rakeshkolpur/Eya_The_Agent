@@ -10,8 +10,18 @@ function render(info) {
   const known = EXPLAIN[info.status];
   const [cls, text] = known ?? ['off', info.status.startsWith('refused') ? `Eya refused the connection (${info.status.split(':')[1]}).` : info.status];
   pill.className = `pill ${cls}`;
-  pill.textContent = info.status === 'connected' ? 'Connected' : info.status === 'waiting_for_pairing' ? 'Waiting to be paired' : cls === 'waiting' ? 'Connecting' : 'Not connected';
-  document.getElementById('explain').textContent = text;
+  pill.textContent =
+    info.status === 'connected'
+      ? 'Connected'
+      : info.status === 'waiting_for_pairing'
+        ? 'Waiting to be paired'
+        : info.status === 'incompatible'
+          ? 'Needs an update'
+          : cls === 'waiting'
+            ? 'Connecting'
+            : 'Not connected';
+  // Eya's own words about a mismatch (which versions, and what to do) are shown as she wrote them.
+  document.getElementById('explain').textContent = info.status === 'incompatible' && info.detail ? info.detail : text;
   document.getElementById('browser').textContent = info.browser ?? '—';
   document.getElementById('version').textContent = info.version ?? '—';
   document.getElementById('extid').textContent = info.extensionId ?? '—';

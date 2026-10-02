@@ -8,7 +8,10 @@ import type {
   FillOptions,
   FindOnPageResult,
   ReadPageResult,
+  ScrollDirection,
 } from '@main/browser/BrowserAutomationService';
+import type { BrowserName } from './protocol';
+import { withExtras } from '@main/browser/pageSnapshot';
 import { BrowserUnavailableError } from '@main/browser/errors';
 import type { ActionEffects, BrowserTabInfo, DownloadInfo } from '@main/browser/pageEffects';
 import { challengeMessage, isBlockingChallenge } from '@main/browser/challenges';
@@ -30,7 +33,7 @@ export interface BridgeLike {
 }
 
 interface ActionReply {
-  readonly performed: { readonly ok: boolean; readonly reason?: string; readonly detail?: string; readonly options: readonly string[] };
+  readonly performed: { readonly ok: boolean; readonly reason?: string; readonly detail?: string; readonly options: readonly string[]; readonly moved?: boolean };
   readonly tabId: number | null;
   readonly state: PageState;
   readonly settled: boolean;
@@ -67,6 +70,7 @@ function parseReply(raw: unknown): ActionReply {
       ok: p['ok'] !== false,
       ...(typeof p['reason'] === 'string' ? { reason: p['reason'] } : {}),
       ...(typeof p['detail'] === 'string' ? { detail: p['detail'] } : {}),
+      ...(typeof p['moved'] === 'boolean' ? { moved: p['moved'] } : {}),
       options: Array.isArray(p['options']) ? p['options'].filter((o): o is string => typeof o === 'string').slice(0, 25) : [],
     },
     tabId: typeof r['tabId'] === 'number' ? r['tabId'] : null,
@@ -90,6 +94,8 @@ export interface PageAgentServiceOptions {
   readonly environment?: BrowserEnvironment;
   /** What to say when the browser cannot be reached at all. */
   readonly unavailableMessage?: string;
+  /** Which browser's extension this talks to, stamped on the tabs it lists. */
+  readonly browserName?: BrowserName;
 }
 
 const DEFAULT_UNAVAILABLE =
@@ -98,6 +104,7 @@ const DEFAULT_UNAVAILABLE =
 export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl {
   private readonly environment: BrowserEnvironment;
   private readonly unavailableMessage: string;
+  private readonly browserName: BrowserName | undefined;
   /** The site menu bar the model was last shown, so an identical one is not listed again on the next page. */
   private lastNavigation = new Set<string>();
 
@@ -107,6 +114,7 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
   ) {
     this.environment = options.environment ?? 'your_browser';
     this.unavailableMessage = options.unavailableMessage ?? DEFAULT_UNAVAILABLE;
+    this.browserName = options.browserName;
   }
 
   private async call<T = unknown>(op: string, args: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
@@ -252,10 +260,34 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
   }
 
   async goBack(): Promise<ActOnPageResult> {
+    return this.navigateHistory('back');
+  }
+
+  async goForward(): Promise<ActOnPageResult> {
+    return this.navigateHistory('forward');
+  }
+
+  async reload(): Promise<ActOnPageResult> {
+    return this.navigateHistory('reload');
+  }
+
+  private async navigateHistory(op: 'back' | 'forward' | 'reload'): Promise<ActOnPageResult> {
     const { state: before } = await this.look();
-    const reply = parseReply(await this.call('back', {}, 60_000));
+    const reply = parseReply(await this.call(op, {}, 60_000));
     if (!reply.performed.ok) return this.failureResult(reply);
     return this.okResult(before, reply);
+  }
+
+  async scroll(direction: ScrollDirection, amount?: number): Promise<ActOnPageResult> {
+    const { tabId, state: before } = await this.look();
+    const reply = parseReply(await this.call('scroll', { ...(tabId !== null ? { tabId } : {}), direction, ...(amount !== undefined ? { amount } : {}) }, 30_000));
+    if (!reply.performed.ok) return this.failureResult(reply);
+    const result = this.okResult(before, reply);
+    if (result.ok && reply.performed.moved === false) {
+      // Said plainly, because "nothing happened" on a scroll means the page has no more in that direction.
+      return { ...result, snapshot: withExtras(result.snapshot, { notes: ['The page did not move — it is already at the very ' + (direction === 'up' || direction === 'top' ? 'top.' : 'bottom.')] }) };
+    }
+    return result;
   }
 
   async searchWeb(query: string): Promise<WebSearchHit[]> {
@@ -283,6 +315,10 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
       if (typeof r['tabId'] !== 'number') return [];
       return [
         {
+          ...(this.browserName !== undefined ? { browser: this.browserName } : {}),
+          ...(typeof r['windowId'] === 'number' ? { windowId: r['windowId'] } : {}),
+          ...(r['pinned'] === true ? { pinned: true } : {}),
+          ...(r['loading'] === true ? { loading: true } : {}),
           tabId: r['tabId'],
           title: typeof r['title'] === 'string' ? r['title'] : '',
           url: typeof r['url'] === 'string' ? r['url'] : '',
@@ -297,6 +333,11 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
   async switchToTab(tabId: number): Promise<PageSnapshot> {
     const reply = parseReply(await this.call('focus_tab', { tabId }));
     return this.snapshot(reply.state);
+  }
+
+  async closeTab(tabId: number, options: { readonly allowUserTab?: boolean } = {}): Promise<{ readonly closed: boolean; readonly remainingTabs: number }> {
+    const r = asRecord(await this.call('close_tab', { tabId, allowUserTab: options.allowUserTab === true }));
+    return { closed: r['closed'] === true, remainingTabs: (await this.listTabs()).length };
   }
 
   /** Eya does not own the user's browser, so there is nothing for her to close. */

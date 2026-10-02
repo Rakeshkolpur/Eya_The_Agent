@@ -1,5 +1,13 @@
 import { ChromeBrowserService } from '@main/chrome/ChromeBrowserService';
-import type { ActOnPageResult, BrowserAutomationService, ClickGate, FillOptions, FindOnPageResult, ReadPageResult } from './BrowserAutomationService';
+import type {
+  ActOnPageResult,
+  BrowserAutomationService,
+  ClickGate,
+  FillOptions,
+  FindOnPageResult,
+  ReadPageResult,
+  ScrollDirection,
+} from './BrowserAutomationService';
 import { PlaywrightPageHost } from './PlaywrightPageHost';
 import type { PlaywrightHostOptions } from './PlaywrightPageHost';
 import type { PageSnapshot } from './pageSnapshot';
@@ -39,6 +47,15 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
   }
   goBack(): Promise<ActOnPageResult> {
     return this.inner.goBack();
+  }
+  goForward(): Promise<ActOnPageResult> {
+    return this.inner.goForward();
+  }
+  reload(): Promise<ActOnPageResult> {
+    return this.inner.reload();
+  }
+  scroll(direction: ScrollDirection, amount?: number): Promise<ActOnPageResult> {
+    return this.inner.scroll(direction, amount);
   }
   searchWeb(query: string): Promise<WebSearchHit[]> {
     return this.inner.searchWeb(query);

@@ -99,6 +99,8 @@ export interface AgentDeps {
   readonly ai?: AIProvider;
   readonly gemini?: Transcriber;
   readonly now?: () => Date;
+  /** What is going on in the user's browsers right now (which are connected, how many tabs), for the model's context. */
+  readonly browserContext?: () => string;
 }
 
 /**
@@ -253,8 +255,10 @@ export class AgentEngine implements RequestHandler, AudioHandler {
     const started = Date.now();
     const now = this.deps.now?.() ?? new Date();
     const hint = contextHintText(context);
+    const browserNow = this.deps.browserContext?.() ?? '';
+    const extras = [hint, browserNow === '' ? undefined : browserNow].filter((x): x is string => x !== undefined);
     const messages: AIChatMessage[] = [
-      { role: 'system', content: hint === undefined ? systemPrompt(now) : `${systemPrompt(now)}\n\n${hint}` },
+      { role: 'system', content: extras.length === 0 ? systemPrompt(now) : `${systemPrompt(now)}\n\n${extras.join('\n\n')}` },
       ...this.messagesFromContext(context),
       { role: 'user', content: req.text },
     ];

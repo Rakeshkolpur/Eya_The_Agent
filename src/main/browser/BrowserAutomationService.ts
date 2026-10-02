@@ -52,8 +52,18 @@ export interface ReadPageResult {
  * Browser Bridge extension) and a separate window of Eya's own (Playwright). Both run the same page script and the same
  * service on top of it — look, pick something that is really there, act, look again.
  */
+export interface OpenWebsiteOptions {
+  /**
+   * Use Eya's own separate browser window instead of the user's browser. Only ever for a task the user has agreed to
+   * run that way: it starts signed out of everything, and is never chosen silently.
+   */
+  readonly isolated?: boolean;
+}
+
+export type ScrollDirection = 'up' | 'down' | 'top' | 'bottom';
+
 export interface BrowserAutomationService {
-  openWebsite(url: string): Promise<PageSnapshot>;
+  openWebsite(url: string, options?: OpenWebsiteOptions): Promise<PageSnapshot>;
   inspectPage(): Promise<PageSnapshot>;
   /** Searches the WHOLE page (showing, further down, closed menus, its text) for something, instead of only the first screenful. */
   findOnPage(query: string): Promise<FindOnPageResult>;
@@ -62,6 +72,10 @@ export interface BrowserAutomationService {
   clickOnPage(text: string, gate?: ClickGate): Promise<ActOnPageResult>;
   fillOnPage(label: string, value: string, options?: FillOptions): Promise<ActOnPageResult>;
   goBack(): Promise<ActOnPageResult>;
+  goForward(): Promise<ActOnPageResult>;
+  reload(): Promise<ActOnPageResult>;
+  /** Scrolls the page (or the panel it scrolls inside) and reports what is showing afterwards. */
+  scroll(direction: ScrollDirection, amount?: number): Promise<ActOnPageResult>;
   /** A web search read from a real results page in a throwaway tab — never touches the page currently open. */
   searchWeb(query: string): Promise<WebSearchHit[]>;
   close(): Promise<void>;
@@ -69,6 +83,13 @@ export interface BrowserAutomationService {
 
 /** Seeing and choosing between the user's own browser tabs — only possible through the user's real browser. */
 export interface BrowserTabControl {
-  listTabs(): Promise<BrowserTabInfo[]>;
-  switchToTab(tabId: number): Promise<PageSnapshot>;
+  /** Every tab in every connected browser (or just one browser's). */
+  listTabs(browser?: 'chrome' | 'edge' | 'other'): Promise<BrowserTabInfo[]>;
+  /** Tab numbers repeat across browsers, so name the browser when more than one is connected. */
+  switchToTab(tabId: number, browser?: 'chrome' | 'edge' | 'other'): Promise<PageSnapshot>;
+  /**
+   * Closes a tab. By default only one Eya opened herself; closing one of the user's needs `allowUserTab`, which the
+   * tool only passes after the user has said yes.
+   */
+  closeTab(tabId: number, options?: { readonly browser?: 'chrome' | 'edge' | 'other'; readonly allowUserTab?: boolean }): Promise<{ readonly closed: boolean; readonly remainingTabs: number }>;
 }

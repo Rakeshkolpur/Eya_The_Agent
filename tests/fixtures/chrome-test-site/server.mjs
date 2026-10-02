@@ -5,6 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderPortal } from './portal.mjs';
+import { handleAuth } from './auth.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const TYPES = { '.html': 'text/html; charset=utf-8', '.txt': 'text/plain' };
@@ -24,6 +25,7 @@ export function startTestSite(port = 0) {
       }, 900);
       return;
     }
+    if (handleAuth(req, res, url)) return;
     const portal = renderPortal(url.pathname);
     if (portal !== null) {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });

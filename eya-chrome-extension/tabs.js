@@ -99,6 +99,46 @@ export async function resolveTabId(requested) {
   return active.id;
 }
 
+// ------------------------------------------- what Eya is doing right now vs. what the user did
+// Browser events that happen while Eya is carrying out a request are tagged, so the desktop side can tell
+// "Eya clicked" from "the user clicked" and never carries on from a plan the user has already overtaken.
+let eyaActions = 0;
+export const beginEyaAction = () => {
+  eyaActions += 1;
+};
+export const endEyaAction = () => {
+  eyaActions = Math.max(0, eyaActions - 1);
+};
+export const eyaIsActing = () => eyaActions > 0;
+
+/** A tab as the desktop side sees it. The address has anything credential-like stripped. */
+export function wireTab(t) {
+  return {
+    tabId: t.id,
+    windowId: t.windowId,
+    title: (t.title ?? '').slice(0, 120),
+    url: redactedUrl(t.url ?? t.pendingUrl ?? ''),
+    active: t.active === true,
+    pinned: t.pinned === true,
+    loading: t.status === 'loading',
+  };
+}
+
+/** Everything open in this browser right now (private windows are never reported): tabs, windows, which tab is in front. */
+export async function snapshotBrowser() {
+  const [allTabs, allWindows] = await Promise.all([chrome.tabs.query({}), chrome.windows.getAll({ populate: false })]);
+  const tabs = allTabs.filter((t) => t.id !== undefined && !t.incognito);
+  const windows = allWindows.filter((w) => !w.incognito && w.id !== undefined);
+  const focused = windows.find((w) => w.focused === true);
+  const front = tabs.find((t) => t.active && t.windowId === focused?.id) ?? tabs.find((t) => t.active);
+  return {
+    tabs: tabs.slice(0, 200).map(wireTab),
+    windows: windows.map((w) => ({ windowId: w.id, focused: w.focused === true, tabCount: tabs.filter((t) => t.windowId === w.id).length })),
+    ...(focused?.id !== undefined ? { activeWindowId: focused.id } : {}),
+    ...(front?.id !== undefined ? { activeTabId: front.id } : {}),
+  };
+}
+
 // ------------------------------------------------------------------ helpers
 export function hostKey(raw) {
   try {
@@ -212,14 +252,24 @@ export async function listTabs() {
     .filter((t) => t.id !== undefined && !t.incognito)
     .slice(0, 40)
     .map((t) => ({
-      tabId: t.id,
-      windowId: t.windowId,
+      ...wireTab(t),
       title: (t.title ?? '').slice(0, 90),
-      url: redactedUrl(t.url ?? t.pendingUrl ?? ''),
-      active: t.active === true,
       openedByEya: eya.includes(t.id),
       workingHere: t.id === taskId,
     }));
+}
+
+/** Closes a tab. Only one Eya opened herself, unless the caller says the user agreed to closing one of theirs. */
+export async function closeTab(tabId, allowUserTab) {
+  if (!allowUserTab && !(await isEyaTab(tabId))) {
+    throw new Error('That tab was opened by you, not by Eya, so she will not close it without your say-so.');
+  }
+  await chrome.tabs.remove(tabId);
+  return { closed: true, tabId };
+}
+
+export async function focusWindow(windowId) {
+  await chrome.windows.update(windowId, { focused: true });
 }
 
 export async function focusTab(tabId) {

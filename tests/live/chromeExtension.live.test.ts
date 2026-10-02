@@ -13,86 +13,42 @@
  * behaviour are untested here.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execFileSync, spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import type { Server } from 'node:http';
 import { ChromeBridge } from '../../src/main/chrome/ChromeBridge';
 import type { SecretStore } from '../../src/main/chrome/ChromeBridge';
 import { ChromeBrowserService } from '../../src/main/chrome/ChromeBrowserService';
-import { BRIDGE_PORT } from '../../src/main/chrome/protocol';
+import type { BrowserName } from '../../src/main/chrome/protocol';
 import { sensitiveActionReason } from '../../src/main/browser/sensitiveActions';
 import type { PageSnapshot } from '../../src/main/browser/pageSnapshot';
 import type { ActOnPageResult } from '../../src/main/browser/BrowserAutomationService';
 import { startTestSite } from '../fixtures/chrome-test-site/server.mjs';
 import { registerJourneyScenarios } from './sharedScenarios';
+import { findBrowserExe, prepareExtensionCopy, sleep, startTestBrowser, waitFor } from './liveSupport';
+import type { TestBrowser } from './liveSupport';
 
 const live = process.env['EYA_LIVE_BROWSER'] === '1';
 const headed = process.env['EYA_LIVE_HEADED'] === '1';
 
 // Chrome by default (it is the browser the user installed for this); EYA_LIVE_EXE=edge runs the same suite in Edge.
 const wantEdge = process.env['EYA_LIVE_EXE'] === 'edge';
-const EDGE_CANDIDATES = [
-  join(process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-  join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-];
-const CHROME_CANDIDATES = [
-  join(process.env['ProgramFiles'] ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-  join(process.env['ProgramFiles(x86)'] ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-  join(process.env['LOCALAPPDATA'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-];
-const BROWSER_CANDIDATES = wantEdge ? EDGE_CANDIDATES : CHROME_CANDIDATES;
-const EXPECTED_BROWSER = wantEdge ? 'edge' : 'chrome';
+const KIND = wantEdge ? 'edge' : 'chrome';
+const EXPECTED_BROWSER: BrowserName = KIND;
+// Not the normal port: an Eya you are really running keeps that one.
+const TEST_BRIDGE_PORT = 47834;
 
 class MemorySecrets implements SecretStore {
-  hash: string | null = null;
-  loadHash() {
-    return this.hash;
+  hashes = new Map<BrowserName, string>();
+  loadHash(b: BrowserName) {
+    return this.hashes.get(b) ?? null;
   }
-  saveHash(h: string) {
-    this.hash = h;
+  saveHash(b: BrowserName, h: string) {
+    this.hashes.set(b, h);
   }
-  clear() {
-    this.hash = null;
+  clear(b?: BrowserName) {
+    if (b === undefined) this.hashes.clear();
+    else this.hashes.delete(b);
   }
-}
-
-async function waitFor(cond: () => boolean | Promise<boolean>, ms: number, what: string): Promise<void> {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (await cond()) return;
-    await new Promise((r) => setTimeout(r, 150));
-  }
-  throw new Error(`timed out waiting for ${what}`);
-}
-
-/** Waits for the browser's debugging port, then loads the unpacked extension the way "Load unpacked" would. */
-async function loadUnpackedOverCdp(port: number, path: string): Promise<void> {
-  let version: { webSocketDebuggerUrl: string } | null = null;
-  await waitFor(async () => {
-    try {
-      version = (await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json())) as { webSocketDebuggerUrl: string };
-      return true;
-    } catch {
-      return false;
-    }
-  }, 30_000, "the browser's debugging port");
-  const socket = new WebSocket((version as unknown as { webSocketDebuggerUrl: string }).webSocketDebuggerUrl);
-  await new Promise<void>((resolve, reject) => {
-    socket.addEventListener('open', () => resolve());
-    socket.addEventListener('error', () => reject(new Error('could not open the debugging socket')));
-  });
-  const reply = await new Promise<{ result?: { id?: string }; error?: { message?: string } }>((resolve) => {
-    socket.addEventListener('message', (e) => {
-      const m = JSON.parse(String(e.data)) as { id?: number; result?: { id?: string }; error?: { message?: string } };
-      if (m.id === 1) resolve(m);
-    });
-    socket.send(JSON.stringify({ id: 1, method: 'Extensions.loadUnpacked', params: { path } }));
-  });
-  socket.close();
-  if (reply.error !== undefined || reply.result?.id === undefined) throw new Error(`loading the extension failed: ${JSON.stringify(reply)}`);
 }
 
 function must<T>(r: ActOnPageResult): Extract<ActOnPageResult, { ok: true }> {
@@ -100,72 +56,36 @@ function must<T>(r: ActOnPageResult): Extract<ActOnPageResult, { ok: true }> {
   return r;
 }
 
-describe.skipIf(!live)('Eya Browser Bridge: real extension, real browser (Chrome by default), real bridge', () => {
+describe.skipIf(!live || findBrowserExe(KIND) === undefined)('Eya Browser Bridge: real extension, real browser (Chrome by default), real bridge', () => {
   let site: { server: Server; port: number };
   let base = '';
   let bridge: ChromeBridge;
   let svc: ChromeBrowserService;
-  let edge: ChildProcess | null = null;
+  let browser: TestBrowser;
+  let ext: { dir: string; cleanup: () => void };
   const secrets = new MemorySecrets();
-  const profile = mkdtempSync(join(tmpdir(), 'eya-live-profile-'));
-  const downloads = mkdtempSync(join(tmpdir(), 'eya-live-downloads-'));
-  const extensionPath = join(process.cwd(), 'eya-chrome-extension');
 
   beforeAll(async () => {
-    const edgePath = BROWSER_CANDIDATES.find((p) => existsSync(p));
-    if (edgePath === undefined) throw new Error(`${EXPECTED_BROWSER} is not installed; cannot run the live test.`);
-
     site = await startTestSite(0);
     base = `http://127.0.0.1:${site.port}`;
+    ext = prepareExtensionCopy(TEST_BRIDGE_PORT);
 
-    bridge = new ChromeBridge({ secrets, port: BRIDGE_PORT });
-    if (!(await bridge.start())) throw new Error(`port ${BRIDGE_PORT} is busy (is Eya itself running?); stop it and retry.`);
-    svc = new ChromeBrowserService(bridge);
+    bridge = new ChromeBridge({ secrets, port: TEST_BRIDGE_PORT });
+    if (!(await bridge.start())) throw new Error(`port ${TEST_BRIDGE_PORT} is busy`);
+    svc = new ChromeBrowserService(bridge.forBrowser(EXPECTED_BROWSER), { browserName: EXPECTED_BROWSER });
     bridge.openPairingWindow();
 
-    // A fresh profile whose downloads go to a throwaway folder instead of the user's real one.
-    mkdirSync(join(profile, 'Default'), { recursive: true });
-    writeFileSync(
-      join(profile, 'Default', 'Preferences'),
-      JSON.stringify({ download: { default_directory: downloads, prompt_for_download: false }, savefile: { default_directory: downloads } }),
-    );
-
-    // Edge still honours --load-extension; Chrome 137+ ignores it, but loads an unpacked extension over its debugging
-    // protocol (the stand-in for the user's "Load unpacked" click, which is how a real user does it).
-    const debugPort = 9334;
-    edge = spawn(
-      edgePath,
-      [
-        `--user-data-dir=${profile}`,
-        ...(wantEdge
-          ? [`--load-extension=${extensionPath}`, `--disable-extensions-except=${extensionPath}`, '--disable-features=DisableLoadExtensionCommandLineSwitch']
-          : [`--remote-debugging-port=${debugPort}`, '--enable-unsafe-extension-debugging']),
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--disable-sync',
-        ...(headed ? ['--window-size=1100,850'] : ['--headless=new']),
-        'about:blank',
-      ],
-      { stdio: 'ignore' },
-    );
-    if (!wantEdge) await loadUnpackedOverCdp(debugPort, extensionPath);
-    await waitFor(() => bridge.isConnected(), 45_000, 'the extension to connect and pair');
+    browser = await startTestBrowser({ kind: KIND, extensionDir: ext.dir, debugPort: 9334, headed });
+    await waitFor(() => bridge.isConnected(EXPECTED_BROWSER), 45_000, 'the extension to connect and pair');
   }, 120_000);
 
   afterAll(async () => {
-    if (edge?.pid !== undefined) {
-      try {
-        // Only the browser this test started (and its children) — never the user's own Edge.
-        execFileSync('taskkill', ['/PID', String(edge.pid), '/T', '/F'], { stdio: 'ignore' });
-      } catch {
-        // already gone
-      }
-    }
+    browser?.kill();
     await bridge?.stop();
     site?.server.close();
-    await new Promise((r) => setTimeout(r, 500));
-    rmSync(profile, { recursive: true, force: true });
-    rmSync(downloads, { recursive: true, force: true });
+    await sleep(500);
+    browser?.cleanup();
+    ext?.cleanup();
   }, 30_000);
 
   const names = (s: PageSnapshot) => [...s.links, ...s.buttons];
@@ -174,9 +94,9 @@ describe.skipIf(!live)('Eya Browser Bridge: real extension, real browser (Chrome
   registerJourneyScenarios('Extension', () => ({ svc, base }));
 
   it('paired with the real extension in a real browser', () => {
-    expect(bridge.isConnected()).toBe(true);
-    expect(bridge.info()).toMatchObject({ paired: true, browser: EXPECTED_BROWSER });
-    expect(secrets.hash).not.toBeNull();
+    expect(bridge.isConnected(EXPECTED_BROWSER)).toBe(true);
+    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.2.0' });
+    expect(secrets.hashes.get(EXPECTED_BROWSER)).toBeDefined();
   });
 
   it('a web page cannot talk to the bridge: the Origin check refuses it', async () => {
@@ -275,7 +195,7 @@ describe.skipIf(!live)('Eya Browser Bridge: real extension, real browser (Chrome
     expect(dl).toBeDefined();
     expect(dl?.state).toBe('complete');
     expect(dl?.name).toBe('eya-test-report.txt');
-    expect(dl?.path.startsWith(downloads)).toBe(true);
+    expect(dl?.path.startsWith(browser.downloads)).toBe(true);
     expect(readFileSync(dl!.path, 'utf8')).toBe('eya test download\n');
   }, 60_000);
 
@@ -328,15 +248,15 @@ describe.skipIf(!live)('Eya Browser Bridge: real extension, real browser (Chrome
 
   it('reads a search-results page in a background tab that closes again', async () => {
     const before = (await svc.listTabs()).length;
-    const raw = (await bridge.request('search_page', { url: `${base}/fakesearch.html`, engine: 'duckduckgo' })) as { hits: Array<{ title: string; href: string }> };
+    const raw = (await bridge.request('search_page', { url: `${base}/fakesearch.html`, engine: 'duckduckgo' }, undefined, EXPECTED_BROWSER)) as { hits: Array<{ title: string; href: string }> };
     expect(raw.hits).toHaveLength(2);
     expect(raw.hits[0]!.href).toContain('uddg=');
     expect((await svc.listTabs()).length).toBe(before);
   }, 30_000);
 
   it('refuses to open anything but a normal web address', async () => {
-    await expect(bridge.request('open_url', { url: 'file:///C:/Windows/win.ini' })).rejects.toThrow(/http/);
-    await expect(bridge.request('open_url', { url: 'javascript:alert(1)' })).rejects.toThrow(/http|valid/);
+    await expect(bridge.request('open_url', { url: 'file:///C:/Windows/win.ini' }, undefined, EXPECTED_BROWSER)).rejects.toThrow(/http/);
+    await expect(bridge.request('open_url', { url: 'javascript:alert(1)' }, undefined, EXPECTED_BROWSER)).rejects.toThrow(/http|valid/);
   }, 30_000);
 
   it('reconnects by itself after the bridge restarts, using the stored secret (no new pairing)', async () => {

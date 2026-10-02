@@ -40,6 +40,11 @@ export interface ActionEffects {
 }
 
 export interface BrowserTabInfo {
+  /** Which browser this tab is in. Tab numbers are only unique within one browser, so this always travels with `tabId`. */
+  readonly browser?: 'chrome' | 'edge' | 'other';
+  readonly windowId?: number;
+  readonly pinned?: boolean;
+  readonly loading?: boolean;
   readonly tabId: number;
   readonly title: string;
   readonly url: string;

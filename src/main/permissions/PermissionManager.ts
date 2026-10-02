@@ -48,6 +48,12 @@ export type SensitiveAction =
   | 'click_on_page'
   | 'fill_on_page'
   | 'go_back'
+  | 'go_forward'
+  | 'reload_page'
+  | 'scroll_page'
+  | 'close_browser_tab'
+  | 'browser_status'
+  | 'wait_for_user_in_browser'
   | 'find_on_page'
   | 'read_page'
   | 'list_browser_tabs'
@@ -97,6 +103,14 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   // Typing into a visible field, not submitting anything destructive by itself.
   fill_on_page: 'safe',
   go_back: 'safe',
+  go_forward: 'safe',
+  reload_page: 'safe',
+  scroll_page: 'safe',
+  // Closing a tab the user opened can lose their work in it: asked first. A tab Eya opened herself needs no question.
+  close_browser_tab: 'confirm',
+  browser_status: 'safe',
+  // Only watches the page the user is dealing with; does nothing to it.
+  wait_for_user_in_browser: 'safe',
   // Looking through, and reading, the page that is already open.
   find_on_page: 'safe',
   read_page: 'safe',

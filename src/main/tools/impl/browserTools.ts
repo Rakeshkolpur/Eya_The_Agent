@@ -7,6 +7,7 @@ import type { ActionEffects, DownloadInfo } from '@main/browser/pageEffects';
 import type { PageContext } from '@main/browser/sensitiveActions';
 import { sensitiveActionReason, sensitiveSubmitReason } from '@main/browser/sensitiveActions';
 import type { PageSnapshot } from '@main/browser/pageSnapshot';
+import type { BrowserOverview, WaitForUserResult } from '@main/browser/BrowserSessionManager';
 import type { ChromeConnector } from '@main/chrome/chromeConnector';
 import { permissionRequest } from '@main/permissions/PermissionManager';
 import { verifyFileExists } from '../verify';
@@ -25,11 +26,19 @@ import type { Tool, ToolArgs, ToolResult } from '../types';
  * action — never a guess at what the action should have done.
  */
 
+/** What the status and "wait for the user" tools need from the session manager. */
+export interface BrowserSessionTools {
+  describe(): BrowserOverview;
+  waitForUserChange(timeoutMs?: number): Promise<WaitForUserResult>;
+}
+
 export interface BrowserToolOptions {
   /** Present when the user's own browser can be reached: enables listing and switching tabs. */
   readonly tabs?: BrowserTabControl;
   /** Present when the Eya Browser Bridge can be set up: enables connect_chrome. */
   readonly connector?: ChromeConnector;
+  /** Present with the session manager: enables browser_status and wait_for_user_in_browser. */
+  readonly session?: BrowserSessionTools;
   /** Whether a downloaded file is really on disk. Defaults to checking the filesystem. */
   readonly verifyDownload?: (path: string) => Promise<boolean>;
 }
@@ -163,8 +172,21 @@ function applyChallenge(base: ToolResult, snapshot: PageSnapshot): ToolResult {
   return { ...base, data };
 }
 
+function unavailable(err: BrowserUnavailableError): ToolResult {
+  return {
+    ok: false,
+    summary: 'browser not connected',
+    error: err.message,
+    data: {
+      browserUnavailable: true,
+      ...(err.detail.why !== undefined ? { why: err.detail.why } : {}),
+      ...(err.detail.needsPairing !== undefined ? { needsPairing: err.detail.needsPairing } : {}),
+    },
+  };
+}
+
 function failure(summary: string, prefix: string, err: unknown): ToolResult {
-  if (err instanceof BrowserUnavailableError) return { ok: false, summary: 'browser not connected', error: err.message };
+  if (err instanceof BrowserUnavailableError) return unavailable(err);
   return { ok: false, summary, error: `${prefix}: ${describeError(err)}` };
 }
 
@@ -197,10 +219,16 @@ export function createBrowserTools(
         'Open a website by its exact https:// URL. This becomes the current page for inspect_page, click_on_page ' +
         "and fill_on_page. If you don't already know a site's exact official URL (e.g. for \"the High Court of " +
         'Telangana\" or \"my bank\"), use web_search first to find and confirm it, then call this with that exact ' +
-        'URL — never invent one, and never treat opening a site as the same thing as searching for it. If the ' +
-        "user's own browser is connected this happens in THEIR browser (reusing a tab they already have open on " +
-        "that site if there is one), so their sign-ins are already there; the result's `environment` says which browser it was.",
-      args: { url: { type: 'string', required: true, description: 'The exact http(s) address to open, e.g. from a web_search result.' } },
+        'URL — never invent one, and never treat opening a site as the same thing as searching for it. This always ' +
+        "happens in the user's OWN browser (Chrome or Edge), reusing a tab they already have open on that site if there is " +
+        "one, else a new tab in the same browser — so their sign-ins are already there. If their browser is not connected " +
+        'the result says why and what to do (usually: call connect_chrome); in that case do NOT retry with isolated. ' +
+        "isolated: true opens Eya's own separate window instead, which starts signed out of everything — only ever set it " +
+        'after the user has said that is fine.',
+      args: {
+        url: { type: 'string', required: true, description: 'The exact http(s) address to open, e.g. from a web_search result.' },
+        isolated: { type: 'boolean', description: "Open in Eya's own separate, signed-out window instead of the user's browser. Only after the user agreed to that." },
+      },
     },
     async execute(args): Promise<ToolResult> {
       const raw = stringArg(args, 'url');
@@ -208,7 +236,7 @@ export function createBrowserTools(
       const url = parseWebUrl(raw);
       if (url === null) return { ok: false, summary: 'bad url', error: 'That is not a normal http or https address.' };
       try {
-        const snapshot = await service.openWebsite(url.href);
+        const snapshot = await service.openWebsite(url.href, args['isolated'] === true ? { isolated: true } : undefined);
         return applyChallenge(
           {
             ok: true,
@@ -248,7 +276,7 @@ export function createBrowserTools(
           snapshot,
         );
       } catch (err) {
-        if (err instanceof BrowserUnavailableError) return { ok: false, summary: 'browser not connected', error: err.message };
+        if (err instanceof BrowserUnavailableError) return unavailable(err);
         return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
       }
     },
@@ -289,7 +317,7 @@ export function createBrowserTools(
           },
         };
       } catch (err) {
-        if (err instanceof BrowserUnavailableError) return { ok: false, summary: 'browser not connected', error: err.message };
+        if (err instanceof BrowserUnavailableError) return unavailable(err);
         return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
       }
     },
@@ -325,7 +353,7 @@ export function createBrowserTools(
           },
         };
       } catch (err) {
-        if (err instanceof BrowserUnavailableError) return { ok: false, summary: 'browser not connected', error: err.message };
+        if (err instanceof BrowserUnavailableError) return unavailable(err);
         return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
       }
     },
@@ -493,28 +521,80 @@ export function createBrowserTools(
     },
   };
 
-  const goBack: Tool = {
+  /** Back, forward and reload are the same kind of step: move in the browser, then look at where it landed. */
+  function historyTool(name: string, status: string, description: string, action: string, verb: string, run: () => Promise<ActOnPageResult>): Tool {
+    return {
+      schema: { name, status, description, args: {} },
+      async execute(): Promise<ToolResult> {
+        const before = await lookBefore(service);
+        try {
+          const result = await run();
+          if (!result.ok) return declined(result, action, action, verb);
+          return succeeded(action, null, verb, before, result);
+        } catch (err) {
+          return failure(`${verb} failed`, `I could not ${verb}`, err);
+        }
+      },
+    };
+  }
+
+  const goBack = historyTool(
+    'go_back',
+    'Going back…',
+    "Go back one page in the browser history of the page Eya is working in — the same as the browser's Back button. Use it when a " +
+      'click took the wrong way, instead of guessing a URL. The result is the page you land on.',
+    'back',
+    'went back',
+    () => service.goBack(),
+  );
+  const goForward = historyTool(
+    'go_forward',
+    'Going forward…',
+    "Go forward one page in the browser history (the browser's Forward button), after going back. The result is the page you land on.",
+    'forward',
+    'went forward',
+    () => service.goForward(),
+  );
+  const reloadPage = historyTool(
+    'reload_page',
+    'Reloading the page…',
+    'Reload the current page and look at it again — for a page that looks stuck, stale or half-loaded.',
+    'reload',
+    'reloaded the page',
+    () => service.reload(),
+  );
+
+  const scrollPage: Tool = {
     schema: {
-      name: 'go_back',
-      status: 'Going back…',
+      name: 'scroll_page',
+      status: 'Scrolling…',
       description:
-        'Go back one page in the browser history of the page Eya is working in — the same as the browser\'s Back button. Use it when a ' +
-        'click took the wrong way, instead of guessing a URL. The result is the page you land on.',
-      args: {},
+        'Scroll the current page (or the panel it scrolls inside) and look at what is showing afterwards: down or up by a screenful, ' +
+        'or straight to the top or bottom. Use it to move through a long page, or to load more of an endless list. To find a specific ' +
+        'option on a long page use find_on_page instead. If the result says the page did not move, there is nothing more that way.',
+      args: {
+        direction: { type: 'string', required: true, enum: ['down', 'up', 'top', 'bottom'], description: 'Which way to go.' },
+        amount: { type: 'number', description: 'How far, in pixels. Omit for about one screenful.' },
+      },
     },
-    async execute(): Promise<ToolResult> {
+    async execute(args): Promise<ToolResult> {
+      const direction = args['direction'];
+      if (direction !== 'down' && direction !== 'up' && direction !== 'top' && direction !== 'bottom') {
+        return { ok: false, summary: 'no direction', error: 'A direction (down, up, top or bottom) is required.' };
+      }
+      const amount = typeof args['amount'] === 'number' && args['amount'] > 0 ? args['amount'] : undefined;
       const before = await lookBefore(service);
       try {
-        const result = await service.goBack();
-        if (!result.ok) return declined(result, 'back', 'back', 'go back');
-        return succeeded('back', null, 'went back', before, result);
+        const result = await service.scroll(direction, amount);
+        if (!result.ok) return declined(result, 'scroll', direction, 'scroll');
+        return succeeded('scroll', direction, `scrolled ${direction}`, before, result);
       } catch (err) {
-        return failure('go back failed', 'I could not go back', err);
+        return failure('scroll failed', 'I could not scroll', err);
       }
     },
   };
 
-  const tools: Tool[] = [openWebsite, inspectPage, findOnPage, readPage, clickOnPage, fillOnPage, goBack];
+  const tools: Tool[] = [openWebsite, inspectPage, findOnPage, readPage, clickOnPage, fillOnPage, scrollPage, goBack, goForward, reloadPage];
 
   const tabs = options.tabs;
   if (tabs !== undefined) {
@@ -524,23 +604,27 @@ export function createBrowserTools(
           name: 'list_browser_tabs',
           status: 'Checking your open tabs…',
           description:
-            "List the tabs open in the user's own browser (title and address only) so you can switch to one they already have open, " +
-            'e.g. "go to my Gmail tab". Only works when their browser is connected. Only call it when the request needs it.',
-          args: {},
+            "List the tabs open in the user's own browser(s) — Chrome and/or Edge, each tab with the browser it is in, its title and its " +
+            'address — so you can switch to one they already have open, e.g. "go to my Gmail tab". Only works when a browser is connected. ' +
+            'Only call it when the request needs it.',
+          args: { browser: { type: 'string', enum: ['chrome', 'edge'], description: 'Only this browser\'s tabs. Omit for all connected browsers.' } },
         },
-        async execute(): Promise<ToolResult> {
+        async execute(args): Promise<ToolResult> {
+          const which = args['browser'] === 'chrome' || args['browser'] === 'edge' ? args['browser'] : undefined;
           try {
-            const list = await tabs.listTabs();
+            const list = await tabs.listTabs(which);
             return {
               ok: true,
               summary: `${list.length} tab${list.length === 1 ? '' : 's'} open`,
               data: {
                 tabs: list.map((t) => ({
+                  ...(t.browser !== undefined ? { browser: t.browser } : {}),
                   tabId: t.tabId,
                   title: t.title,
                   url: t.url,
                   ...(t.active ? { activeInBrowser: true } : {}),
                   ...(t.workingHere ? { eyaIsHere: true } : {}),
+                  ...(t.openedByEya ? { openedByEya: true } : {}),
                 })),
               },
             };
@@ -554,14 +638,19 @@ export function createBrowserTools(
           name: 'switch_browser_tab',
           status: 'Switching tab…',
           description:
-            "Switch to one of the user's already-open browser tabs (use the tabId from list_browser_tabs) and look at it. Eya then works in that tab.",
-          args: { tab_id: { type: 'number', required: true, description: 'The tabId from list_browser_tabs.' } },
+            "Switch to one of the user's already-open browser tabs (the tabId, and its browser, from list_browser_tabs) and look at it. " +
+            'Eya then works in that tab. Tab numbers repeat across browsers, so say which browser when both Chrome and Edge are connected.',
+          args: {
+            tab_id: { type: 'number', required: true, description: 'The tabId from list_browser_tabs.' },
+            browser: { type: 'string', enum: ['chrome', 'edge'], description: 'The browser that tab is in (needed when more than one is connected).' },
+          },
         },
         async execute(args): Promise<ToolResult> {
           const id = args['tab_id'];
           if (typeof id !== 'number' || !Number.isInteger(id)) return { ok: false, summary: 'no tab', error: 'A tab_id from list_browser_tabs is required.' };
+          const which = args['browser'] === 'chrome' || args['browser'] === 'edge' ? args['browser'] : undefined;
           try {
-            const snapshot = await tabs.switchToTab(id);
+            const snapshot = await tabs.switchToTab(id, which);
             return applyChallenge(
               {
                 ok: true,
@@ -575,6 +664,117 @@ export function createBrowserTools(
           }
         },
       },
+      {
+        schema: {
+          name: 'close_browser_tab',
+          status: 'Closing the tab…',
+          description:
+            'Close a browser tab (the tabId, and its browser, from list_browser_tabs). A tab Eya opened herself closes straight away. ' +
+            "A tab the USER opened is not closed on the first call — you get a question to put to them, and only after they clearly say " +
+            'yes do you call again with confirm: true, because closing it can lose what they were doing there.',
+          args: {
+            tab_id: { type: 'number', required: true, description: 'The tabId from list_browser_tabs.' },
+            browser: { type: 'string', enum: ['chrome', 'edge'], description: 'The browser that tab is in (needed when more than one is connected).' },
+            confirm: { type: 'boolean', description: 'Set true ONLY after the user has clearly agreed to closing this tab of theirs.' },
+          },
+        },
+        async execute(args): Promise<ToolResult> {
+          const id = args['tab_id'];
+          if (typeof id !== 'number' || !Number.isInteger(id)) return { ok: false, summary: 'no tab', error: 'A tab_id from list_browser_tabs is required.' };
+          const which = args['browser'] === 'chrome' || args['browser'] === 'edge' ? args['browser'] : undefined;
+          try {
+            const listed = (await tabs.listTabs(which)).find((t) => t.tabId === id && (which === undefined || t.browser === which));
+            if (listed === undefined) return { ok: false, summary: 'no such tab', error: 'That tab is not open (any more). Use list_browser_tabs to see the current ones.' };
+            if (!listed.openedByEya && args['confirm'] !== true) {
+              return {
+                ok: false,
+                summary: 'needs confirmation',
+                error: `That tab ("${listed.title}") was opened by the user, so it was not closed. Ask them plainly whether to close it, and only if they clearly say yes call close_browser_tab again with confirm: true.`,
+                data: permissionRequest('close_browser_tab', listed.title || listed.url, 'Closing a tab of yours can lose what you were doing in it.'),
+              };
+            }
+            const closed = await tabs.closeTab(id, { ...(which !== undefined ? { browser: which } : {}), allowUserTab: !listed.openedByEya });
+            return {
+              ok: closed.closed,
+              summary: closed.closed ? `closed the tab "${listed.title}"` : 'the tab did not close',
+              data: { closed: closed.closed, remainingTabs: closed.remainingTabs },
+            };
+          } catch (err) {
+            return failure('could not close', 'I could not close that tab', err);
+          }
+        },
+      },
+    );
+  }
+
+  const session = options.session;
+  if (session !== undefined) {
+    tools.push(
+      {
+        schema: {
+          name: 'browser_status',
+          status: 'Checking the browsers…',
+          description:
+            "Report which of the user's browsers (Chrome, Edge) are connected to Eya, whether one has the Eya Browser Bridge extension " +
+            'running but not yet connected, how many tabs each has, which one is in use, and which one Eya is working in. Use it to ' +
+            'diagnose why a browser task cannot start, or to answer "is my browser connected?".',
+          args: {},
+        },
+        async execute(): Promise<ToolResult> {
+          const o = session.describe();
+          const connected = o.browsers.filter((b) => b.connected);
+          return {
+            ok: true,
+            summary: connected.length > 0 ? `${connected.map((b) => b.browser).join(' and ')} connected` : 'no browser connected',
+            data: {
+              mode: o.mode,
+              browsers: o.browsers,
+              ...(o.waitingToPair.length > 0 ? { extensionRunningButNotConnected: o.waitingToPair, hint: 'Ask the user whether to connect it, then call connect_chrome.' } : {}),
+              ...(o.workingIn !== null ? { workingIn: o.workingIn, ...(o.workingBrowser !== undefined ? { workingBrowser: o.workingBrowser } : {}) } : {}),
+              ...(connected.length === 0 && o.waitingToPair.length === 0 ? { hint: 'No extension is connected. Call connect_chrome to help the user add or connect it.' } : {}),
+            },
+          };
+        },
+      },
+      {
+        schema: {
+          name: 'wait_for_user_in_browser',
+          status: 'Waiting for you in the browser…',
+          description:
+            'Use this right after telling the user that a page needs THEM — signing in, a CAPTCHA, a verification code. It waits (up to ~30 ' +
+            'seconds per call) for the page to change, and then returns the page as it now is, so you can carry on with their ORIGINAL request ' +
+            'without them having to repeat it. If it returns changed: true, look at the page and continue the task. If it returns ' +
+            'stillWaiting: true, they have not finished yet: call it again once or twice, then say you will carry on when they tell you.',
+          args: { seconds: { type: 'number', description: 'How long to wait this time, up to 30. Default 25.' } },
+        },
+        async execute(args): Promise<ToolResult> {
+          const seconds = typeof args['seconds'] === 'number' && args['seconds'] > 0 ? Math.min(30, args['seconds']) : 25;
+          try {
+            const r = await session.waitForUserChange(seconds * 1000);
+            if (!r.changed) {
+              return {
+                ok: true,
+                summary: 'still waiting for the user',
+                data: { stillWaiting: true, ...currentPageData('wait', null, { stateChanged: false, navigated: false }, r.snapshot) },
+              };
+            }
+            return applyChallenge(
+              {
+                ok: true,
+                summary: r.cleared !== undefined ? 'the user finished — the page has moved on' : 'the page changed',
+                data: {
+                  userFinished: true,
+                  ...(r.cleared !== undefined ? { cleared: r.cleared } : {}),
+                  ...currentPageData('wait', null, { stateChanged: true, navigated: true }, r.snapshot),
+                },
+              },
+              r.snapshot,
+            );
+          } catch (err) {
+            return failure('could not wait', 'I could not watch the page', err);
+          }
+        },
+      },
     );
   }
 
@@ -585,10 +785,11 @@ export function createBrowserTools(
         name: 'connect_chrome',
         status: 'Connecting to your browser…',
         description:
-          "Connect Eya to the user's own browser (Edge or Chrome) — the one they are already signed in to — so she can open and use their " +
-          'real tabs. Call this when the user asks to connect or use their own browser, or when a task needs their signed-in accounts ' +
-          'and a result says their browser is not connected. The first time, the user has to add the Eya Browser Bridge extension ' +
-          'themselves (the result says exactly how); after that it connects on its own.',
+          "Connect Eya to the user's own browser(s) — Chrome and/or Edge, the ones they are already signed in to — so she can open and use their " +
+          'real tabs. Call this when the user asks to connect or use their own browser, when a result says a browser extension is running but ' +
+          'not connected, or when a task needs their signed-in accounts and no browser is connected. The first time, the user has to add the ' +
+          'Eya Browser Bridge extension themselves (the result says exactly how); after that it connects on its own. Every browser whose ' +
+          'extension is running is connected in one go.',
         args: {},
       },
       async execute(): Promise<ToolResult> {
@@ -597,8 +798,12 @@ export function createBrowserTools(
           if (r.connected) {
             return {
               ok: true,
-              summary: r.alreadyConnected ? 'already connected' : 'connected',
-              data: { connected: true, ...(r.browser !== undefined ? { browser: r.browser } : {}) },
+              summary: r.alreadyConnected ? 'already connected' : `connected ${r.browsers.join(' and ')}`,
+              data: {
+                connected: true,
+                browsers: r.browsers,
+                ...(r.stillWaiting.length > 0 ? { notYetConnected: r.stillWaiting, hint: 'Another browser has the extension running but did not connect in time; ask again if the user wants it too.' } : {}),
+              },
             };
           }
           return {
@@ -614,10 +819,10 @@ export function createBrowserTools(
               connected: false,
               extensionFolder: r.extensionFolder,
               steps: [
-                'Open the browser extensions page (edge://extensions or chrome://extensions).',
+                'Open the browser extensions page (chrome://extensions or edge://extensions).',
                 'Turn on Developer mode, and leave it on (with it off, the browser disables the extension at its next restart).',
                 'Click Load unpacked and choose the folder eya-chrome-extension.',
-                'If the extension is already there but switched off, switch it on.',
+                'If the extension is already there but switched off, switch it on; if it says it needs an update, click its reload button.',
                 'Say "connect my browser" again.',
               ],
             },

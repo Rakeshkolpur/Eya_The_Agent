@@ -135,16 +135,29 @@ export async function runAction(requestedTabId, perform) {
   };
 }
 
-export async function goBack(requestedTabId) {
+export const goBack = (requestedTabId) => goHistory(requestedTabId, 'back');
+export const goForward = (requestedTabId) => goHistory(requestedTabId, 'forward');
+
+/** Reload the tab, then look at what the page is after reloading. */
+export async function reloadTab(requestedTabId) {
   const tabId = await resolveTabId(requestedTabId);
   const startedAt = Date.now();
-  const nothing = { ok: false, reason: 'no_history', detail: 'There is nothing to go back to in this tab.' };
+  await chrome.tabs.reload(tabId);
+  await new Promise((r) => setTimeout(r, 150));
+  const settle = await settleTab(tabId, startedAt);
+  return { performed: { ok: true }, tabId, state: await observeTab(tabId), settled: settle?.settled !== false };
+}
+
+async function goHistory(requestedTabId, direction) {
+  const tabId = await resolveTabId(requestedTabId);
+  const startedAt = Date.now();
+  const nothing = { ok: false, reason: 'no_history', detail: `There is nothing to go ${direction} to in this tab.` };
 
   let probe;
   try {
-    probe = await inject(tabId, 'back', {});
+    probe = await inject(tabId, direction, {});
   } catch (err) {
-    // A back that starts a navigation can tear the page down before it answers; that still counts as going back.
+    // A history move that starts a navigation can tear the page down before it answers; that still counts as going.
     if (!sawLoading(tabId, startedAt)) throw err;
     probe = { ok: true };
   }

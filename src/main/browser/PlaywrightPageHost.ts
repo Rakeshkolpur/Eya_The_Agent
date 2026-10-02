@@ -340,6 +340,30 @@ export class PlaywrightPageHost {
         return this.afterAction(page, { ok: true }, startedAt);
       }
 
+      case 'forward': {
+        const page = this.pageFor(args['tabId']);
+        const startedAt = Date.now();
+        const before = page.url();
+        await page.goForward({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => null);
+        await sleep(150);
+        if (page.url() === before && !this.navigatedSince(page, startedAt)) {
+          return this.reply(page, { ok: false, reason: 'no_history', detail: 'There is nothing to go forward to in this tab.' });
+        }
+        return this.afterAction(page, { ok: true }, startedAt);
+      }
+
+      case 'reload': {
+        const page = this.pageFor(args['tabId']);
+        const startedAt = Date.now();
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS }).catch(() => null);
+        return this.afterAction(page, { ok: true }, startedAt);
+      }
+
+      case 'scroll': {
+        const page = this.pageFor(args['tabId']);
+        return this.act(page, () => this.agent(page, 'scroll', { direction: args['direction'], amount: args['amount'] }));
+      }
+
       case 'list_tabs': {
         const open = [...this.byId.entries()].filter(([, p]) => !p.isClosed() && !this.throwaway.has(p));
         return {
