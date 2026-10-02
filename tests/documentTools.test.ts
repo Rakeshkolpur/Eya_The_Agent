@@ -158,6 +158,69 @@ describe('web_search', () => {
   });
 });
 
+describe('web_search: falling back to a real results page', () => {
+  const hit = { title: 'High Court for the State of Telangana', url: 'https://tshc.gov.in/', snippet: 'The Official Website' };
+  function setup(fallbackHits: Array<typeof hit> | Error) {
+    const searched: string[] = [];
+    const fallback = {
+      search: async (q: string) => {
+        searched.push(q);
+        if (fallbackHits instanceof Error) throw fallbackHits;
+        return fallbackHits;
+      },
+    };
+    return { searched, tool: createWebSearchTool(brain, fallback) };
+  }
+
+  it("reads real results instead of giving up when Gemini's own search is out of quota", async () => {
+    failing = true;
+    const { tool, searched } = setup([hit]);
+    const result = await tool.execute({ query: 'telangana high court official website' });
+    expect(result.ok).toBe(true);
+    expect(searched).toEqual(['telangana high court official website']);
+    expect(String(result.data?.['answer'])).toContain('https://tshc.gov.in/');
+    expect(result.data?.['sources']).toEqual([{ title: 'High Court for the State of Telangana', uri: 'https://tshc.gov.in/' }]);
+    expect(result.data?.['via']).toBeDefined();
+  });
+
+  it('does not touch the browser at all when the normal search works', async () => {
+    const { tool, searched } = setup([hit]);
+    const result = await tool.execute({ query: 'latest order in case 12' });
+    expect(result.ok).toBe(true);
+    expect(result.data?.['answer']).toBe('The hearing moved to the 12th.');
+    expect(searched).toEqual([]);
+  });
+
+  it('also falls back when Gemini returns an empty answer', async () => {
+    const empty: DocumentBrain = { ...brain, groundedSearch: async () => ({ text: '', sources: [] }) };
+    const tool = createWebSearchTool(empty, { search: async () => [hit] });
+    expect((await tool.execute({ query: 'x' })).ok).toBe(true);
+  });
+
+  it('still searches with no Gemini key at all, since the fallback needs none', async () => {
+    hasKey = false;
+    const { tool } = setup([hit]);
+    expect((await tool.execute({ query: 'x' })).ok).toBe(true);
+  });
+
+  it('gives the honest quota message when the fallback finds nothing, or itself breaks', async () => {
+    failing = true;
+    for (const fallbackHits of [[] as Array<typeof hit>, new Error('browser would not start')]) {
+      const { tool } = setup(fallbackHits);
+      const result = await tool.execute({ query: 'x' });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/limit/i);
+    }
+  });
+
+  it('keeps the old behaviour when no fallback is supplied', async () => {
+    failing = true;
+    expect((await createWebSearchTool(brain).execute({ query: 'x' })).ok).toBe(false);
+    hasKey = false;
+    expect((await createWebSearchTool(brain).execute({ query: 'x' })).error).toMatch(/key/i);
+  });
+});
+
 describe('mimeTypeFor', () => {
   it('maps supported types only', () => {
     expect(mimeTypeFor('a.PDF')).toBe('application/pdf');

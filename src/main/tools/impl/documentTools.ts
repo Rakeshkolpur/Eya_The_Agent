@@ -4,6 +4,8 @@ import { checkReadablePath } from '@main/security/pathPolicy';
 import type { KnownFolders } from '@main/security/pathPolicy';
 import type { SearchSource } from '@main/providers/ai/GeminiAIProvider';
 import { describeAIFailure } from '@main/agent/AgentEngine';
+import { formatHitsAsAnswer } from '@main/browser/webSearchResults';
+import type { WebSearchHit } from '@main/browser/webSearchResults';
 import type { Tool, ToolArgs, ToolResult } from '../types';
 
 /** The slice of the Gemini provider these tools need. */
@@ -106,33 +108,72 @@ export function createDocumentTool(folders: KnownFolders, brain: DocumentBrain):
   };
 }
 
-export function createWebSearchTool(brain: DocumentBrain): Tool {
+/**
+ * A second way to search that doesn't spend Gemini's search-grounding
+ * allowance (a separate, much smaller free-tier bucket than ordinary model
+ * calls: when it runs out, plain Gemini calls keep working while every
+ * grounded one returns 429). Reads a real results page instead.
+ */
+export interface WebSearchFallback {
+  search(query: string): Promise<WebSearchHit[]>;
+}
+
+export function createWebSearchTool(brain: DocumentBrain, fallback?: WebSearchFallback): Tool {
   return {
     schema: {
       name: 'web_search',
       status: 'Searching the web…',
       description:
-        'Search the web with Google and get a short, sourced answer. Use it for current information, news, court orders, ' +
-        'prices, finding a website\'s real official URL, or anything you are not sure about. To just show results in a ' +
-        "browser instead, use open_url. NEVER use this to navigate within a website that is already open (\"go to " +
-        'Cause List", "click Sent") — that is click_on_page\'s job, on the real page, not a search.',
+        'Search the web and get either a short sourced answer or a list of the top result links. Use it for current ' +
+        "information, news, court orders, prices, finding a website's real official URL, or anything you are not sure " +
+        'about. If you get a list of result links, pick by the link\'s own domain — the organization\'s real site, not a ' +
+        'news story, directory or look-alike — and open that exact URL. To just show results in a browser instead, ' +
+        'use open_url. NEVER use this to navigate within a website that is already open ("go to Cause List", "click ' +
+        'Sent") — that is click_on_page\'s job, on the real page, not a search.',
       args: { query: { type: 'string', required: true, description: 'What to look up.' } },
     },
     async execute(args): Promise<ToolResult> {
       const query = stringArg(args, 'query');
       if (query === undefined) return { ok: false, summary: 'no query', error: 'A search query is required.' };
-      if (!brain.hasKey()) return { ok: false, summary: 'no Gemini key', error: 'Web search needs the Gemini key.' };
-      try {
-        const { text, sources } = await brain.groundedSearch(query);
-        if (text.length === 0) return { ok: false, summary: 'no results', error: 'The search returned nothing.' };
-        return {
-          ok: true,
-          summary: 'searched the web',
-          data: { answer: text.slice(0, MAX_ANSWER_CHARS), sources },
-        };
-      } catch (err) {
-        return { ok: false, summary: 'search failed', error: describeAIFailure(err) };
+
+      let failure: unknown;
+      let returnedNothing = false;
+      if (brain.hasKey()) {
+        try {
+          const { text, sources } = await brain.groundedSearch(query);
+          if (text.length > 0) {
+            return { ok: true, summary: 'searched the web', data: { answer: text.slice(0, MAX_ANSWER_CHARS), sources } };
+          }
+          returnedNothing = true;
+        } catch (err) {
+          failure = err;
+        }
       }
+
+      // Grounded search was unavailable (out of its allowance, overloaded, or no
+      // key at all): read a real results page instead of leaving the request stuck.
+      if (fallback !== undefined) {
+        try {
+          const hits = await fallback.search(query);
+          if (hits.length > 0) {
+            return {
+              ok: true,
+              summary: 'searched the web',
+              data: {
+                answer: formatHitsAsAnswer(query, hits).slice(0, MAX_ANSWER_CHARS),
+                sources: hits.map((h) => ({ title: h.title, uri: h.url })),
+                via: 'a live search-results page',
+              },
+            };
+          }
+        } catch {
+          // fall through to the honest failure below
+        }
+      }
+
+      if (returnedNothing) return { ok: false, summary: 'no results', error: 'The search returned nothing.' };
+      if (failure === undefined) return { ok: false, summary: 'no Gemini key', error: 'Web search needs the Gemini key.' };
+      return { ok: false, summary: 'search failed', error: describeAIFailure(failure) };
     },
   };
 }

@@ -3,6 +3,8 @@ import type { BrowserContext, Page } from 'playwright-core';
 import { rootLogger } from '@main/logging/logger';
 import { buildSnapshot, findBestTextMatchIndex } from './pageSnapshot';
 import type { PageSnapshot } from './pageSnapshot';
+import { cleanSearchHits } from './webSearchResults';
+import type { RawSearchHit, WebSearchHit } from './webSearchResults';
 
 const log = rootLogger.child('browser.automation');
 
@@ -26,8 +28,42 @@ export interface BrowserAutomationService {
   inspectPage(): Promise<PageSnapshot>;
   clickOnPage(text: string): Promise<ActOnPageResult>;
   fillOnPage(label: string, value: string): Promise<ActOnPageResult>;
+  /** A web search read from a real results page in a throwaway tab — never touches the page currently open. */
+  searchWeb(query: string): Promise<WebSearchHit[]>;
   close(): Promise<void>;
 }
+
+// Tried in order: DuckDuckGo's plain-HTML page first (simple, stable markup,
+// real destination in the link), Bing as the backup if that comes back empty
+// or gets challenged. Both selectors were confirmed against the live pages.
+interface SearchEngine {
+  readonly name: string;
+  url(query: string): string;
+  extract(): RawSearchHit[];
+}
+
+const SEARCH_ENGINES: readonly SearchEngine[] = [
+  {
+    name: 'duckduckgo',
+    url: (q) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`,
+    extract: () =>
+      Array.from(document.querySelectorAll('.result')).map((r) => ({
+        title: r.querySelector('a.result__a')?.textContent,
+        href: r.querySelector('a.result__a')?.getAttribute('href'),
+        snippet: r.querySelector('.result__snippet')?.textContent,
+      })),
+  },
+  {
+    name: 'bing',
+    url: (q) => `https://www.bing.com/search?q=${encodeURIComponent(q)}`,
+    extract: () =>
+      Array.from(document.querySelectorAll('li.b_algo')).map((li) => ({
+        title: li.querySelector('h2 a')?.textContent,
+        href: li.querySelector('h2 a')?.getAttribute('href'),
+        snippet: li.querySelector('.b_caption p, p')?.textContent,
+      })),
+  },
+];
 
 /** Visible on-page modal/alert boxes — a login prompt, a cookie banner, a warning — as opposed to a native browser dialog (see `lastNativeDialog`, which these never cover). */
 async function collectDialogTexts(page: Page): Promise<string[]> {
@@ -90,6 +126,16 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
           viewport: { width: 1280, height: 900 },
         });
         log.info('browser automation launched', { channel });
+        // The user can close this window themselves. Forget the dead context,
+        // so the next website action opens a fresh window instead of failing
+        // on the old one until Eya is restarted.
+        ctx.on('close', () => {
+          if (this.context === ctx) {
+            this.context = null;
+            this.page = null;
+            log.info('browser automation window was closed');
+          }
+        });
         return ctx;
       } catch (err) {
         lastErr = err;
@@ -203,6 +249,29 @@ export class PlaywrightBrowserService implements BrowserAutomationService {
       await target.fill(value);
     }
     return { ok: true, snapshot: await this.snapshot(page) };
+  }
+
+  async searchWeb(query: string): Promise<WebSearchHit[]> {
+    this.context ??= await this.launchContext();
+    // A throwaway tab, closed afterwards: searching must never navigate away
+    // from (or steal the "current page" of) whatever site is open for the user.
+    const tab = await this.context.newPage();
+    try {
+      for (const engine of SEARCH_ENGINES) {
+        try {
+          await tab.goto(engine.url(query), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+          await this.settle(tab);
+          const hits = cleanSearchHits(await tab.evaluate(engine.extract));
+          log.info('browser web search', { engine: engine.name, hits: hits.length });
+          if (hits.length > 0) return hits;
+        } catch (err) {
+          log.warn('browser web search engine failed', { engine: engine.name, err: String(err) });
+        }
+      }
+      return [];
+    } finally {
+      await tab.close().catch(() => undefined);
+    }
   }
 
   async close(): Promise<void> {

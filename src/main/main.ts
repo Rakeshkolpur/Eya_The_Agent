@@ -101,7 +101,11 @@ async function bootstrap(): Promise<void> {
   tools.register(closeApplicationTool);
   for (const tool of createFileTools(folders)) tools.register(tool);
   tools.register(createDocumentTool(folders, gemini));
-  tools.register(createWebSearchTool(gemini));
+  // One browser service for everything: web_search borrows it as a fallback
+  // when Gemini's own search allowance is spent, and the website tools below
+  // drive the same window.
+  const browserService = new PlaywrightBrowserService(join(app.getPath('userData'), 'browser-profile'));
+  tools.register(createWebSearchTool(gemini, { search: (query) => browserService.searchWeb(query) }));
   for (const tool of createOpenTools(folders, {
     opener: {
       openPath: (path) => shell.openPath(path),
@@ -118,7 +122,6 @@ async function bootstrap(): Promise<void> {
     tools.register(tool);
   }
   for (const tool of createRecycleBinTools(folders)) tools.register(tool);
-  const browserService = new PlaywrightBrowserService(join(app.getPath('userData'), 'browser-profile'));
   for (const tool of createBrowserTools(browserService)) tools.register(tool);
 
   const window = orb.create();
