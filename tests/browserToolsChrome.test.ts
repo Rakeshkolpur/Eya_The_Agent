@@ -306,7 +306,7 @@ describe('optional tools', () => {
     closeTab: async () => ({ closed: true, remainingTabs: 0 }),
   };
   const connectorStub = {
-    connect: async () => ({ connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: true }),
+    connect: async () => ({ connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: true, outdated: [] }),
   };
 
   it('tab, status and connect tools exist only when the user\'s browser can be reached', () => {
@@ -317,7 +317,7 @@ describe('optional tools', () => {
       tools(f, {
         tabs: tabsStub,
         connector: connectorStub,
-        session: { describe: () => ({ mode: 'user_browser', browsers: [], waitingToPair: [], pairingOpen: false, workingIn: null }), waitForUserChange: async () => ({ changed: false, snapshot: snap() }) },
+        session: { describe: () => ({ mode: 'user_browser', browsers: [], waitingToPair: [], outdated: [], pairingOpen: false, workingIn: null }), waitForUserChange: async () => ({ changed: false, snapshot: snap() }) },
       }),
     );
     expect(full).toEqual(
@@ -356,13 +356,13 @@ describe('optional tools', () => {
 
   it('connect_chrome reports every browser it connected, or exactly what the user still has to do', async () => {
     const f = fake();
-    const both = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const, 'edge' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: true, extensionSeen: true }) } });
+    const both = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const, 'edge' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: true, extensionSeen: true, outdated: [] }) } });
     expect(await both['connect_chrome']!.execute({})).toMatchObject({ ok: true, summary: 'connected chrome and edge', data: { connected: true, browsers: ['chrome', 'edge'] } });
 
-    const partial = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const], stillWaiting: ['edge' as const], extensionFolder: 'x', helpOpened: false, extensionSeen: true }) } });
+    const partial = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const], stillWaiting: ['edge' as const], extensionFolder: 'x', helpOpened: false, extensionSeen: true, outdated: [] }) } });
     expect((await partial['connect_chrome']!.execute({})).data).toMatchObject({ notYetConnected: ['edge'] });
 
-    const waiting = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: true, extensionSeen: false }) } });
+    const waiting = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: true, extensionSeen: false, outdated: [] }) } });
     const r = await waiting['connect_chrome']!.execute({});
     expect(r.ok).toBe(false);
     expect(r.summary).toBe('waiting for you');
@@ -373,7 +373,7 @@ describe('optional tools', () => {
 
   it('connect_chrome, for an extension that was set up before but is not answering: says nothing needs installing, opens nothing, tells what to check', async () => {
     const f = fake();
-    const t = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: false, extensionSeen: true }) } });
+    const t = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'C:\\app\\eya-chrome-extension', helpOpened: false, extensionSeen: true, outdated: [] }) } });
     const r = await t['connect_chrome']!.execute({});
     expect(r.ok).toBe(false);
     expect(r.summary).toBe('extension not answering');
@@ -385,9 +385,41 @@ describe('optional tools', () => {
     expect(JSON.stringify(r.data?.['steps'])).not.toMatch(/Load unpacked/);
   });
 
+  it('connect_chrome, when the extension is the old version: says exactly that — reload it, it is not missing — and opens nothing', async () => {
+    const f = fake();
+    const t = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: ['edge' as const], outdated: ['edge' as const], extensionFolder: 'x', helpOpened: false, extensionSeen: true }) } });
+    const r = await t['connect_chrome']!.execute({});
+    expect(r.ok).toBe(false);
+    expect(r.summary).toBe('extension needs a reload');
+    expect(r.error).toMatch(/user's Edge is installed/);
+    expect(r.error).toMatch(/OLD version/);
+    expect(r.error).toMatch(/edge:\/\/extensions/);
+    expect(r.error).toMatch(/reload arrow/);
+    expect(r.error).toMatch(/Do NOT say it is missing/);
+    expect(r.data).toMatchObject({ connected: false, extensionInstalled: true, needsReload: ['edge'] });
+    expect(JSON.stringify(r.data?.['steps'])).not.toMatch(/Load unpacked/);
+  });
+
+  it('connect_chrome, when one browser connected and the other is the old version: succeeds and says the other needs a reload', async () => {
+    const f = fake();
+    const t = tools(f, { connector: { connect: async () => ({ connected: true, alreadyConnected: false, browsers: ['chrome' as const], stillWaiting: ['edge' as const], outdated: ['edge' as const], extensionFolder: 'x', helpOpened: false, extensionSeen: true }) } });
+    const r = await t['connect_chrome']!.execute({});
+    expect(r.ok).toBe(true);
+    expect(r.data).toMatchObject({ connected: true, browsers: ['chrome'], needsReload: ['edge'] });
+    expect(String(r.data?.['hint'])).toMatch(/reload/i);
+  });
+
+  it('a browser-unavailable error that needs a reload comes back as "extension needs a reload", with why: needs_reload', async () => {
+    const f = fake({ open: () => new BrowserUnavailableError('The extension in Edge is the OLD version.', { why: 'needs_reload', needsPairing: ['edge'] }) });
+    const r = await tools(f)['open_website']!.execute({ url: 'https://tshc.gov.in/' });
+    expect(r.ok).toBe(false);
+    expect(r.summary).toBe('extension needs a reload');
+    expect(r.data).toMatchObject({ browserUnavailable: true, why: 'needs_reload', needsPairing: ['edge'] });
+  });
+
   it('connect_chrome tells the user the folder was already shown this run instead of pretending it just opened it', async () => {
     const f = fake();
-    const t = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: false }) } });
+    const t = tools(f, { connector: { connect: async () => ({ connected: false, alreadyConnected: false, browsers: [], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: false, outdated: [] }) } });
     const r = await t['connect_chrome']!.execute({});
     expect(r.error).toMatch(/already opened/);
     expect(r.error).toMatch(/did not open them again/);
@@ -400,7 +432,7 @@ describe('optional tools', () => {
       connector: {
         connect: async (_wait?: number, options?: unknown) => {
           seen.push(options);
-          return { connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], extensionFolder: 'x', helpOpened: false, extensionSeen: true };
+          return { connected: true, alreadyConnected: true, browsers: ['chrome' as const], stillWaiting: [], outdated: [], extensionFolder: 'x', helpOpened: false, extensionSeen: true };
         },
       },
     });
@@ -502,6 +534,7 @@ describe('browser_status and wait_for_user_in_browser', () => {
       { browser: 'edge' as const, connected: false, paired: true },
     ],
     waitingToPair: [],
+    outdated: [],
     pairingOpen: false,
     workingIn: 'your_browser' as const,
     workingBrowser: 'chrome' as const,
@@ -521,6 +554,12 @@ describe('browser_status and wait_for_user_in_browser', () => {
 
     const knocking = tools(f, { session: { describe: () => ({ ...overview, browsers: [], waitingToPair: ['edge'], workingIn: null }), waitForUserChange: async () => ({ changed: false, snapshot: snap() }) } });
     expect((await knocking['browser_status']!.execute({})).data).toMatchObject({ extensionRunningButNotConnected: ['edge'] });
+
+    const stale = tools(f, { session: { describe: () => ({ ...overview, browsers: [], waitingToPair: ['edge' as const], outdated: ['edge' as const], workingIn: null }), waitForUserChange: async () => ({ changed: false, snapshot: snap() }) } });
+    const r3 = await stale['browser_status']!.execute({});
+    expect(r3.data).toMatchObject({ extensionNeedsReload: ['edge'] });
+    expect(r3.data).not.toHaveProperty('extensionRunningButNotConnected');
+    expect(String(r3.data?.['hint'])).toMatch(/reload/i);
   });
 
   it('wait_for_user_in_browser returns the page as it now is when the user finishes, or says it is still waiting', async () => {

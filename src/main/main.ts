@@ -129,6 +129,9 @@ async function bootstrap(): Promise<void> {
         waitingToPair: info.waitingToPair,
         paired: Object.entries(info.browsers).filter(([, b]) => b?.paired === true).map(([n]) => n),
       });
+      if (info.outdated.length > 0) {
+        log.warn(`The Eya extension in ${info.outdated.join(' and ')} is an older version: open its extensions page and click reload on "Eya Browser Bridge" (or restart that browser).`);
+      }
     }, 6000);
   });
   const browserMode = parseBrowserMode(process.env['EYA_BROWSER_MODE']);

@@ -295,7 +295,16 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
   it('closing tabs: one Eya opened closes; one the user opened is refused unless the user agreed', async () => {
     await userOpenTab(CHROME_DEBUG, `${base}/orders.html`);
     await waitFor(() => world.tabsOf('chrome').some((t) => t.url.endsWith('/orders.html')), 8000, 'the user\'s tab');
-    const users = (await manager.listTabs('chrome')).find((t) => t.url.endsWith('/orders.html') && !t.openedByEya);
+    // The tab list is asked of the browser itself, a moment after the event: wait for it rather than assume the two agree.
+    let users: Awaited<ReturnType<typeof manager.listTabs>>[number] | undefined;
+    await waitFor(
+      async () => {
+        users = (await manager.listTabs('chrome')).find((t) => t.url.endsWith('/orders.html') && !t.openedByEya);
+        return users !== undefined;
+      },
+      8000,
+      "the user's tab in Eya's tab list",
+    );
     expect(users).toBeDefined();
     await expect(manager.closeTab(users!.tabId, { browser: 'chrome' })).rejects.toThrow(/opened by you/);
     const closed = await manager.closeTab(users!.tabId, { browser: 'chrome', allowUserTab: true });

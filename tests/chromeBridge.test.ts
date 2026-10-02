@@ -518,6 +518,43 @@ describe('requests', () => {
     expect(bridge.waitingToPair()).toEqual([]);
   });
 
+  it('tells an outdated extension (needs a reload) apart from one that merely is not paired: only the refused-for-version one is outdated', async () => {
+    const stale = await connect();
+    stale.send({ t: 'hello', ext: EYA_EXTENSION_ID, version: '0.1.0', browser: 'edge' }); // the first version of the extension
+    expect((await stale.next())['reason']).toBe('incompatible');
+    const unpaired = await connect();
+    unpaired.send(hello('chrome'));
+    expect((await unpaired.next())['reason']).toBe('not_pairing');
+
+    expect(bridge.waitingToPair().sort()).toEqual(['chrome', 'edge']);
+    expect(bridge.outdated()).toEqual(['edge']);
+    expect(bridge.info().outdated).toEqual(['edge']);
+  });
+
+  it('an outdated extension that is reloaded and pairs is no longer outdated, and old knocks are forgotten', async () => {
+    const stale = await connect();
+    stale.send({ t: 'hello', ext: EYA_EXTENSION_ID, version: '0.1.0', browser: 'edge' });
+    await stale.next();
+    expect(bridge.outdated()).toEqual(['edge']);
+    bridge.openPairingWindow();
+    await pair('edge', false);
+    expect(bridge.outdated()).toEqual([]);
+
+    const again = await connect();
+    again.send({ t: 'hello', ext: EYA_EXTENSION_ID, version: '0.1.0', browser: 'chrome' });
+    await again.next();
+    expect(bridge.outdated()).toEqual(['chrome']);
+    clock += 100_000;
+    expect(bridge.outdated()).toEqual([]);
+  });
+
+  it('an extension missing abilities Eya needs is also reported as outdated', async () => {
+    const c = await connect();
+    c.send(hello('chrome', { capabilities: ['observe'] }));
+    expect((await c.next())['reason']).toBe('incompatible');
+    expect(bridge.outdated()).toEqual(['chrome']);
+  });
+
   it('waitForConnection resolves as soon as the browser connects, and false when it does not', async () => {
     expect(await bridge.waitForConnection('chrome', 30)).toBe(false);
     const waiting = bridge.waitForConnection('chrome', 2000);

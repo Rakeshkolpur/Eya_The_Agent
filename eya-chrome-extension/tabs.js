@@ -117,7 +117,8 @@ export function wireTab(t) {
     tabId: t.id,
     windowId: t.windowId,
     title: (t.title ?? '').slice(0, 120),
-    url: redactedUrl(t.url ?? t.pendingUrl ?? ''),
+    // A tab that is still loading has url '' (not undefined), so `??` would never reach pendingUrl: use `||`.
+    url: redactedUrl(t.url || t.pendingUrl || ''),
     active: t.active === true,
     pinned: t.pinned === true,
     loading: t.status === 'loading',
@@ -287,11 +288,13 @@ export async function openUrl(raw) {
   const target = assertWebUrl(raw);
   const key = hostKey(target.href);
   const all = (await chrome.tabs.query({})).filter((t) => t.id !== undefined && !t.incognito);
-  const sameHost = all.filter((t) => hostKey(t.url ?? t.pendingUrl ?? '') === key);
+  // A tab still loading has url '' (not undefined): `||`, so a tab that is on its way to this site still counts as being on it.
+  const addressOf = (t) => t.url || t.pendingUrl || '';
+  const sameHost = all.filter((t) => hostKey(addressOf(t)) === key);
   const isRoot = (target.pathname === '/' || target.pathname === '') && target.search === '';
 
   // Already showing exactly this, or asked for a site's front door and a tab of that site is open: just go there.
-  const exact = sameHost.find((t) => (t.url ?? '').split('#')[0] === target.href.split('#')[0]);
+  const exact = sameHost.find((t) => addressOf(t).split('#')[0] === target.href.split('#')[0]);
   const focusOnly = exact ?? (isRoot ? sameHost.find((t) => t.active) ?? sameHost[0] : undefined);
   if (focusOnly?.id !== undefined) {
     await focusTab(focusOnly.id);

@@ -175,7 +175,7 @@ function applyChallenge(base: ToolResult, snapshot: PageSnapshot): ToolResult {
 function unavailable(err: BrowserUnavailableError): ToolResult {
   return {
     ok: false,
-    summary: 'browser not connected',
+    summary: err.detail.why === 'needs_reload' ? 'extension needs a reload' : 'browser not connected',
     error: err.message,
     data: {
       browserUnavailable: true,
@@ -729,7 +729,11 @@ export function createBrowserTools(
             data: {
               mode: o.mode,
               browsers: o.browsers,
-              ...(o.waitingToPair.length > 0 ? { extensionRunningButNotConnected: o.waitingToPair, hint: 'Ask the user whether to connect it, then call connect_chrome.' } : {}),
+              ...(o.outdated.length > 0
+                ? { extensionNeedsReload: o.outdated, hint: 'That extension is installed but is the old version: tell the user to click its reload arrow on the browser extensions page (not to install it again).' }
+                : o.waitingToPair.length > 0
+                  ? { extensionRunningButNotConnected: o.waitingToPair, hint: 'Ask the user whether to connect it, then call connect_chrome.' }
+                  : {}),
               ...(o.workingIn !== null ? { workingIn: o.workingIn, ...(o.workingBrowser !== undefined ? { workingBrowser: o.workingBrowser } : {}) } : {}),
               ...(connected.length === 0 && o.waitingToPair.length === 0 ? { hint: 'No extension is connected. Call connect_chrome to help the user add or connect it.' } : {}),
             },
@@ -809,7 +813,36 @@ export function createBrowserTools(
               data: {
                 connected: true,
                 browsers: r.browsers,
-                ...(r.stillWaiting.length > 0 ? { notYetConnected: r.stillWaiting, hint: 'Another browser has the extension running but did not connect in time; ask again if the user wants it too.' } : {}),
+                ...(r.outdated.length > 0
+                  ? { needsReload: r.outdated, hint: `The extension in ${r.outdated.join(' and ')} is the old version: if the user wants it to work too, tell them to click its reload arrow on the extensions page.` }
+                  : r.stillWaiting.length > 0
+                    ? { notYetConnected: r.stillWaiting, hint: 'Another browser has the extension running but did not connect in time; ask again if the user wants it too.' }
+                    : {}),
+              },
+            };
+          }
+          if (r.outdated.length > 0) {
+            // Eya knows exactly what is wrong, so she says so: the extension is there and on, it is just the old version.
+            const pages = r.outdated.map((b) => (b === 'chrome' ? 'chrome://extensions' : b === 'edge' ? 'edge://extensions' : "the browser's extensions page"));
+            const names = r.outdated.map((b) => (b === 'chrome' ? 'Chrome' : b === 'edge' ? 'Edge' : 'browser')).join(' and ');
+            return {
+              ok: false,
+              summary: 'extension needs a reload',
+              error:
+                `The Eya Browser Bridge extension in the user's ${names} is installed and switched on, but it is the OLD version, so Eya refused it. ` +
+                `It only needs reloading once: open ${pages.join(' or ')}, click the circular reload arrow on "Eya Browser Bridge" (or close and reopen the browser), and keep Developer mode on. ` +
+                'Eya has opened a short pairing window, so as soon as they reload it, it connects by itself — then retry what they asked ' +
+                '(if that takes them more than a minute or so, they can say "connect my browser" again). ' +
+                'Tell the user exactly this. Do NOT say it is missing, do NOT ask them to install it again, and do NOT just say to check it is switched on.',
+              data: {
+                connected: false,
+                extensionInstalled: true,
+                needsReload: r.outdated,
+                steps: [
+                  `Open ${pages.join(' or ')}.`,
+                  'Click the circular reload arrow on "Eya Browser Bridge" (or close and reopen the browser). Keep Developer mode on.',
+                  'It then connects by itself within a few seconds — say "try again" or repeat what you asked.',
+                ],
               },
             };
           }

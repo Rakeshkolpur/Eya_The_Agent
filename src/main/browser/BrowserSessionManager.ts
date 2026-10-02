@@ -49,6 +49,8 @@ export interface ManagedBridge {
   forBrowser(browser: BrowserName): BrowserLink;
   waitForConnection(browser: BrowserName, ms: number): Promise<boolean>;
   waitingToPair(): BrowserName[];
+  /** Extensions that are running but were refused for being an older version than this Eya needs. */
+  outdated(): BrowserName[];
   info(): BridgeInfo;
 }
 
@@ -92,6 +94,8 @@ export interface BrowserOverview {
   }>;
   /** Browsers whose extension is running but has not been paired yet. */
   readonly waitingToPair: readonly BrowserName[];
+  /** Of those, the ones whose extension is an older version than this Eya needs: they only need reloading. */
+  readonly outdated: readonly BrowserName[];
   readonly pairingOpen: boolean;
   readonly workingIn: 'your_browser' | 'eya_browser' | null;
   readonly workingBrowser?: BrowserName;
@@ -119,6 +123,20 @@ function needsPairing(browsers: readonly BrowserName[]): BrowserUnavailableError
       'Ask the user whether to connect it, and if they say yes call connect_chrome — that links it once, and from then on it connects by itself. ' +
       'Nothing was opened in any other browser.',
     { needsPairing: browsers, why: 'needs_pairing' },
+  );
+}
+
+const EXTENSIONS_PAGE: Record<BrowserName, string> = { chrome: 'chrome://extensions', edge: 'edge://extensions', other: "the browser's extensions page" };
+
+/** Installed and running, but an older version than this Eya speaks: it is neither missing nor switched off — it needs one reload. */
+function needsReload(browsers: readonly BrowserName[]): BrowserUnavailableError {
+  return new BrowserUnavailableError(
+    `The Eya Browser Bridge extension in the user's ${nameList(browsers)} is installed and running, but it is the OLD version, so Eya refused it. ` +
+      'It is not missing and not switched off: it needs reloading once. ' +
+      `Tell the user: open ${browsers.map((b) => EXTENSIONS_PAGE[b]).join(' (or ')}${browsers.length > 1 ? ')' : ''}, click the circular reload arrow on "Eya Browser Bridge" ` +
+      '(or close and reopen that browser), keep Developer mode on, and then say "connect my browser". Do not tell them to install it again. ' +
+      'Nothing was opened in any other browser.',
+    { needsPairing: browsers, why: 'needs_reload' },
   );
 }
 
@@ -208,9 +226,15 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     });
   }
 
+  /** An extension that is running but cannot connect: an outdated one needs a reload, an unpaired one needs pairing. */
+  private blockedError(waiting: readonly BrowserName[]): BrowserUnavailableError {
+    const outdated = this.deps.bridge.outdated().filter((b) => waiting.includes(b));
+    return outdated.length > 0 ? needsReload(outdated) : needsPairing(waiting);
+  }
+
   private notConnectedError(): BrowserUnavailableError {
     const waiting = this.deps.bridge.waitingToPair();
-    if (waiting.length > 0) return needsPairing(waiting);
+    if (waiting.length > 0) return this.blockedError(waiting);
     return new BrowserUnavailableError(
       "None of the user's browsers is connected to Eya. Call connect_chrome (it helps the user add or connect the Eya Browser Bridge extension), then try again. " +
         'Nothing was opened in any other browser.',
@@ -235,7 +259,37 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
    * Where a new site should open. A connected browser (preferring the one that already has the site); failing that, the
    * user's normal browser is started or woken — and only if its extension still does not answer does this give up, out loud.
    */
-  private async resolveForOpen(url: string): Promise<{ browser: BrowserName; startedBrowser: boolean }> {
+  private pickBrowser(list: readonly BrowserName[]): BrowserName | undefined {
+    return this.deps.preferred != null && list.includes(this.deps.preferred) ? this.deps.preferred : (['chrome', 'edge', 'other'] as const).find((b) => list.includes(b));
+  }
+
+  /**
+   * A browser whose extension cannot connect (an old version that needs a reload, or one not paired yet) must not stop the task when
+   * another of the user's OWN browsers is already set up with Eya: the site is opened there, and the result says so and why.
+   * Only the user's normal browsers are ever used for this — never a separate profile. Null when there is no such browser.
+   */
+  private async useHealthyBrowser(url: string, blocked: readonly BrowserName[]): Promise<{ browser: BrowserName; startedBrowser: boolean; via: string } | null> {
+    const info = this.deps.bridge.info();
+    const paired = (['chrome', 'edge', 'other'] as const).filter((b) => !blocked.includes(b) && info.browsers[b]?.paired === true);
+    if (paired.length === 0) return null;
+    const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
+    const target = this.pickBrowser(paired.filter((b) => installed.includes(b) || running.includes(b)));
+    if (target === undefined) return null;
+    if (!(await this.deps.launcher.launch(target, url))) return null;
+    log.info('using the other set-up browser', { browser: target, instead: blocked });
+    if (!(await this.deps.bridge.waitForConnection(target, this.deps.launchWaitMs ?? 25_000))) return null;
+    const outdated = this.deps.bridge.outdated().some((b) => blocked.includes(b));
+    return {
+      browser: target,
+      startedBrowser: !running.includes(target),
+      via:
+        `The Eya extension in the user's ${nameList(blocked)} ${outdated ? 'is the old version and needs a reload' : 'is not connected yet'}, ` +
+        `so this was opened in the user's ${NAME[target]} instead. Say that to the user in one short sentence` +
+        `${outdated ? ` and, if they want ${nameList(blocked)} to work too, tell them to reload the extension there` : ''}.`,
+    };
+  }
+
+  private async resolveForOpen(url: string): Promise<{ browser: BrowserName; startedBrowser: boolean; via?: string }> {
     const sel = this.selectFor(url);
     if (sel !== null) {
       log.info('browser chosen', { browser: sel.browser, reason: sel.reason });
@@ -243,21 +297,27 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     }
 
     const waiting = this.deps.bridge.waitingToPair();
-    if (waiting.length > 0) throw needsPairing(waiting);
+    if (waiting.length > 0) {
+      const other = await this.useHealthyBrowser(url, waiting);
+      if (other !== null) return other;
+      throw this.blockedError(waiting);
+    }
 
     const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
-    const pick = (list: readonly BrowserName[]): BrowserName | undefined =>
-      this.deps.preferred != null && list.includes(this.deps.preferred) ? this.deps.preferred : (['chrome', 'edge', 'other'] as const).find((b) => list.includes(b));
 
     // A browser that is already open: its extension may just be waking up (it sleeps between alarms).
     if (running.length > 0) {
       const woke = await this.waitForAny(running, this.deps.runningWaitMs ?? 8000);
       if (woke !== null) return { browser: woke, startedBrowser: false };
       const stillWaiting = this.deps.bridge.waitingToPair();
-      if (stillWaiting.length > 0) throw needsPairing(stillWaiting);
+      if (stillWaiting.length > 0) {
+        const other = await this.useHealthyBrowser(url, stillWaiting);
+        if (other !== null) return other;
+        throw this.blockedError(stillWaiting);
+      }
     }
 
-    const target = pick(running.length > 0 ? running : installed);
+    const target = this.pickBrowser(running.length > 0 ? running : installed);
     if (target === undefined) {
       throw new BrowserUnavailableError('Neither Chrome nor Edge could be found on this PC, so there is no browser of the user\'s to work in.', { why: 'no_browser' });
     }
@@ -271,7 +331,7 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     if (connected) return { browser: target, startedBrowser: !running.includes(target) };
 
     const knocking = this.deps.bridge.waitingToPair();
-    if (knocking.length > 0) throw needsPairing(knocking);
+    if (knocking.length > 0) throw this.blockedError(knocking);
     throw new BrowserUnavailableError(
       `I opened the page in the user's ${NAME[target]}, but the Eya Browser Bridge extension in it did not answer — it is probably not installed there or is switched off. ` +
         `Tell the user: open the browser's extensions page, turn on Developer mode, and make sure "Eya Browser Bridge" is added and switched on (say "connect my browser"; if the extension is not in the browser at all, ask Eya to show them its folder).` +
@@ -321,8 +381,9 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
 
     let browser: BrowserName;
     let startedBrowser = false;
+    let via: string | undefined;
     try {
-      ({ browser, startedBrowser } = await this.resolveForOpen(url));
+      ({ browser, startedBrowser, via } = await this.resolveForOpen(url));
     } catch (err) {
       // Legacy opt-in mode only: the older behaviour of using Eya's own window when the user's browser is not there.
       if (this.deps.mode === 'auto' && err instanceof BrowserUnavailableError) {
@@ -339,6 +400,7 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     return this.stamp(snapshot, 'your_browser', [
       `Opened in the user's ${NAME[browser]}.`,
       ...(startedBrowser ? [`${NAME[browser]} was not running, so Eya started it (their normal profile) and opened the page there.`] : []),
+      ...(via !== undefined ? [via] : []),
       ...notes,
     ]);
   }
@@ -468,6 +530,7 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
       mode: this.deps.mode,
       browsers,
       waitingToPair: info.waitingToPair,
+      outdated: info.outdated,
       pairingOpen: info.pairingOpen,
       workingIn: working,
       ...(workingBrowser !== null ? { workingBrowser } : {}),

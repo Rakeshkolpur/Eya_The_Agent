@@ -38,14 +38,22 @@ class FakeBridge implements ManagedBridge {
     }
     return false;
   }
+  /** Browsers paired with Eya in an earlier session (whether or not they are connected right now). */
+  paired = new Set<BrowserName>();
+  /** Knocking extensions that were refused for being an older version than this Eya needs. */
+  outdatedList: BrowserName[] = [];
   waitingToPair() {
     return this.knocking.filter((b) => !this.connected.has(b));
   }
+  outdated() {
+    return this.outdatedList.filter((b) => this.knocking.includes(b) && !this.connected.has(b));
+  }
   info(): BridgeInfo {
+    const isPaired = (b: BrowserName) => this.connected.has(b) || this.paired.has(b);
     const browsers: BridgeInfo['browsers'] = Object.fromEntries(
-      ORDER.filter((b) => this.connected.has(b) || this.knocking.includes(b)).map((b) => [b, { connected: this.connected.has(b), paired: this.connected.has(b) }]),
+      ORDER.filter((b) => this.connected.has(b) || this.knocking.includes(b) || this.paired.has(b)).map((b) => [b, { connected: this.connected.has(b), paired: isPaired(b) }]),
     );
-    return { listening: true, pairingOpen: false, anyConnected: this.connected.size > 0, browsers, waitingToPair: this.waitingToPair() };
+    return { listening: true, pairingOpen: false, anyConnected: this.connected.size > 0, browsers, waitingToPair: this.waitingToPair(), outdated: this.outdated() };
   }
 }
 
@@ -68,6 +76,10 @@ function rig(
     running?: BrowserName[];
     preferred?: BrowserName | null;
     knocking?: BrowserName[];
+    /** Of the knocking ones, the extensions refused as an older version (they need a reload). */
+    outdated?: BrowserName[];
+    /** Browsers paired with Eya before (not necessarily connected now). */
+    paired?: BrowserName[];
     startedBrowserConnects?: boolean;
     withLookup?: boolean;
     launchOk?: boolean;
@@ -80,6 +92,8 @@ function rig(
   const bridge = new FakeBridge();
   for (const b of opts.connected ?? []) bridge.connected.add(b);
   bridge.knocking = opts.knocking ?? [];
+  bridge.outdatedList = opts.outdated ?? [];
+  for (const b of opts.paired ?? []) bridge.paired.add(b);
   const world = new BrowserWorldTracker(() => clock.now);
   const inspectQueue = new Map<BrowserName, PageSnapshot[]>();
 
@@ -521,5 +535,83 @@ describe('closing', () => {
     });
     await manager.close();
     expect(closed.sort()).toEqual(['isolated', 'lookup']);
+  });
+});
+
+describe('an extension that needs a reload (installed, on, but the old version)', () => {
+  it('says so precisely — reload it, do not install it again — instead of the vague "not connected"', async () => {
+    const r = rig({ knocking: ['edge'], outdated: ['edge'], running: ['edge'], installed: ['edge'] });
+    const err = await caught(r.manager.openWebsite('https://tshc.gov.in/'));
+    expect(err.detail.why).toBe('needs_reload');
+    expect(err.detail.needsPairing).toEqual(['edge']);
+    expect(err.message).toMatch(/OLD version/);
+    expect(err.message).toMatch(/edge:\/\/extensions/);
+    expect(err.message).toMatch(/reload/i);
+    expect(err.message).toMatch(/Do not tell them to install it again/);
+    expect(r.launched).toEqual([]);
+    expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false); // and never a separate window
+  });
+
+  it('a plain not-yet-paired extension is still reported as needing pairing, not a reload', async () => {
+    const r = rig({ knocking: ['chrome'], running: ['chrome'], installed: ['chrome'] });
+    const err = await caught(r.manager.openWebsite('https://x.example/'));
+    expect(err.detail.why).toBe('needs_pairing');
+  });
+
+  it('another of the user\'s own browsers that is already set up carries on: Edge is outdated, Chrome is paired and closed -> Chrome is started and used, and the result says so', async () => {
+    const r = rig({ knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], running: ['edge'], installed: ['chrome', 'edge'], startedBrowserConnects: true });
+    const snapshot = await r.manager.openWebsite('https://tshc.gov.in/');
+    expect(r.launched).toEqual([['chrome', 'https://tshc.gov.in/']]);
+    expect(r.calls).toContain('chrome:open:https://tshc.gov.in/');
+    expect(r.calls.some((c) => c.startsWith('edge:'))).toBe(false);
+    expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false);
+    const notes = (snapshot.notes ?? []).join(' ');
+    expect(notes).toMatch(/Edge is the old version and needs a reload/);
+    expect(notes).toMatch(/opened in the user's Chrome instead/);
+    expect(snapshot.environment).toBe('your_browser');
+    expect(r.manager.pinnedBrowser()).toBe('chrome');
+  });
+
+  it('the same for an Edge that merely is not paired yet: a paired Chrome is used, and the note says "not connected yet"', async () => {
+    const r = rig({ knocking: ['edge'], paired: ['chrome'], installed: ['chrome', 'edge'], running: ['edge'], startedBrowserConnects: true });
+    const snapshot = await r.manager.openWebsite('https://x.example/');
+    expect((snapshot.notes ?? []).join(' ')).toMatch(/Edge is not connected yet/);
+    expect(r.launched.map((l) => l[0])).toEqual(['chrome']);
+  });
+
+  it('if the other browser does not come up either, it stops with the precise reload message — still no separate window', async () => {
+    const r = rig({ knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], installed: ['chrome', 'edge'], running: ['edge'], startedBrowserConnects: false });
+    const err = await caught(r.manager.openWebsite('https://x.example/'));
+    expect(err.detail.why).toBe('needs_reload');
+    expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false);
+  });
+
+  it('never switches to a browser that is not installed, or that is not paired', async () => {
+    const notInstalled = rig({ knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], installed: ['edge'], running: ['edge'], startedBrowserConnects: true });
+    expect((await caught(notInstalled.manager.openWebsite('https://x.example/'))).detail.why).toBe('needs_reload');
+    expect(notInstalled.launched).toEqual([]);
+
+    const notPaired = rig({ knocking: ['edge'], outdated: ['edge'], installed: ['chrome', 'edge'], running: ['edge'], startedBrowserConnects: true });
+    expect((await caught(notPaired.manager.openWebsite('https://x.example/'))).detail.why).toBe('needs_reload');
+    expect(notPaired.launched).toEqual([]);
+  });
+
+  it('a connected browser is always used as before — the fallback only exists for when none is', async () => {
+    const r = rig({ connected: ['chrome'], knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], installed: ['chrome', 'edge'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/' }]);
+    const snapshot = await r.manager.openWebsite('https://x.example/');
+    expect(r.launched).toEqual([]);
+    expect((snapshot.notes ?? []).join(' ')).not.toMatch(/instead/);
+  });
+
+  it('describe() lists which extensions need a reload', () => {
+    const r = rig({ knocking: ['edge'], outdated: ['edge'] });
+    expect(r.manager.describe()).toMatchObject({ waitingToPair: ['edge'], outdated: ['edge'] });
+  });
+
+  it('continuing work with nothing connected and an outdated extension also says needs-reload', async () => {
+    const r = rig({ knocking: ['edge'], outdated: ['edge'] });
+    const err = await caught(r.manager.inspectPage());
+    expect(err.detail.why).toBe('needs_reload');
   });
 });

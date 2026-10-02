@@ -121,6 +121,8 @@ export interface BridgeInfo {
   readonly browsers: Readonly<Partial<Record<BrowserName, BrowserLinkInfo>>>;
   /** Browsers whose extension is running and trying to connect but has not been paired yet. */
   readonly waitingToPair: readonly BrowserName[];
+  /** The subset of those whose extension is an older version than this Eya needs: it has to be reloaded, not installed or paired. */
+  readonly outdated: readonly BrowserName[];
 }
 
 export interface BridgeConnectionEvent {
@@ -185,7 +187,8 @@ export class ChromeBridge {
   private wss: WebSocketServer | null = null;
   private readonly conns = new Map<BrowserName, ActiveConnection>();
   private readonly pending = new Map<number, PendingRequest>();
-  private readonly knocks = new Map<BrowserName, { at: number; version: string }>();
+  /** Extensions that tried to connect and were turned away. `outdated`: refused because their version/abilities do not match this Eya. */
+  private readonly knocks = new Map<BrowserName, { at: number; version: string; outdated: boolean }>();
   private readonly pairedThisWindow = new Set<BrowserName>();
   private nextId = 1;
   private pairingUntil = 0;
@@ -284,6 +287,18 @@ export class ChromeBridge {
     return BROWSER_NAMES.filter((b) => (this.knocks.get(b)?.at ?? 0) >= cutoff && !this.isConnected(b));
   }
 
+  /**
+   * Extensions that are installed and running but were refused because they are an older version than this Eya needs
+   * (seen within the last minute and a half). They are not "missing" and not "switched off": they need reloading once.
+   */
+  outdated(): BrowserName[] {
+    const cutoff = this.now() - KNOCK_MEMORY_MS;
+    return BROWSER_NAMES.filter((b) => {
+      const k = this.knocks.get(b);
+      return k !== undefined && k.outdated && k.at >= cutoff && !this.isConnected(b);
+    });
+  }
+
   info(): BridgeInfo {
     const browsers: Partial<Record<BrowserName, BrowserLinkInfo>> = {};
     const waiting = this.waitingToPair();
@@ -299,7 +314,7 @@ export class ChromeBridge {
           : {}),
       };
     }
-    return { listening: this.wss !== null, pairingOpen: this.pairingOpen(), anyConnected: this.isConnected(), browsers, waitingToPair: waiting };
+    return { listening: this.wss !== null, pairingOpen: this.pairingOpen(), anyConnected: this.isConnected(), browsers, waitingToPair: waiting, outdated: this.outdated() };
   }
 
   onConnectionChange(listener: (e: BridgeConnectionEvent) => void): () => void {
@@ -447,8 +462,8 @@ export class ChromeBridge {
     ws.on('error', (err) => log.warn('bridge socket error', { err: String(err) }));
   }
 
-  private knock(browser: BrowserName, hello: WireHello): void {
-    this.knocks.set(browser, { at: this.now(), version: hello.extensionVersion });
+  private knock(browser: BrowserName, hello: WireHello, outdated = false): void {
+    this.knocks.set(browser, { at: this.now(), version: hello.extensionVersion, outdated });
   }
 
   private authenticate(ws: WebSocket, hello: WireHello): boolean {
@@ -459,7 +474,7 @@ export class ChromeBridge {
     const browser = toBrowserName(hello.browser);
 
     if (hello.protocolVersion !== PROTOCOL_VERSION) {
-      this.knock(browser, hello);
+      this.knock(browser, hello, true);
       this.refuse(
         ws,
         'incompatible',
@@ -470,7 +485,7 @@ export class ChromeBridge {
     }
     const missing = REQUIRED_CAPABILITIES.filter((c) => !hello.capabilities.includes(c));
     if (missing.length > 0) {
-      this.knock(browser, hello);
+      this.knock(browser, hello, true);
       this.refuse(ws, 'incompatible', 4005, `The extension is missing abilities Eya needs (${missing.join(', ')}). Reload the Eya Browser Bridge extension.`);
       return false;
     }

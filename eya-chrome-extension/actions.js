@@ -30,7 +30,7 @@ export async function inject(tabId, command, params = {}) {
 async function restrictedState(tabId, why) {
   const tab = await chrome.tabs.get(tabId);
   return {
-    url: tab.url ?? '',
+    url: tab.url || tab.pendingUrl || '',
     title: tab.title ?? '',
     epoch: 0,
     headings: [],

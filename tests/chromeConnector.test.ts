@@ -4,6 +4,8 @@ import type { ConnectorBridge } from '../src/main/chrome/chromeConnector';
 import type { BrowserName } from '../src/main/chrome/protocol';
 
 interface Script {
+  /** Of the knocking extensions, the ones refused for being an older version than this Eya needs. */
+  outdated?: BrowserName[];
   /** When (ms of fake time) each browser's extension connects. Unlisted browsers never do. */
   connectsAt?: Partial<Record<BrowserName, number>>;
   /** Browsers whose extension is running and trying to connect (knocking) from the start. */
@@ -23,6 +25,7 @@ function setup(s: Script = {}) {
     isConnected: (b) => (b === undefined ? connectedNow().length > 0 : connectedNow().includes(b)),
     connectedBrowsers: connectedNow,
     waitingToPair: () => (s.knocking ?? []).filter((b) => !connectedNow().includes(b)),
+    outdated: () => (s.outdated ?? []).filter((b) => (s.knocking ?? []).includes(b) && !connectedNow().includes(b)),
     info: () => ({
       browsers: Object.fromEntries(
         (['chrome', 'edge', 'other'] as const)
@@ -106,6 +109,26 @@ describe('connect my browser', () => {
     expect(log).toEqual([]);
   });
 
+  it('an extension refused for being the old version is reported as outdated (needs a reload), opens the window so a reload pairs at once, and opens nothing', async () => {
+    const { connector, bridge, log } = setup({ knocking: ['edge'], outdated: ['edge'], paired: ['chrome'] });
+    const r = await connector.connect(5000);
+    expect(r).toMatchObject({ connected: false, helpOpened: false, extensionSeen: true, outdated: ['edge'], stillWaiting: ['edge'] });
+    expect(bridge.windows).toBe(1);
+    expect(log).toEqual([]);
+  });
+
+  it('one browser connects while the other is outdated: connected, and the outdated one is still reported', async () => {
+    const { connector } = setup({ knocking: ['chrome', 'edge'], outdated: ['edge'], connectsAt: { chrome: 1000 } });
+    const r = await connector.connect(20_000);
+    expect(r).toMatchObject({ connected: true, browsers: ['chrome'], outdated: ['edge'] });
+  });
+
+  it('a reload during the wait pairs it: no longer outdated once connected', async () => {
+    const { connector } = setup({ knocking: ['edge'], outdated: ['edge'], connectsAt: { edge: 6000 } });
+    const r = await connector.connect(20_000);
+    expect(r).toMatchObject({ connected: true, browsers: ['edge'], outdated: [] });
+  });
+
   it('a first install (nothing ever seen) gets the page and folder once — asking again the same run does not reopen them', async () => {
     const { connector, log } = setup();
     expect(await connector.connect(2000)).toMatchObject({ connected: false, helpOpened: true, extensionSeen: false });
@@ -134,6 +157,7 @@ describe('connect my browser', () => {
       isConnected: () => false,
       connectedBrowsers: () => [],
       waitingToPair: () => [],
+      outdated: () => [],
       info: () => ({ browsers: {} }),
       openPairingWindow: () => 1,
     };
