@@ -52,6 +52,8 @@ function fake(over: {
       return unwrap(over.fill?.(label) ?? { ok: true as const, snapshot: page });
     },
     goBack: async () => unwrap(over.back?.() ?? { ok: true as const, snapshot: page }),
+    findOnPage: async (query) => ({ url: '', title: '', query, matches: [], textMatches: [], totalControls: 0 }),
+    readPage: async () => ({ url: '', title: '', text: '', offset: 0, nextOffset: null, totalChars: 0 }),
     searchWeb: async () => [],
     close: async () => undefined,
   };
@@ -298,7 +300,7 @@ describe('optional tools', () => {
   it('tab tools and connect_chrome exist only when the user\'s browser can be reached', () => {
     const f = fake();
     const bare = Object.keys(tools(f));
-    expect(bare).toEqual(['open_website', 'inspect_page', 'click_on_page', 'fill_on_page', 'go_back']);
+    expect(bare).toEqual(['open_website', 'inspect_page', 'find_on_page', 'read_page', 'click_on_page', 'fill_on_page', 'go_back']);
     const full = Object.keys(
       tools(f, {
         tabs: { listTabs: async () => [], switchToTab: async () => snap() },
@@ -343,5 +345,84 @@ describe('optional tools', () => {
     expect(r.error).toMatch(/Load unpacked/);
     expect(r.error).toMatch(/eya-chrome-extension/);
     expect(r.data).toMatchObject({ connected: false, extensionFolder: 'C:\\app\\eya-chrome-extension' });
+  });
+});
+
+describe('find_on_page and read_page', () => {
+  it('find_on_page reports where each match is, never clicks, and tells the model what to do when nothing matches', async () => {
+    const f = fake();
+    const withFind: BrowserAutomationService = {
+      ...f.service,
+      findOnPage: async (query) => ({
+        url: 'https://p.example/',
+        title: 'Portal',
+        query,
+        matches: query === 'cause list' ? [{ name: 'Cause List', role: 'link', where: 'inside the closed menu "Services"' }] : [],
+        textMatches: [],
+        totalControls: 180,
+      }),
+    };
+    const t = Object.fromEntries(createBrowserTools(withFind).map((x) => [x.schema.name, x]));
+    const hit = await t['find_on_page']!.execute({ query: 'cause list' });
+    expect(hit.ok).toBe(true);
+    expect(hit.summary).toBe('found 1 match for "cause list"');
+    expect(hit.data?.['matches']).toEqual([{ name: 'Cause List', role: 'link', where: 'inside the closed menu "Services"' }]);
+    expect(f.clicks).toEqual([]);
+
+    const none = await t['find_on_page']!.execute({ query: 'nothing' });
+    expect(none.ok).toBe(true);
+    expect(none.summary).toMatch(/nothing on the page matches/);
+    expect(String(none.data?.['hint'])).toMatch(/do not invent an address/);
+    expect(none.data?.['controlsOnPage']).toBe(180);
+    expect((await t['find_on_page']!.execute({})).ok).toBe(false);
+  });
+
+  it('read_page returns the text with where to carry on, and says when it is the end', async () => {
+    const f = fake();
+    const reading: BrowserAutomationService = {
+      ...f.service,
+      readPage: async (offset) =>
+        offset === undefined || offset === 0
+          ? { url: 'u', title: 't', text: 'first part', offset: 0, nextOffset: 4000, totalChars: 5000, tables: [{ headers: ['A'], rows: [['1']], totalRows: 1 }] }
+          : { url: 'u', title: 't', text: 'last part', offset, nextOffset: null, totalChars: 5000 },
+    };
+    const t = Object.fromEntries(createBrowserTools(reading).map((x) => [x.schema.name, x]));
+    const first = await t['read_page']!.execute({});
+    expect(first.data).toMatchObject({ text: 'first part', nextOffset: 4000, totalChars: 5000 });
+    expect(first.data?.['tables']).toHaveLength(1);
+    const last = await t['read_page']!.execute({ offset: 4000 });
+    expect(last.data).toMatchObject({ text: 'last part', endOfPage: true });
+    expect(last.data?.['nextOffset']).toBeUndefined();
+  });
+
+  it('both say so plainly when no page is open or the browser is not connected', async () => {
+    const f = fake();
+    const closed: BrowserAutomationService = {
+      ...f.service,
+      findOnPage: async () => {
+        throw new Error('no tab');
+      },
+      readPage: async () => {
+        throw new BrowserUnavailableError('lost the browser');
+      },
+    };
+    const t = Object.fromEntries(createBrowserTools(closed).map((x) => [x.schema.name, x]));
+    expect((await t['find_on_page']!.execute({ query: 'x' })).summary).toBe('no page open');
+    expect((await t['read_page']!.execute({})).summary).toBe('browser not connected');
+  });
+
+  it('inspect_page shows the menu bar, closed-menu links and the unchanged-menu note when the page has them', async () => {
+    const page = snap({ links: ['Track application'], navigation: ['Department 1'], collapsedMenus: { Services: ['Cause List'] }, moreLinks: 12 });
+    const r = await tools(fake({ page }))['inspect_page']!.execute({});
+    const current = r.data?.['currentPage'] as Record<string, unknown>;
+    expect(current['navigation']).toEqual(['Department 1']);
+    expect(current['linksInsideClosedMenus']).toEqual({ Services: ['Cause List'] });
+    expect(current['moreLinks']).toBe(12);
+
+    const same = snap({ links: ['Track application'], navigationSameAsPrevious: 70 });
+    const r2 = await tools(fake({ page: same }))['inspect_page']!.execute({});
+    const c2 = r2.data?.['currentPage'] as Record<string, unknown>;
+    expect(c2['navigation']).toBeUndefined();
+    expect(c2['navigationSameAsPreviousPage']).toBe('70 menu items, unchanged');
   });
 });

@@ -13,6 +13,8 @@ function fakeBrowser(name: string, calls: string[]): UserBrowser {
   return {
     openWebsite: async () => (calls.push(`${name}:open`), snap(name)),
     inspectPage: async () => (calls.push(`${name}:inspect`), snap(name)),
+    findOnPage: async (query) => (calls.push(`${name}:find`), { url: '', title: name, query, matches: [], textMatches: [], totalControls: 0 }),
+    readPage: async () => (calls.push(`${name}:read`), { url: '', title: name, text: '', offset: 0, nextOffset: null, totalChars: 0 }),
     clickOnPage: async () => (calls.push(`${name}:click`), { ok: true as const, snapshot: snap(name) }),
     fillOnPage: async () => (calls.push(`${name}:fill`), { ok: true as const, snapshot: snap(name) }),
     goBack: async () => (calls.push(`${name}:back`), { ok: true as const, snapshot: snap(name) }),

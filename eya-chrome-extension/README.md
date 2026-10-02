@@ -19,9 +19,16 @@ Saying **"connect my browser"** to Eya opens the extensions page and this folder
 
 The toolbar icon shows **ON** when Eya is connected. The extension's options page shows status.
 
+Works the same in **Chrome** and **Edge** (tested in both, version 154). There is no way to install it into Chrome
+silently — Chrome 137 and later ignore the `--load-extension` command-line switch, and a program can't add an
+extension to your everyday profile for you — so the "Load unpacked" click above is the one manual step. If you later
+want it to behave like a normal extension (no Developer-mode requirement, one-click install), it can be published to the
+Chrome Web Store as an unlisted extension; that needs a developer account and is your call, not something Eya can do for you.
+
 ## What it can do
 
-For the page Eya is working in: look at it (headings, links, buttons, fields, readable text, tables),
+For the page Eya is working in: look at it (headings, links, buttons, fields, readable text, tables — including
+links held by menus that are closed until hovered or opened), search the whole page for some words, read its text,
 click something by its visible text, type into a field, press Enter in a search box, go back,
 follow a link that opens a new tab, notice a download and report where it landed, open a site
 (reusing a tab you already have for it), list your tabs and switch to one. Every action ends with a

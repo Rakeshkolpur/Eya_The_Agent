@@ -57,6 +57,8 @@ function fakeService(options: {
       return options.fillResult ?? { ok: true, snapshot: snap() };
     },
     goBack: async () => ({ ok: true, snapshot: snap() }),
+    findOnPage: async (query) => ({ url: '', title: '', query, matches: [], textMatches: [], totalControls: 0 }),
+    readPage: async () => ({ url: '', title: '', text: '', offset: 0, nextOffset: null, totalChars: 0 }),
     searchWeb: async () => [],
     close: async () => undefined,
   };
@@ -264,6 +266,8 @@ describe('loop protection', () => {
       },
       fillOnPage: async () => ({ ok: true, snapshot: snap() }),
       goBack: async () => ({ ok: true, snapshot: snap() }),
+      findOnPage: async (query) => ({ url: '', title: '', query, matches: [], textMatches: [], totalControls: 0 }),
+      readPage: async () => ({ url: '', title: '', text: '', offset: 0, nextOffset: null, totalChars: 0 }),
       searchWeb: async () => [],
       close: async () => undefined,
     };

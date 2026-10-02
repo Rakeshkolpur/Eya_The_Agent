@@ -48,6 +48,8 @@ export type SensitiveAction =
   | 'click_on_page'
   | 'fill_on_page'
   | 'go_back'
+  | 'find_on_page'
+  | 'read_page'
   | 'list_browser_tabs'
   | 'switch_browser_tab'
   | 'connect_chrome'
@@ -95,6 +97,9 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   // Typing into a visible field, not submitting anything destructive by itself.
   fill_on_page: 'safe',
   go_back: 'safe',
+  // Looking through, and reading, the page that is already open.
+  find_on_page: 'safe',
+  read_page: 'safe',
   // Titles of the user's open tabs reach the assistant only when it asks for them while carrying out a request.
   list_browser_tabs: 'safe',
   switch_browser_tab: 'safe',

@@ -51,6 +51,12 @@ function snapshotFields(s: PageSnapshot): Record<string, unknown> {
     links: s.links,
     buttons: s.buttons,
     inputs: s.inputs,
+    ...(s.moreLinks !== undefined ? { moreLinks: s.moreLinks } : {}),
+    // The site's own menu bar / header / footer, apart from the page's links (and not repeated when unchanged).
+    ...(s.navigation !== undefined ? { navigation: s.navigation } : {}),
+    ...(s.navigationSameAsPrevious !== undefined ? { navigationSameAsPreviousPage: `${s.navigationSameAsPrevious} menu items, unchanged` } : {}),
+    // Real links that only a closed (hover / click-to-open) menu is holding, by menu.
+    ...(s.collapsedMenus !== undefined ? { linksInsideClosedMenus: s.collapsedMenus } : {}),
     ...(s.dialogs.length > 0 ? { dialogs: s.dialogs } : {}),
     ...(s.visibleText !== undefined ? { visibleText: s.visibleText } : {}),
     ...(s.tables !== undefined ? { tables: s.tables } : {}),
@@ -222,11 +228,12 @@ export function createBrowserTools(
       name: 'inspect_page',
       status: 'Looking at the page…',
       description:
-        'See what is actually on the currently open web page right now: its headings, visible links, buttons and ' +
-        'form fields, plus the readable text and any table on it. Use this before click_on_page or fill_on_page whenever ' +
-        'you have not just seen the current page, to read what a page says, to look again after the user has done ' +
-        'something themselves (signed in, solved a CAPTCHA), or to find out what options a page genuinely offers instead ' +
-        'of assuming or remembering from training.',
+        'See what is actually on the currently open web page right now: its headings, the page\'s own links (`links`), the ' +
+        'site menu bar apart from them (`navigation`), links held by closed menus (`linksInsideClosedMenus`), buttons and ' +
+        'form fields, plus a short piece of its text and any table. Use this before click_on_page or fill_on_page whenever ' +
+        'you have not just seen the current page, or to look again after the user has done something themselves (signed in, ' +
+        'solved a CAPTCHA). The lists show the first screenful only — if the option you need is not there, use ' +
+        'find_on_page (search the whole page) or read_page (read its text) rather than concluding it does not exist.',
       args: {},
     },
     async execute(): Promise<ToolResult> {
@@ -240,6 +247,83 @@ export function createBrowserTools(
           },
           snapshot,
         );
+      } catch (err) {
+        if (err instanceof BrowserUnavailableError) return { ok: false, summary: 'browser not connected', error: err.message };
+        return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
+      }
+    },
+  };
+
+  const findOnPage: Tool = {
+    schema: {
+      name: 'find_on_page',
+      status: 'Looking through the page…',
+      description:
+        'Search the WHOLE current page for something by its words — everything showing, everything further down, links that ' +
+        "sit inside menus that are closed until opened or hovered, and the page's own text — and say where each match is. " +
+        'Use it whenever the option you need is not in the lists inspect_page / the last result showed (those only list the ' +
+        'first screenful: a long page, a big menu bar or a hover menu can hold the link you want beyond them), or to check ' +
+        'where a word appears before deciding. It never clicks anything: once you have the exact name, use click_on_page.',
+      args: { query: { type: 'string', required: true, description: 'What to look for, e.g. "cause list", "orders", "advocate code".' } },
+    },
+    async execute(args): Promise<ToolResult> {
+      const query = stringArg(args, 'query');
+      if (query === undefined) return { ok: false, summary: 'no query', error: 'Something to look for is required.' };
+      try {
+        const r = await service.findOnPage(query);
+        const none = r.matches.length === 0 && r.textMatches.length === 0;
+        return {
+          ok: true,
+          summary: none ? `nothing on the page matches "${query}"` : `found ${r.matches.length} match${r.matches.length === 1 ? '' : 'es'} for "${query}"`,
+          data: {
+            action: 'find',
+            query,
+            url: r.url,
+            title: r.title,
+            matches: r.matches,
+            ...(r.textMatches.length > 0 ? { pageTextMentions: r.textMatches } : {}),
+            controlsOnPage: r.totalControls,
+            ...(none
+              ? { hint: 'Nothing matches those words. Try other words for the same thing, look at the options the page does have (inspect_page), or ask the user — do not invent an address.' }
+              : {}),
+          },
+        };
+      } catch (err) {
+        if (err instanceof BrowserUnavailableError) return { ok: false, summary: 'browser not connected', error: err.message };
+        return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
+      }
+    },
+  };
+
+  const readPage: Tool = {
+    schema: {
+      name: 'read_page',
+      status: 'Reading the page…',
+      description:
+        "Read the current page's actual text, a slice at a time, so you can answer questions about what it says (a notice, " +
+        'a list of results, a policy, a price, a status) instead of only knowing its link names. The first slice also carries ' +
+        "the page's tables. If the result has nextOffset, call read_page again with that offset to carry on reading; stop " +
+        'as soon as you have what you need.',
+      args: { offset: { type: 'number', description: 'Where to start reading, from the previous result\'s nextOffset. Omit to start at the top.' } },
+    },
+    async execute(args): Promise<ToolResult> {
+      const offset = typeof args['offset'] === 'number' && Number.isFinite(args['offset']) ? args['offset'] : 0;
+      try {
+        const r = await service.readPage(offset);
+        return {
+          ok: true,
+          summary: r.text === '' ? 'the page has no readable text' : `read ${r.text.length} characters of ${r.totalChars}`,
+          data: {
+            action: 'read',
+            url: r.url,
+            title: r.title,
+            text: r.text,
+            offset: r.offset,
+            totalChars: r.totalChars,
+            ...(r.nextOffset !== null ? { nextOffset: r.nextOffset } : { endOfPage: true }),
+            ...(r.tables !== undefined ? { tables: r.tables } : {}),
+          },
+        };
       } catch (err) {
         if (err instanceof BrowserUnavailableError) return { ok: false, summary: 'browser not connected', error: err.message };
         return { ok: false, summary: 'no page open', error: 'No website is open yet. Use open_website first.' };
@@ -430,7 +514,7 @@ export function createBrowserTools(
     },
   };
 
-  const tools: Tool[] = [openWebsite, inspectPage, clickOnPage, fillOnPage, goBack];
+  const tools: Tool[] = [openWebsite, inspectPage, findOnPage, readPage, clickOnPage, fillOnPage, goBack];
 
   const tabs = options.tabs;
   if (tabs !== undefined) {

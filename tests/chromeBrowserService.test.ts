@@ -327,3 +327,70 @@ describe('going back, searching, tabs', () => {
     expect(bridge.calls.at(-1)).toMatchObject({ op: 'focus_tab', args: { tabId: 3 } });
   });
 });
+
+describe('not stuck on the main page: what is shown after each click, and finding what is not shown', () => {
+  const headerLinks = Array.from({ length: 70 }, (_, i) => ({ role: 'link', name: `Department ${i + 1}`, region: 'header' }));
+  const page1 = rawState({ title: 'Portal', url: 'https://p.example/' }, [
+    ...headerLinks,
+    { role: 'link', name: 'Citizen Services' },
+    { role: 'link', name: 'Cause List', hidden: true, menu: 'Services', inViewport: false },
+  ]);
+  const page2 = rawState({ title: 'Citizen Services', url: 'https://p.example/citizen' }, [
+    ...headerLinks,
+    { role: 'link', name: 'Track application' },
+    { role: 'link', name: 'Download forms' },
+  ]);
+
+  it("shows the page's own options first; the long menu bar is separate and is not repeated on the next page", async () => {
+    bridge.on('observe', { tabId: 7, state: page1 });
+    bridge.on('click', okReply(page2));
+    const first = await svc.inspectPage();
+    expect(first.links).toEqual(['Citizen Services']);
+    expect(first.navigation).toHaveLength(60);
+    expect(first.collapsedMenus).toEqual({ Services: ['Cause List'] });
+
+    const result = await svc.clickOnPage('Citizen Services');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.snapshot.links).toEqual(['Track application', 'Download forms']); // the NEXT level's options, not the header again
+    expect(result.snapshot.navigation).toBeUndefined();
+    expect(result.snapshot.navigationSameAsPrevious).toBe(70);
+  });
+
+  it('can click a link that only a closed menu holds, by name', async () => {
+    bridge.on('observe', { tabId: 7, state: page1 });
+    bridge.on('click', okReply(rawState({ title: 'Cause List' })));
+    const result = await svc.clickOnPage('Cause List');
+    expect(result.ok).toBe(true);
+    expect(bridge.calls[1]!.args).toMatchObject({ name: 'Cause List' });
+  });
+
+  it('find_on_page searches everything, including the closed menu and the page text', async () => {
+    bridge.on('observe', { tabId: 7, state: { ...page1, bodyText: 'Open the Cause List for the day.' } });
+    const r = await svc.findOnPage('cause list');
+    expect(r.matches[0]).toMatchObject({ name: 'Cause List', role: 'link' });
+    expect(r.matches[0]?.where).toContain('closed menu "Services"');
+    expect(r.textMatches[0]).toContain('Cause List for the day');
+    expect(r.title).toBe('Portal');
+  });
+
+  it('read_page reads the text in slices and tables only with the first one', async () => {
+    const body = Array.from({ length: 300 }, (_, i) => `Paragraph ${i + 1} with some words in it.`).join('\n');
+    bridge.on('observe', { tabId: 7, state: rawState({ bodyText: body, tables: [{ headers: ['A'], rows: [['1']], totalRows: 1 }] }) });
+    const a = await svc.readPage();
+    expect(a.text.startsWith('Paragraph 1 ')).toBe(true);
+    expect(a.nextOffset).not.toBeNull();
+    expect(a.tables).toHaveLength(1);
+    const b = await svc.readPage(a.nextOffset ?? 0);
+    expect(b.offset).toBe(a.nextOffset);
+    expect(b.tables).toBeUndefined();
+  });
+
+  it('stamps whichever browser it is driving, and reports its own unavailable message', async () => {
+    const own = new ChromeBrowserService(bridge, { environment: 'eya_browser', unavailableMessage: 'custom message' });
+    bridge.on('observe', { tabId: 7, state: rawState() });
+    expect((await own.inspectPage()).environment).toBe('eya_browser');
+    bridge.connected = false;
+    await expect(own.inspectPage()).rejects.toThrow('custom message');
+  });
+});

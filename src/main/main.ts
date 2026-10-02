@@ -19,7 +19,7 @@ import { closeFileTool } from '@main/tools/impl/closeFile';
 import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/systemTools';
 import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
 import { createBrowserTools } from '@main/tools/impl/browserTools';
-import { PlaywrightBrowserService } from '@main/browser/BrowserAutomationService';
+import { PlaywrightBrowserService } from '@main/browser/PlaywrightBrowserService';
 import { SwitchingBrowserService, parseBrowserMode } from '@main/browser/browserRouter';
 import { ChromeBridge, FileSecretStore } from '@main/chrome/ChromeBridge';
 import { ChromeBrowserService } from '@main/chrome/ChromeBrowserService';
@@ -118,7 +118,10 @@ async function bootstrap(): Promise<void> {
   log.info('browser mode', { browserMode });
   const browserService = new SwitchingBrowserService({
     user: new ChromeBrowserService(chromeBridge),
-    eya: new PlaywrightBrowserService(join(app.getPath('userData'), 'browser-profile')),
+    eya: new PlaywrightBrowserService({
+      profileDir: join(app.getPath('userData'), 'browser-profile'),
+      downloadsDir: app.getPath('downloads'),
+    }),
     isUserBrowserConnected: () => chromeBridge.isConnected(),
     mode: browserMode,
   });

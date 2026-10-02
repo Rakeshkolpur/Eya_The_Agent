@@ -313,7 +313,13 @@ export class AgentEngine implements RequestHandler, AudioHandler {
         log.info('tool call', { step, name: call.name, args: call.args });
         const toolStarted = Date.now();
         const result = await tools.invoke(call.name, call.args as ToolArgs);
-        log.info('tool result', { name: call.name, ok: result.ok, ms: Date.now() - toolStarted });
+        log.info('tool result', {
+          name: call.name,
+          ok: result.ok,
+          ms: Date.now() - toolStarted,
+          // Why it did not work, so a failure in the log is diagnosable rather than just "ok: false".
+          ...(result.ok ? {} : { summary: result.summary, ...(result.error !== undefined ? { error: result.error.slice(0, 240) } : {}) }),
+        });
         lastToolName = call.name;
         lastToolOk = result.ok;
         allRefs.push(...refsFromToolResult(call.name, result));

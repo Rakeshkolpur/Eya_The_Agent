@@ -65,11 +65,33 @@ mkdirSync(join(profile, 'Default'), { recursive: true });
 // extensions.ui.developer_mode = what the user switches on in edge://extensions before "Load unpacked" (unless EYA_E2E_NO_DEVMODE=1)
 const devMode = process.env.EYA_E2E_NO_DEVMODE !== '1';
 writeFileSync(join(profile, 'Default', 'Preferences'), JSON.stringify({ download: { default_directory: downloads, prompt_for_download: false }, savefile: { default_directory: downloads }, ...(devMode ? { extensions: { ui: { developer_mode: true } } } : {}) }));
-const edgePath = ['ProgramFiles(x86)', 'ProgramFiles'].map((v) => join(process.env[v] ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe')).find(existsSync);
+// Chrome by default (the browser the user installed for this); EYA_E2E_BROWSER=edge runs the same thing in Edge.
+const wantEdge = process.env.EYA_E2E_BROWSER === 'edge';
+const expectedBrowser = wantEdge ? 'edge' : 'chrome';
+const extensionsUrl = wantEdge ? 'edge://extensions/' : 'chrome://extensions/';
+const exeName = wantEdge ? 'msedge.exe' : 'chrome.exe';
+const edgePath = (wantEdge
+  ? [join(process.env['ProgramFiles(x86)'] ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe'), join(process.env['ProgramFiles'] ?? '', 'Microsoft', 'Edge', 'Application', 'msedge.exe')]
+  : [join(process.env['ProgramFiles'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'), join(process.env['ProgramFiles(x86)'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'), join(process.env['LOCALAPPDATA'] ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe')]
+).find(existsSync);
 const extPath = `${root}/eya-chrome-extension`.replace(/\//g, '\\');
 let edge = null;
-const startEdge = () => {
-  edge = spawn(edgePath, ['--remote-debugging-port=9333', `--user-data-dir=${profile}`, `--load-extension=${extPath}`, `--disable-extensions-except=${extPath}`, '--disable-features=DisableLoadExtensionCommandLineSwitch', '--no-first-run', '--no-default-browser-check', '--disable-sync', '--headless=new', 'about:blank'], { stdio: 'ignore' });
+// Edge honours --load-extension. Chrome 137+ ignores it, so the first launch loads the unpacked extension over the
+// debugging protocol — standing in for the user's "Load unpacked" click. A later launch of the same profile relies on
+// the browser remembering it, exactly as it does for a real user.
+const startEdge = async (firstTime = false) => {
+  edge = spawn(edgePath, ['--remote-debugging-port=9333', ...(wantEdge ? [] : ['--enable-unsafe-extension-debugging']), `--user-data-dir=${profile}`, ...(wantEdge ? [`--load-extension=${extPath}`, `--disable-extensions-except=${extPath}`, '--disable-features=DisableLoadExtensionCommandLineSwitch'] : []), '--no-first-run', '--no-default-browser-check', '--disable-sync', '--headless=new', 'about:blank'], { stdio: 'ignore' });
+  if (!wantEdge && firstTime) {
+    let version = null;
+    for (let i = 0; i < 100 && version === null; i++) {
+      try { version = await fetch('http://127.0.0.1:9333/json/version').then((x) => x.json()); } catch { await sleep(300); }
+    }
+    const bs = new WebSocket(version.webSocketDebuggerUrl);
+    await new Promise((r) => bs.addEventListener('open', r));
+    const reply = await new Promise((resolve) => { bs.addEventListener('message', (e) => { const m = JSON.parse(e.data.toString()); if (m.id === 1) resolve(m); }); bs.send(JSON.stringify({ id: 1, method: 'Extensions.loadUnpacked', params: { path: extPath } })); });
+    bs.close();
+    if (!reply.result?.id) throw new Error('could not load the extension: ' + JSON.stringify(reply));
+  }
 };
 const killEdge = () => {
   if (edge?.pid) try { execFileSync('taskkill', ['/PID', String(edge.pid), '/T', '/F'], { stdio: 'ignore' }); } catch {}
@@ -83,9 +105,9 @@ try {
   // 2. connect_chrome: pairing window + help, while the extension's Edge starts and pairs by itself.
   const connecting = tool('connect_chrome');
   await sleep(1500);
-  startEdge();
+  await startEdge(true);
   const conn = await connecting;
-  check('connect_chrome pairs the browser', conn.ok === true && conn.data?.connected === true && conn.data?.browser === 'edge', conn);
+  check('connect_chrome pairs the browser', conn.ok === true && conn.data?.connected === true && conn.data?.browser === expectedBrowser, conn);
 
   // What the user does on the extensions page: Developer mode ON (required to see "Load unpacked" at all).
   // Without it, Edge disables an unpacked extension at its next restart (measured separately).
@@ -101,7 +123,7 @@ try {
       ps.send(JSON.stringify({ id, method, params }));
     });
     await pcall('Page.enable');
-    await pcall('Page.navigate', { url: 'edge://extensions/' });
+    await pcall('Page.navigate', { url: extensionsUrl });
     await sleep(2500);
     const done = await pcall('Runtime.evaluate', { expression: `new Promise((res) => chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode: true}, () => res('on')))`, awaitPromise: true, returnByValue: true });
     check('Developer mode switched on (as a user does)', done.result?.result?.value === 'on', done);
@@ -165,18 +187,21 @@ try {
 
   // 10. the browser goes away mid-task: stop honestly, do NOT swap to another browser behind the user's back
   await tool('open_website', { url: `${base}/menu.html` });
-  const eyaWindowsBefore = execFileSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -match 'browser-profile' } | Measure-Object).Count`]).toString().trim();
+  const eyaWindowsBefore = execFileSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "Name='${exeName}'" | Where-Object { $_.CommandLine -match 'browser-profile' } | Measure-Object).Count`]).toString().trim();
   killEdge();
   await sleep(1500);
   r = await tool('inspect_page');
   check('lost browser: honest "browser not connected", no silent swap', r.ok === false && r.summary === 'browser not connected' && /different browser/.test(r.error ?? ''), r);
   r = await tool('click_on_page', { text: 'Open menu' });
   check('lost browser: clicks stop too', r.ok === false && r.summary === 'browser not connected', r);
-  const eyaWindowsAfter = execFileSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -match 'browser-profile' } | Measure-Object).Count`]).toString().trim();
+  const eyaWindowsAfter = execFileSync('powershell', ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter "Name='${exeName}'" | Where-Object { $_.CommandLine -match 'browser-profile' } | Measure-Object).Count`]).toString().trim();
   check('no Eya-own browser window was launched as a substitute', eyaWindowsAfter === eyaWindowsBefore, { eyaWindowsBefore, eyaWindowsAfter });
 
   // 11. it comes back by itself (stored secret) and the task carries on
-  startEdge();
+  // Chrome forgets an extension that was loaded over the debugging protocol when it closes (a real "Load unpacked" click
+  // is remembered), so for Chrome it is loaded again here. What this step proves is Eya's side: the browser comes back
+  // with the same profile and the stored pairing secret, and reconnects WITHOUT a new pairing.
+  await startEdge(!wantEdge);
   const restartedAt = Date.now();
   // Attach to the extension's service worker as soon as it appears, to read what it says about connecting.
   const swLogs = [];
@@ -209,7 +234,7 @@ try {
   console.log(`   (reconnect took ${back ? Math.round((Date.now() - restartedAt) / 1000) + 's' : 'never, waited 90s'})`);
   console.log('   extension console after restart:', swLogs);
   if (back === null) {
-    const procs = execFileSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -match 'eya-e2e-edge' -and $_.CommandLine -notmatch '--type=' } | ForEach-Object { "$($_.ProcessId) parent=$($_.ParentProcessId) " + $_.CommandLine.Substring(0, [Math]::Min(420, $_.CommandLine.Length)) }`]).toString();
+    const procs = execFileSync('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name='${exeName}'" | Where-Object { $_.CommandLine -match 'eya-e2e-edge' -and $_.CommandLine -notmatch '--type=' } | ForEach-Object { "$($_.ProcessId) parent=$($_.ParentProcessId) " + $_.CommandLine.Substring(0, [Math]::Min(420, $_.CommandLine.Length)) }`]).toString();
     console.log('   test-profile browser processes (main only), spawned pid =', edge?.pid, '\n' + procs);
     try {
       const ver = await fetch('http://127.0.0.1:9333/json/version').then((x) => x.json());
@@ -233,7 +258,7 @@ try {
         ps.send(JSON.stringify({ id, method, params }));
       });
       await pcall('Page.enable');
-      await pcall('Page.navigate', { url: 'edge://extensions/' });
+      await pcall('Page.navigate', { url: extensionsUrl });
       await sleep(3000);
       const info = await pcall('Runtime.evaluate', {
         expression: `new Promise((res) => { try { chrome.developerPrivate.getExtensionsInfo({includeDisabled:true,includeTerminated:true}, (l) => res(JSON.stringify(l.map(e => ({name:e.name,id:e.id,state:e.state,disableReasons:e.disableReasons,location:e.location,manifestErrors:e.manifestErrors,runtimeErrors:(e.runtimeErrors||[]).map(x=>x.message).slice(0,5),installWarnings:e.installWarnings,path:e.prettifiedPath}))))); } catch (err) { res('no developerPrivate: ' + err); } })`,

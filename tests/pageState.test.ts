@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { findClickTarget, findFillTarget, normalizePageState, stateToSnapshot } from '../src/main/chrome/pageState';
+import {
+  findClickTarget,
+  findFillTarget,
+  findInPage,
+  navigationNames,
+  normalizePageState,
+  readChunk,
+  stateToSnapshot,
+} from '../src/main/chrome/pageState';
+import { redactUrl } from '../src/main/browser/redactUrl';
 import type { PageElement, PageState } from '../src/main/chrome/pageState';
 import { anyChange, diffStates } from '../src/main/chrome/stateDiff';
 import { pageFingerprint } from '../src/main/browser/loopGuard';
@@ -17,6 +26,7 @@ function state(over: Partial<PageState> = {}): PageState {
     elements: [],
     dialogs: [],
     visibleText: 'Welcome to the site',
+    bodyText: 'Welcome to the site',
     tables: [],
     focused: null,
     scroll: { y: 0, max: 0, atBottom: true },
@@ -203,3 +213,151 @@ describe('diffStates', () => {
     expect(d.appearedCount).toBe(30);
   });
 });
+
+describe('a long header menu cannot push the page\'s own options out of what the model is shown', () => {
+  const header = Array.from({ length: 70 }, (_, i) => el({ role: 'link', name: `Department ${i + 1}`, region: 'header' }));
+  const mine = [el({ role: 'link', name: 'Track application', region: 'main' }), el({ role: 'link', name: 'Download forms' })]; // one in <main>, one with no landmark at all
+  const closed = [
+    el({ role: 'link', name: 'Cause List', hidden: true, menu: 'Services', region: 'header', inViewport: false }),
+    el({ role: 'link', name: 'Orders', hidden: true, menu: 'Services', region: 'header', inViewport: false }),
+    el({ role: 'link', name: 'Our judges', hidden: true, menu: 'About', inViewport: false }),
+  ];
+  const s = state({ elements: [...header, ...mine, ...closed] });
+
+  it('lists the page\'s own links apart from the site menu bar, and closed-menu links under their menu', () => {
+    const snap = stateToSnapshot(s);
+    expect(snap.links).toEqual(['Track application', 'Download forms']);
+    expect(snap.navigation).toHaveLength(60); // capped, but it is the menu bar, not the page
+    expect(snap.navigation?.[0]).toBe('Department 1');
+    expect(snap.collapsedMenus).toEqual({ Services: ['Cause List', 'Orders'], About: ['Our judges'] });
+  });
+
+  it('does not repeat the same menu bar on the next page, and says how big it is', () => {
+    const first = stateToSnapshot(s);
+    expect(first.navigationSameAsPrevious).toBeUndefined();
+    const next = stateToSnapshot(s, { previousNavigation: new Set(navigationNames(s)) });
+    expect(next.navigation).toBeUndefined();
+    expect(next.navigationSameAsPrevious).toBe(70);
+    expect(next.links).toEqual(['Track application', 'Download forms']);
+  });
+
+  it('shows the menu bar again when it really is a different one', () => {
+    const next = stateToSnapshot(s, { previousNavigation: new Set(['Something', 'Else entirely']) });
+    expect(next.navigation).toBeDefined();
+    expect(next.navigationSameAsPrevious).toBeUndefined();
+  });
+
+  it('gives the page\'s own links much more room than before (80, not 40) and says when there are more', () => {
+    const many = Array.from({ length: 95 }, (_, i) => el({ role: 'link', name: `Option ${i + 1}`, region: 'main' }));
+    const snap = stateToSnapshot(state({ elements: many }));
+    expect(snap.links).toHaveLength(80);
+    expect(snap.moreLinks).toBe(15);
+    expect(snap.truncated).toBe(true);
+  });
+
+  it('a link showing on the page wins over an identically named one only a closed menu holds, when clicking', () => {
+    const both = state({
+      elements: [
+        el({ role: 'link', name: 'Cause List', hidden: true, menu: 'Services', id: 'hidden-one', inViewport: false }),
+        el({ role: 'link', name: 'Cause List', id: 'visible-one' }),
+      ],
+    });
+    expect(findClickTarget(both, 'cause list')?.id).toBe('visible-one');
+    const onlyHidden = state({ elements: [el({ role: 'link', name: 'Cause List', hidden: true, menu: 'Services', inViewport: false })] });
+    expect(findClickTarget(onlyHidden, 'cause list')?.hidden).toBe(true);
+  });
+});
+
+describe('findInPage: look through everything the page has, not just the first screenful', () => {
+  const s = state({
+    elements: [
+      el({ role: 'link', name: 'Home' }),
+      el({ role: 'link', name: 'Cause List', hidden: true, menu: 'Services', inViewport: false }),
+      el({ role: 'link', name: 'Cause list archive', inViewport: false, href: 'https://x.example/archive' }),
+      el({ role: 'link', name: 'Track application', region: 'main' }),
+      el({ role: 'link', name: 'Contact us', region: 'footer', inViewport: false }),
+      el({ role: 'link', name: 'Annual report', href: 'https://x.example/downloads/annual-report' }),
+    ],
+    bodyText: 'Welcome.\nTo check a case, open the Cause List for the day and search by advocate code.\nOffices close at 5pm.',
+  });
+
+  it('finds a link held by a closed menu, ranks an exact name first, and says exactly where each one is', () => {
+    const r = findInPage(s, 'cause list');
+    expect(r.matches.map((m) => m.name)).toEqual(['Cause List', 'Cause list archive']);
+    expect(r.matches[0]?.where).toBe('inside the closed menu "Services" (not showing until that menu is opened or hovered)');
+    expect(r.matches[1]?.where).toBe('further down the page');
+  });
+
+  it('says whether something is showing, further down, in the footer…', () => {
+    expect(findInPage(s, 'track application').matches[0]?.where).toBe('showing now');
+    expect(findInPage(s, 'contact').matches[0]?.where).toBe('further down the page, in the footer');
+  });
+
+  it('also finds a control by a word in its address, and shows that address', () => {
+    const r = findInPage(s, 'annual report');
+    expect(r.matches[0]).toMatchObject({ name: 'Annual report', href: 'https://x.example/downloads/annual-report' });
+    expect(findInPage(s, 'archive').matches[0]?.href).toBe('https://x.example/archive');
+  });
+
+  it('quotes the page\'s own text around the words', () => {
+    const r = findInPage(s, 'advocate code');
+    expect(r.matches).toEqual([]);
+    expect(r.textMatches[0]).toContain('search by advocate code');
+  });
+
+  it('reports nothing at all honestly, with how many controls were searched', () => {
+    const r = findInPage(s, 'zzz');
+    expect(r.matches).toEqual([]);
+    expect(r.textMatches).toEqual([]);
+    expect(r.totalControls).toBe(6);
+    expect(findInPage(s, '   ').matches).toEqual([]);
+  });
+});
+
+describe('readChunk: reading a long page a slice at a time', () => {
+  const lines = Array.from({ length: 400 }, (_, i) => `Line number ${i + 1} of the notice with some filler words.`).join('\n');
+  const s = state({ bodyText: lines });
+
+  it('reads from the top, cuts at a line break, and says where to continue', () => {
+    const a = readChunk(s, 0);
+    expect(a.offset).toBe(0);
+    expect(a.text.startsWith('Line number 1 ')).toBe(true);
+    expect(a.text.endsWith('filler words.')).toBe(true); // never mid-sentence
+    expect(a.nextOffset).not.toBeNull();
+    expect(a.totalChars).toBe(lines.length);
+  });
+
+  it('can read the whole page by following nextOffset, with nothing lost or repeated, and ends cleanly', () => {
+    let offset: number | null = 0;
+    const seen: string[] = [];
+    for (let guard = 0; offset !== null && guard < 50; guard++) {
+      const chunk = readChunk(s, offset);
+      seen.push(...chunk.text.split('\n'));
+      offset = chunk.nextOffset;
+    }
+    expect(offset).toBeNull();
+    expect(seen.join('\n')).toBe(lines);
+  });
+
+  it('copes with an offset past the end and with an empty page', () => {
+    expect(readChunk(s, 10_000_000)).toMatchObject({ text: '', nextOffset: null });
+    expect(readChunk(state({ bodyText: '' }), 0)).toMatchObject({ text: '', nextOffset: null, totalChars: 0 });
+  });
+});
+
+describe('addresses the model is shown never carry credentials', () => {
+  it('strips fragments and anything credential-shaped, keeps ordinary search terms', () => {
+    expect(redactUrl('https://x.example/orders?page=2&token=abc123&q=shoes#access_token=zzz')).toBe('https://x.example/orders?page=2&q=shoes');
+    expect(redactUrl('https://x.example/cb?code=oauth-code&state=ok')).toBe('https://x.example/cb?state=ok');
+    expect(redactUrl(`https://x.example/p?blob=${'a'.repeat(60)}`)).toBe('https://x.example/p');
+    expect(redactUrl('https://x.example/a/b')).toBe('https://x.example/a/b');
+  });
+
+  it('is applied to every page state, whichever browser it came from, and is safe to apply twice', () => {
+    const once = normalizePageState({ url: 'https://x.example/in?sessionid=SECRET&lang=en#frag' });
+    expect(once.url).toBe('https://x.example/in?lang=en');
+    expect(redactUrl(once.url)).toBe(once.url);
+    expect(redactUrl('not a url')).toBe('not a url');
+  });
+});
+

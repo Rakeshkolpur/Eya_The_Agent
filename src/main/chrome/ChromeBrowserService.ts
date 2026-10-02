@@ -6,16 +6,18 @@ import type {
   BrowserTabControl,
   ClickGate,
   FillOptions,
+  FindOnPageResult,
+  ReadPageResult,
 } from '@main/browser/BrowserAutomationService';
 import { BrowserUnavailableError } from '@main/browser/errors';
 import type { ActionEffects, BrowserTabInfo, DownloadInfo } from '@main/browser/pageEffects';
 import { challengeMessage, isBlockingChallenge } from '@main/browser/challenges';
-import type { PageSnapshot } from '@main/browser/pageSnapshot';
+import type { BrowserEnvironment, PageSnapshot } from '@main/browser/pageSnapshot';
 import { SEARCH_ENGINE_URLS } from '@main/browser/searchEngines';
 import { cleanSearchHits } from '@main/browser/webSearchResults';
 import type { RawSearchHit, WebSearchHit } from '@main/browser/webSearchResults';
 import { BridgeError } from './ChromeBridge';
-import { findClickTarget, findFillTarget, normalizePageState, stateToSnapshot } from './pageState';
+import { findClickTarget, findFillTarget, findInPage, navigationNames, normalizePageState, readChunk, stateToSnapshot } from './pageState';
 import type { PageElement, PageState } from './pageState';
 import { diffStates } from './stateDiff';
 
@@ -83,24 +85,46 @@ function parseReply(raw: unknown): ActionReply {
  * is look → choose something that really is there → act → look again, and what
  * the model is shown afterwards is that second look, not a prediction.
  */
+export interface PageAgentServiceOptions {
+  /** Which browser this is, stamped on every snapshot. */
+  readonly environment?: BrowserEnvironment;
+  /** What to say when the browser cannot be reached at all. */
+  readonly unavailableMessage?: string;
+}
+
+const DEFAULT_UNAVAILABLE =
+  'Eya has lost her connection to your browser. Make sure the browser is open with the Eya Browser Bridge extension turned on (or ask Eya to "connect my browser").';
+
 export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl {
-  constructor(private readonly bridge: BridgeLike) {}
+  private readonly environment: BrowserEnvironment;
+  private readonly unavailableMessage: string;
+  /** The site menu bar the model was last shown, so an identical one is not listed again on the next page. */
+  private lastNavigation = new Set<string>();
+
+  constructor(
+    private readonly bridge: BridgeLike,
+    options: PageAgentServiceOptions = {},
+  ) {
+    this.environment = options.environment ?? 'your_browser';
+    this.unavailableMessage = options.unavailableMessage ?? DEFAULT_UNAVAILABLE;
+  }
 
   private async call<T = unknown>(op: string, args: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
     try {
       return await this.bridge.request<T>(op, args, timeoutMs);
     } catch (err) {
       if (err instanceof BridgeError && (err.code === 'not_connected' || err.code === 'disconnected')) {
-        throw new BrowserUnavailableError(
-          'Eya has lost her connection to your browser. Make sure the browser is open with the Eya Browser Bridge extension turned on (or ask Eya to "connect my browser").',
-        );
+        throw new BrowserUnavailableError(this.unavailableMessage);
       }
       throw err;
     }
   }
 
   private snapshot(state: PageState, notes: readonly string[] = []): PageSnapshot {
-    return stateToSnapshot(state, { environment: 'your_browser', notes });
+    const snap = stateToSnapshot(state, { environment: this.environment, notes, previousNavigation: this.lastNavigation });
+    const nav = navigationNames(state);
+    if (nav.length > 0) this.lastNavigation = new Set(nav);
+    return snap;
   }
 
   /** A fresh look at the page Eya is on (or, if none yet, the tab the user is looking at). */
@@ -156,6 +180,26 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
 
   async inspectPage(): Promise<PageSnapshot> {
     return this.snapshot((await this.look()).state);
+  }
+
+  async findOnPage(query: string): Promise<FindOnPageResult> {
+    const { state } = await this.look();
+    const found = findInPage(state, query);
+    return { url: state.url, title: state.title, query, matches: found.matches, textMatches: found.textMatches, totalControls: found.totalControls };
+  }
+
+  async readPage(offset = 0): Promise<ReadPageResult> {
+    const { state } = await this.look();
+    const chunk = readChunk(state, offset);
+    return {
+      url: state.url,
+      title: state.title,
+      text: chunk.text,
+      offset: chunk.offset,
+      nextOffset: chunk.nextOffset,
+      totalChars: chunk.totalChars,
+      ...(chunk.offset === 0 && state.tables.length > 0 ? { tables: state.tables } : {}),
+    };
   }
 
   async clickOnPage(text: string, gate?: ClickGate): Promise<ActOnPageResult> {

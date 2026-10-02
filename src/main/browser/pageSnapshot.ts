@@ -26,6 +26,14 @@ export interface PageSnapshot {
   readonly notes?: readonly string[];
   /** Which browser this is: the user's own signed-in one, or Eya's separate automation window. */
   readonly environment?: BrowserEnvironment;
+  /** Links in the site's menu bar / header / footer — kept apart so they cannot crowd the page's own options out of `links`. */
+  readonly navigation?: readonly string[];
+  /** The menu bar is the same one as on the page before, so it is not listed again. The number is how many items it has. */
+  readonly navigationSameAsPrevious?: number;
+  /** Links that exist on the page but sit inside a menu that is closed until opened or hovered, grouped by the menu they live in. */
+  readonly collapsedMenus?: Readonly<Record<string, readonly string[]>>;
+  /** How many more links the page has than `links` shows. */
+  readonly moreLinks?: number;
 }
 
 export type BrowserEnvironment = 'your_browser' | 'eya_browser';
@@ -53,9 +61,17 @@ export interface SnapshotExtras {
   readonly challenge?: PageChallenge;
   readonly notes?: readonly string[];
   readonly environment?: BrowserEnvironment;
+  readonly navigation?: readonly string[];
+  readonly navigationSameAsPrevious?: number;
+  readonly collapsedMenus?: Readonly<Record<string, readonly string[]>>;
 }
 
 const MAX_ITEMS_PER_CATEGORY = 40;
+// The page's own links are the options the user is asking about, so they get the most room.
+const MAX_LINKS = 80;
+const MAX_NAVIGATION = 60;
+const MAX_MENUS = 10;
+const MAX_ITEMS_PER_MENU = 14;
 
 function dedupeNonEmpty(raw: readonly string[]): string[] {
   const seen = new Set<string>();
@@ -87,20 +103,29 @@ export function buildSnapshot(
   const buttons = dedupeNonEmpty(rawButtons);
   const inputs = dedupeNonEmpty(rawInputs);
   const dialogs = dedupeNonEmpty(rawDialogs);
+  const navigation = dedupeNonEmpty(extras.navigation ?? []);
   const truncated =
     headings.length > MAX_ITEMS_PER_CATEGORY ||
-    links.length > MAX_ITEMS_PER_CATEGORY ||
+    links.length > MAX_LINKS ||
     buttons.length > MAX_ITEMS_PER_CATEGORY ||
     inputs.length > MAX_ITEMS_PER_CATEGORY;
+  const menuEntries = Object.entries(extras.collapsedMenus ?? {})
+    .map(([menu, items]): [string, string[]] => [menu, dedupeNonEmpty(items).slice(0, MAX_ITEMS_PER_MENU)])
+    .filter(([, items]) => items.length > 0)
+    .slice(0, MAX_MENUS);
   return {
     url,
     title,
     headings: headings.slice(0, MAX_ITEMS_PER_CATEGORY),
-    links: links.slice(0, MAX_ITEMS_PER_CATEGORY),
+    links: links.slice(0, MAX_LINKS),
     buttons: buttons.slice(0, MAX_ITEMS_PER_CATEGORY),
     inputs: inputs.slice(0, MAX_ITEMS_PER_CATEGORY),
     dialogs: dialogs.slice(0, MAX_ITEMS_PER_CATEGORY),
     truncated,
+    ...(links.length > MAX_LINKS ? { moreLinks: links.length - MAX_LINKS } : {}),
+    ...(navigation.length > 0 && extras.navigationSameAsPrevious === undefined ? { navigation: navigation.slice(0, MAX_NAVIGATION) } : {}),
+    ...(extras.navigationSameAsPrevious !== undefined ? { navigationSameAsPrevious: extras.navigationSameAsPrevious } : {}),
+    ...(menuEntries.length > 0 ? { collapsedMenus: Object.fromEntries(menuEntries) } : {}),
     ...(extras.visibleText !== undefined && extras.visibleText !== '' ? { visibleText: extras.visibleText } : {}),
     ...(extras.tables !== undefined && extras.tables.length > 0 ? { tables: extras.tables } : {}),
     ...(extras.focused !== undefined ? { focused: extras.focused } : {}),
@@ -158,5 +183,27 @@ export function findBestTextMatchIndex(query: string, candidates: readonly strin
       bestLength = norm.length;
     }
   });
-  return bestIndex;
+  if (bestIndex !== null) return bestIndex;
+
+  // A long name is shown shortened with a trailing "…", and the model may quote it shortened (or lengthen it a little
+  // from the page's own text). Two names that are the same up to where one was cut off are the same thing.
+  const qStem = stripTrailingEllipsis(q);
+  if (qStem.length >= 15) {
+    let prefixIndex: number | null = null;
+    let prefixLength = Infinity;
+    candidates.forEach((c, i) => {
+      const stem = stripTrailingEllipsis(normalizeText(c));
+      if (stem.length < 15) return;
+      if ((stem.startsWith(qStem) || qStem.startsWith(stem)) && stem.length < prefixLength) {
+        prefixIndex = i;
+        prefixLength = stem.length;
+      }
+    });
+    return prefixIndex;
+  }
+  return null;
+}
+
+function stripTrailingEllipsis(s: string): string {
+  return s.replace(/(…|\.{3})\s*$/, '').trim();
 }

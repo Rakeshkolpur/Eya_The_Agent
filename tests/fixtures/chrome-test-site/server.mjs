@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { renderPortal } from './portal.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const TYPES = { '.html': 'text/html; charset=utf-8', '.txt': 'text/plain' };
@@ -21,6 +22,12 @@ export function startTestSite(port = 0) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ items: ['Alpha order', 'Beta order', 'Gamma order'] }));
       }, 900);
+      return;
+    }
+    const portal = renderPortal(url.pathname);
+    if (portal !== null) {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end(portal);
       return;
     }
     const file = url.pathname === '/' ? '/index.html' : url.pathname;

@@ -26,12 +26,13 @@ describe('openExtensionsPage', () => {
     expect(launched).toEqual([['chrome', 'chrome://extensions/']]);
   });
 
-  it('otherwise Edge first, then Chrome', async () => {
+  it('otherwise Chrome first (the browser the user installed for this), then Edge', async () => {
     const a = deps([], ['edge', 'chrome']);
-    expect(await openExtensionsPage(a.d)).toBe('edge');
-    expect(a.launched).toEqual([['edge', 'edge://extensions/']]);
-    const b = deps([], ['chrome']);
-    expect(await openExtensionsPage(b.d)).toBe('chrome');
+    expect(await openExtensionsPage(a.d)).toBe('chrome');
+    expect(a.launched).toEqual([['chrome', 'chrome://extensions/']]);
+    const b = deps([], ['edge']);
+    expect(await openExtensionsPage(b.d)).toBe('edge');
+    expect(b.launched).toEqual([['edge', 'edge://extensions/']]);
   });
 
   it('never tries Firefox (the bridge is a Chromium extension), even if that is what is open', async () => {

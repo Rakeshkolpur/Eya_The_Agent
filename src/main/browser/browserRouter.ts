@@ -1,5 +1,13 @@
 import { rootLogger } from '@main/logging/logger';
-import type { ActOnPageResult, BrowserAutomationService, BrowserTabControl, ClickGate, FillOptions } from './BrowserAutomationService';
+import type {
+  ActOnPageResult,
+  BrowserAutomationService,
+  BrowserTabControl,
+  ClickGate,
+  FillOptions,
+  FindOnPageResult,
+  ReadPageResult,
+} from './BrowserAutomationService';
 import { BrowserUnavailableError } from './errors';
 import type { BrowserTabInfo } from './pageEffects';
 import { withExtras } from './pageSnapshot';
@@ -107,6 +115,14 @@ export class SwitchingBrowserService implements BrowserAutomationService, Browse
   async inspectPage(): Promise<PageSnapshot> {
     const { svc, env } = this.forWork();
     return this.stamp(await svc.inspectPage(), env);
+  }
+
+  async findOnPage(query: string): Promise<FindOnPageResult> {
+    return this.forWork().svc.findOnPage(query);
+  }
+
+  async readPage(offset?: number): Promise<ReadPageResult> {
+    return this.forWork().svc.readPage(offset);
   }
 
   async clickOnPage(text: string, gate?: ClickGate): Promise<ActOnPageResult> {

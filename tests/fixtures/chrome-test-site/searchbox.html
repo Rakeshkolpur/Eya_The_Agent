@@ -1,0 +1,8 @@
+<!doctype html><html><head><title>Shop</title></head><body>
+<!-- A search box whose button carries the SAME label as the input (as on large shopping sites). -->
+<form id="f" onsubmit="event.preventDefault();document.getElementById('out').textContent='Searched: '+document.getElementById('q').value">
+ <div class="search"><input id="q" type="text" placeholder="Search for products, brands and more" autocomplete="off">
+ <button type="submit" aria-label="Search for products, brands and more" title="Search for products, brands and more">&#128269;</button></div>
+</form>
+<p id="out"></p>
+</body></html>

@@ -22,6 +22,8 @@ export async function eyaPageAgent(command, params) {
   const MAX_NODES = 40000;
   const MAX_CURSOR_CHECKS = 6000;
   const MAX_NAME = 100;
+  const MAX_HIDDEN = 200;
+  const MAX_BODY_TEXT = 40000;
 
   const state = (globalThis[STATE_KEY] ??= {
     epoch: 0,
@@ -168,11 +170,55 @@ export async function eyaPageAgent(command, params) {
     if (el.closest('header, [role="banner"]')) return 'header';
     if (el.closest('footer, [role="contentinfo"]')) return 'footer';
     if (el.closest('main, [role="main"]')) return 'main';
+    // Plenty of sites (especially older or hand-built ones) have no landmark elements at all, only class names.
+    // Header and footer are recognised by those, so a site-wide top bar still counts as the site's frame.
+    let a = el.parentElement;
+    for (let i = 0; a && i < 10; i++, a = a.parentElement) {
+      const hint = `${typeof a.className === 'string' ? a.className : ''} ${a.id || ''}`.toLowerCase();
+      if (hint.trim() === '') continue;
+      if (/(^|[\s_-])(footer|site-footer|page-footer|bottom-bar)($|[\s_-])/.test(hint)) return 'footer';
+      if (/(^|[\s_-])(header|site-header|page-header|navbar|nav-bar|topbar|top-bar|masthead|menubar)($|[\s_-])/.test(hint)) return 'header';
+    }
     return '';
   }
 
   function isDisabled(el) {
     return el.disabled === true || el.getAttribute('aria-disabled') === 'true';
+  }
+
+  // Is this element part of a navigation menu (as opposed to some other hidden thing: a template, an offscreen copy)?
+  const MENU_WORDS = /menu|dropdown|drop-down|submenu|sub-menu|mega|flyout|nav/i;
+  function inMenuContext(el) {
+    if (el.closest('nav, [role="menu"], [role="menubar"], [role="navigation"]')) return true;
+    let a = el.parentElement;
+    for (let i = 0; a && i < 6; i++, a = a.parentElement) {
+      const cls = typeof a.className === 'string' ? a.className : '';
+      if (MENU_WORDS.test(`${cls} ${a.id || ''}`)) return true;
+    }
+    return false;
+  }
+
+  /** The visible menu title a closed menu item belongs under ("Services" for the Cause List link inside it). */
+  function menuLabelOf(el) {
+    let a = el.parentElement;
+    for (let depth = 0; a && depth < 6; depth++, a = a.parentElement) {
+      const prev = a.previousElementSibling;
+      if (prev && isVisible(prev)) {
+        const t = clip(prev.innerText, 40);
+        if (t) return t;
+      }
+      const holder = a.parentElement;
+      if (holder) {
+        for (const c of holder.children) {
+          if (c === a || c.contains(el)) continue;
+          if (c.matches('a, button, span, [role="button"], [aria-haspopup]') && isVisible(c)) {
+            const t = clip(c.innerText, 40);
+            if (t) return t;
+          }
+        }
+      }
+    }
+    return '';
   }
 
   /** Every element in the page: the document, open shadow roots, and same-origin frames. */
@@ -320,21 +366,36 @@ export async function eyaPageAgent(command, params) {
       pickedSet.add(el);
     }
 
+    // Third pass: links inside menus that are closed until you hover or open them. They are real links of the
+    // page — the options a person finds by moving the mouse over the menu — so they are reported (marked hidden,
+    // with the menu they live in) instead of pretending the page has nothing but what is showing.
+    const hiddenPicked = [];
+    for (const [el, inFrame] of out) {
+      if (hiddenPicked.length >= MAX_HIDDEN * 3) break; // before de-duplication, so a mobile copy of the menu cannot use the budget up
+      if (pickedSet.has(el)) continue;
+      const isLink = el.tagName === 'A' && el.hasAttribute('href');
+      if (!isLink && el.getAttribute('role') !== 'menuitem') continue;
+      if (isLink && /^\s*(#|javascript:|mailto:|tel:)/i.test(el.getAttribute('href') || '')) continue;
+      if (el.closest('[role="dialog"], dialog, template, noscript')) continue;
+      if (isVisible(el) || !inMenuContext(el)) continue;
+      hiddenPicked.push([el, inFrame]);
+    }
+
     const records = [];
     const seen = new Set();
-    for (const [el, inFrame] of picked) {
+    function addRecord(el, inFrame, hidden) {
       const role = roleOf(el);
       const name = clip(accName(el), MAX_NAME);
       const region = regionOf(el);
       const href = el.tagName === 'A' ? redactUrl(el.getAttribute('href') || '') : '';
       const dedupeKey = `${role}|${name}|${href}|${role === 'input' || role === 'select' ? records.length : ''}`;
-      if (name === '' && role !== 'input' && role !== 'select' && role !== 'checkbox' && role !== 'radio') continue;
-      if (seen.has(dedupeKey)) continue;
+      if (name === '' && role !== 'input' && role !== 'select' && role !== 'checkbox' && role !== 'radio') return;
+      if (seen.has(dedupeKey)) return;
       seen.add(dedupeKey);
 
       const win = el.ownerDocument.defaultView;
-      const rect = el.getBoundingClientRect();
-      const inViewport = rect.bottom > 0 && rect.right > 0 && rect.top < win.innerHeight && rect.left < win.innerWidth;
+      const rect = hidden ? { bottom: 0, right: 0, top: 0, left: 0 } : el.getBoundingClientRect();
+      const inViewport = !hidden && rect.bottom > 0 && rect.right > 0 && rect.top < win.innerHeight && rect.left < win.innerWidth;
       const sensitive = isSensitiveField(el, name);
       const rec = { role, name };
       if (href) rec.href = href;
@@ -358,23 +419,36 @@ export async function eyaPageAgent(command, params) {
       if (expanded !== null) rec.expanded = expanded === 'true';
       if (isDisabled(el)) rec.disabled = true;
       if (region) rec.region = region;
+      if (hidden) {
+        rec.hidden = true;
+        const menu = menuLabelOf(el);
+        if (menu) rec.menu = menu;
+      }
       rec.inViewport = inViewport;
       rec._el = el;
       rec._frame = inFrame;
       records.push(rec);
     }
+    for (const [el, inFrame] of picked) addRecord(el, inFrame, false);
+    const visibleCount = records.length;
+    for (const [el, inFrame] of hiddenPicked) {
+      if (records.length - visibleCount >= MAX_HIDDEN) break;
+      addRecord(el, inFrame, true);
+    }
 
-    // Dialog controls first (they are what the user can actually reach), then what is on screen, then the rest.
-    const rank = (r) => (r.region === 'dialog' ? 0 : r.inViewport ? 1 : 2);
+    // Dialog controls first (they are what the user can actually reach), then what is on screen, then the rest of
+    // the page, then the links that only a closed menu is holding.
+    const rank = (r) => (r.hidden ? 3 : r.region === 'dialog' ? 0 : r.inViewport ? 1 : 2);
     const ordered = records
       .map((r, i) => [r, i])
       .sort((a, b) => rank(a[0]) - rank(b[0]) || a[1] - b[1])
       .map(([r]) => r);
-    const shown = ordered.slice(0, maxElements);
+    const shownVisible = ordered.filter((r) => !r.hidden).slice(0, maxElements);
+    const shown = [...shownVisible, ...ordered.filter((r) => r.hidden)];
     shown.forEach((rec, n) => {
       const id = `e${epoch}.${n}`;
       rec.id = id;
-      state.elements.set(id, { ref: new WeakRef(rec._el), name: rec.name, inFrame: rec._frame });
+      state.elements.set(id, { ref: new WeakRef(rec._el), name: rec.name, inFrame: rec._frame, hidden: rec.hidden === true });
       delete rec._el;
       delete rec._frame;
     });
@@ -398,6 +472,13 @@ export async function eyaPageAgent(command, params) {
 
     const mainEl = document.querySelector('main, [role="main"]') || document.body;
     const visibleText = clip(mainEl ? mainEl.innerText : '', 1500);
+    // The page's whole readable text, line structure kept, for "read me this page" — capped, never a password field's value.
+    const bodyText = String(mainEl ? mainEl.innerText : '')
+      .replace(/[ \t]+/g, ' ')
+      .replace(/\n[ \t]+/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+      .slice(0, MAX_BODY_TEXT);
 
     const active = document.activeElement;
     let focused = null;
@@ -412,7 +493,10 @@ export async function eyaPageAgent(command, params) {
     if (crossOriginFrames > 0) {
       notes.push(`${crossOriginFrames} embedded frame(s) come from another site and cannot be seen into.`);
     }
-    if (ordered.length > shown.length) notes.push(`${ordered.length - shown.length} more controls exist further down the page.`);
+    const omitted = ordered.filter((r) => !r.hidden).length - shownVisible.length;
+    if (omitted > 0) notes.push(`${omitted} more controls exist further down the page.`);
+    const hiddenCount = shown.length - shownVisible.length;
+    if (hiddenCount > 0) notes.push(`${hiddenCount} more links are inside menus that are closed until opened or hovered.`);
 
     return {
       url: location.href,
@@ -422,6 +506,7 @@ export async function eyaPageAgent(command, params) {
       elements: shown,
       dialogs: [...dialogs, ...alerts],
       visibleText,
+      bodyText,
       tables: collectTables(),
       focused,
       scroll: { y: Math.round(window.scrollY), max: Math.round(scrollMax), atBottom: window.scrollY >= scrollMax - 2 },
@@ -462,6 +547,36 @@ export async function eyaPageAgent(command, params) {
     if (found.error) return found.error;
     const { el, entry } = found;
     if (isDisabled(el)) return { ok: false, reason: 'disabled', detail: 'That control is disabled right now.' };
+
+    // An item inside a menu that is closed until hovered/opened: do what a person does — move over the menu — and
+    // if the page only opens it with CSS :hover (which a script cannot trigger), follow the link itself, which is a
+    // real address the page contains.
+    if (entry.hidden === true || !isVisible(el)) {
+      const view0 = realmOf(el);
+      const chain = [];
+      for (let a = el.parentElement, i = 0; a && i < 6; a = a.parentElement, i++) {
+        chain.push(a);
+        if (a.previousElementSibling) chain.push(a.previousElementSibling);
+      }
+      for (const node of chain.reverse()) {
+        for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'focusin']) {
+          try {
+            const Ctor = type.startsWith('pointer') ? view0.PointerEvent : type === 'focusin' ? view0.FocusEvent : view0.MouseEvent;
+            node.dispatchEvent(new Ctor(type, { bubbles: type === 'mouseover' || type === 'pointerover' || type === 'focusin', composed: true, view: view0 }));
+          } catch {
+            // best effort
+          }
+        }
+      }
+      await sleep(250);
+      if (!isVisible(el)) {
+        if (el.tagName === 'A' && el.getAttribute('href')) {
+          el.click();
+          return { ok: true, role: 'link', tag: 'a', via: 'followed the link inside a closed menu directly' };
+        }
+        return { ok: false, reason: 'hidden', detail: 'That item is inside a menu that is closed. Open its parent menu first (click or hover it).' };
+      }
+    }
 
     el.scrollIntoView({ block: 'center', inline: 'center' });
     await new Promise((r) => requestAnimationFrame(() => r()));
@@ -611,8 +726,9 @@ export async function eyaPageAgent(command, params) {
   async function waitQuiet(opts) {
     ensureObserver();
     const quietMs = Number(opts?.quietMs) || 450;
-    const timeoutMs = Number(opts?.timeoutMs) || 4000;
-    const busyExtraMs = Number(opts?.busyExtraMs) || 3500;
+    // Busy real-world pages (ads, carousels, live tickers) never go fully quiet, so this is a ceiling, not a target.
+    const timeoutMs = Number(opts?.timeoutMs) || 2500;
+    const busyExtraMs = Number(opts?.busyExtraMs) || 2500;
     const minMs = Number(opts?.minMs) || 250;
     const start = Date.now();
     await sleep(minMs);
