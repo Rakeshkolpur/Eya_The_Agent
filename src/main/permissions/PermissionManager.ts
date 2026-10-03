@@ -60,6 +60,8 @@ export type SensitiveAction =
   | 'switch_browser_tab'
   | 'connect_chrome'
   | 'take_screenshot'
+  | 'list_windows'
+  | 'window_control'
   | 'browser_sensitive_click';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
@@ -123,6 +125,10 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   // A screen can show anything (messages, banking, another app's private content), so Eya asks first. Saves a NEW image on the
   // user's own Desktop; never overwrites, and the picture is never shown to the assistant.
   take_screenshot: 'confirm',
+  // Reading what is open, and minimise/maximise/restore/switch/close of a window the user names. Close is the polite kind (like the X
+  // button, an app with unsaved work stays open and asks), and several matches are asked about, never guessed.
+  list_windows: 'safe',
+  window_control: 'safe',
   // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
   browser_sensitive_click: 'confirm',
 };

@@ -22,6 +22,8 @@ import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/sy
 import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
 import { createBrowserTools } from '@main/tools/impl/browserTools';
 import { createScreenshotTool } from '@main/tools/impl/screenshotTool';
+import { createWindowTools } from '@main/tools/impl/windowTools';
+import { createWindowControl } from '@main/windowsApi/windowControl';
 import { PlaywrightBrowserService } from '@main/browser/PlaywrightBrowserService';
 import { BrowserSessionManager, parseBrowserMode } from '@main/browser/BrowserSessionManager';
 import { createBrowserLauncher } from '@main/browser/browserLauncher';
@@ -189,6 +191,15 @@ async function bootstrap(): Promise<void> {
   for (const tool of createFileOpsTools(folders)) tools.register(tool);
   for (const tool of createClipboardTools(clipboard)) tools.register(tool);
   tools.register(closeFileTool);
+  // Real control of other applications' windows (list, minimise, maximise, restore, close, switch), checked from Windows itself.
+  for (const tool of createWindowTools({
+    control: createWindowControl(),
+    // Eya's own windows are never listed or touched.
+    ownPids: () => [process.pid, ...app.getAppMetrics().map((m) => m.pid)],
+    tabs: browserService,
+  })) {
+    tools.register(tool);
+  }
   for (const tool of createSystemTools({ ...defaultSystemControlDeps, openExternal: (url) => shell.openExternal(url) })) {
     tools.register(tool);
   }
