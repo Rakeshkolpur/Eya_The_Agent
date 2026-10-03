@@ -121,7 +121,7 @@ Where the quota goes:
 | `EYA_GEMINI_MODEL` | Planning model(s), comma-separated, tried in order |
 | `EYA_GEMINI_TRANSCRIBE_MODEL` | Cloud speech-to-text fallback model(s) |
 | `EYA_TTS_MODELS` | Voice model(s), default `gemini-3.8-flash-lite-tts` then two fallbacks |
-| `EYA_LIVE_MODELS` | Talk-mode model(s), tried in order; default `gemini-3.1-flash-live-preview`, `gemini-3.8-live`, `gemini-2.5-flash-native-audio-latest` |
+| `EYA_LIVE_MODELS` | Talk-mode model(s), tried in order; default `gemini-3.8-live`, `gemini-3.1-flash-live-preview`, `gemini-2.5-flash-native-audio-latest`. If the server cuts a conversation off, Eya reopens it on the next model by herself and tries the one that failed last for 30 minutes (remembered across restarts) |
 | `EYA_BROWSER_MODE` | Which browser website tasks use: `user_browser` (default, alias `user_chrome` — only your own Chrome/Edge; if it isn't connected, stop and say why, never open another window), `eya_browser` (only Eya's separate, signed-out window — you chose this), or `auto` (your own when connected, otherwise Eya's window, always said in the result — also an explicit opt-in) |
 | `EYA_PREFERRED_BROWSER` | `chrome` or `edge`: which of your browsers to start when none is running and the site is in neither (default: Chrome if installed) |
 | `EYA_BRIDGE_PORT` | Loopback port the browser extension dials (default `47821`). Only for running a second, test copy of Eya next to your real one; the extension must dial the same port |

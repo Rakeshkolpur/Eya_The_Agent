@@ -36,8 +36,8 @@ describe('buildLiveConfig', () => {
     const cfg = buildLiveConfig({ gemini: gemini('wss://example/live?key=K'), tools: registry().tools, env: {}, now: NOW }, 'Zephyr');
     expect(cfg?.url).toBe('wss://example/live?key=K');
     expect(cfg?.voice).toBe('Zephyr');
-    expect(cfg?.models[0]).toBe('gemini-3.1-flash-live-preview');
-    expect(cfg?.models).toContain('gemini-3.8-live');
+    // The model that works with spoken audio comes first (measured 2026-10-03); the preview, which the server cuts off, is only a fallback.
+    expect(cfg?.models).toEqual(['gemini-3.8-live', 'gemini-3.1-flash-live-preview', 'gemini-2.5-flash-native-audio-latest']);
     expect(cfg?.systemInstruction).toContain('Live conversation');
     expect(cfg?.systemInstruction).toContain('September 2026');
     expect(cfg?.tools.map((t) => t.name)).toEqual(['open_application']);

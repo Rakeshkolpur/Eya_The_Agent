@@ -15,12 +15,22 @@ class FakeSession implements LiveSessionLike {
   closed = false;
   private readonly events = new Set<(e: LiveEvent) => void>();
   private readonly closes = new Set<(c: LiveCloseInfo) => void>();
+  private gate: Promise<void> = Promise.resolve();
+  /** Lets a 'slow' session finish opening. */
+  release: () => void = () => undefined;
 
-  constructor(private readonly outcome: 'ok' | Error = 'ok') {}
+  constructor(private readonly outcome: 'ok' | 'slow' | Error = 'ok') {
+    if (outcome === 'slow') {
+      this.gate = new Promise<void>((resolve) => {
+        this.release = resolve;
+      });
+    }
+  }
 
   async open(url: string, setup: LiveSetupOptions): Promise<void> {
     this.opened.push({ url, setup });
-    if (this.outcome !== 'ok') throw this.outcome;
+    if (this.outcome instanceof Error) throw this.outcome;
+    await this.gate;
     this.isOpen = true;
   }
   onEvent(l: (e: LiveEvent) => void): () => void {
@@ -91,12 +101,24 @@ interface Rig {
   said: string[];
   ended: Array<[ConversationEnd, string | undefined]>;
   slow: string[];
+  reconnects: Array<[string, string]>;
   tools: Array<{ name: string; args: unknown }>;
   sink: () => ((chunk: Float32Array, rate: number) => void) | null;
   clock: { t: number };
 }
 
-function rig(opts: { sessions?: Array<'ok' | Error>; config?: LiveConfig | null; idleMs?: number; slowToolMs?: number; runTool?: ConversationDeps['runTool'] } = {}): Rig {
+function rig(
+  opts: {
+    sessions?: Array<'ok' | 'slow' | Error>;
+    config?: LiveConfig | null;
+    idleMs?: number;
+    slowToolMs?: number;
+    runTool?: ConversationDeps['runTool'];
+    maxReconnects?: number;
+    modelHealth?: ConversationDeps['modelHealth'];
+    badModelMs?: number;
+  } = {},
+): Rig {
   const outcomes = opts.sessions ?? ['ok'];
   const sessions: FakeSession[] = [];
   const playbacks: FakePlayback[] = [];
@@ -106,6 +128,7 @@ function rig(opts: { sessions?: Array<'ok' | Error>; config?: LiveConfig | null;
   const ended: Array<[ConversationEnd, string | undefined]> = [];
   const tools: Array<{ name: string; args: unknown }> = [];
   const slow: string[] = [];
+  const reconnects: Array<[string, string]> = [];
   let sink: ((chunk: Float32Array, rate: number) => void) | null = null;
   const clock = { t: 1_000_000 };
   let n = 0;
@@ -136,6 +159,9 @@ function rig(opts: { sessions?: Array<'ok' | Error>; config?: LiveConfig | null;
       ...(opts.slowToolMs !== undefined ? { slowToolMs: opts.slowToolMs } : {}),
       echoTailMs: 250,
       now: () => clock.t,
+      ...(opts.maxReconnects !== undefined ? { maxReconnects: opts.maxReconnects } : {}),
+      ...(opts.modelHealth !== undefined ? { modelHealth: opts.modelHealth } : {}),
+      ...(opts.badModelMs !== undefined ? { badModelMs: opts.badModelMs } : {}),
     },
     {
       onPhase: (p) => phases.push(p),
@@ -143,9 +169,10 @@ function rig(opts: { sessions?: Array<'ok' | Error>; config?: LiveConfig | null;
       onSaid: (t) => said.push(t),
       onEnded: (r, d) => ended.push([r, d]),
       onSlowTool: (name) => slow.push(name),
+      onReconnecting: (model, reason) => reconnects.push([model, reason]),
     },
   );
-  return { conv, sessions, playbacks, phases, heard, said, ended, slow, tools, sink: () => sink, clock };
+  return { conv, sessions, playbacks, phases, heard, said, ended, slow, reconnects, tools, sink: () => sink, clock };
 }
 
 const tick = () => new Promise((r) => setTimeout(r, 5));
@@ -510,8 +537,8 @@ describe('ending a conversation', () => {
     expect(r.ended.map(([why]) => why)).toEqual(['idle']);
   });
 
-  it('reports the reason if the server or network drops it', async () => {
-    const r = await started();
+  it('reports the reason if the server or network drops it (once it will not reconnect)', async () => {
+    const r = await started({ maxReconnects: 0 });
     r.session.serverHangsUp(1006, 'network dropped');
     expect(r.ended).toEqual([['closed', 'network dropped']]);
     expect(r.sink()).toBeNull();
@@ -534,5 +561,195 @@ describe('describeOpenFailure', () => {
     expect(describeOpenFailure(new LiveOpenError('x', 'timeout'))).toMatch(/too long/);
     expect(describeOpenFailure(new LiveOpenError('x', 'error'))).toMatch(/not available/);
     expect(describeOpenFailure(undefined)).toMatch(/not available/);
+  });
+});
+
+describe('when the server cuts the session off (measured: the 3.1 preview model opens, then dies about 9 s into every audio session)', () => {
+  const INTERNAL = 'Internal error encountered.';
+  const modelsOf = (r: { sessions: FakeSession[] }) => r.sessions.map((s) => s.opened[0]?.setup.model);
+
+  /** A shared, in-memory stand-in for the store that survives restarts. */
+  function memory(initial: Record<string, number> = {}) {
+    const store = { data: { ...initial }, saved: 0 };
+    return {
+      store,
+      health: {
+        load: () => store.data,
+        save: (m: Readonly<Record<string, number>>) => {
+          store.data = { ...m };
+          store.saved += 1;
+        },
+      },
+    };
+  }
+
+  it('reopens on the next model and the conversation goes on, instead of ending with "disconnected"', async () => {
+    const r = await started({ sessions: ['ok', 'ok'] });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(modelsOf(r)).toEqual(['fast', 'backup']); // the failed one is not tried again first
+    expect(r.conv.active).toBe(true);
+    expect(r.ended).toEqual([]);
+    expect(r.reconnects).toEqual([['fast', INTERNAL]]);
+    expect(r.phases.slice(-2)).toEqual(['connecting', 'listening']);
+    expect(r.sink()).not.toBeNull(); // the microphone stays routed to the conversation
+    feed(r, 300);
+    expect(r.sessions[1]?.audio.length).toBeGreaterThan(0); // and now flows to the new session
+    expect(r.session.audio.length).toBe(0);
+  });
+
+  it('events from the new session are heard, and a later hang-up is handled by the new session too', async () => {
+    const r = await started({ sessions: ['ok', 'ok', 'ok'] });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    r.sessions[1]?.emit({ type: 'heard', text: 'open notepad' });
+    expect(r.heard.at(-1)).toBe('open notepad');
+    r.session.emit({ type: 'heard', text: 'ghost from the dead session' }); // the old one is no longer listened to
+    expect(r.heard.at(-1)).toBe('open notepad');
+    r.sessions[1]?.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(r.sessions).toHaveLength(3);
+    expect(r.conv.active).toBe(true);
+  });
+
+  it('a model that had finished a reply before it was cut off is not blamed: the same model is tried first again', async () => {
+    const r = await started({ sessions: ['ok', 'ok'] });
+    r.session.emit({ type: 'turnComplete' });
+    r.session.serverHangsUp(1006, 'network dropped');
+    await tick();
+    expect(modelsOf(r)).toEqual(['fast', 'fast']);
+    expect(r.conv.active).toBe(true);
+  });
+
+  it('remembers the failed model for the NEXT conversation too, so it does not begin with the broken one again', async () => {
+    const r = await started({ sessions: ['ok', 'ok', 'ok'] });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    r.conv.stop();
+    expect((await r.conv.start()).ok).toBe(true);
+    expect(modelsOf(r)).toEqual(['fast', 'backup', 'backup']);
+  });
+
+  it('writes that down where it survives a restart, and a new app run reads it', async () => {
+    const mem = memory();
+    const first = await started({ sessions: ['ok', 'ok'], modelHealth: mem.health });
+    first.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(Object.keys(mem.store.data)).toEqual(['fast']);
+    expect(mem.store.data['fast']).toBeGreaterThan(first.clock.t); // for a while
+    // "restart": a brand-new conversation object, same store
+    const second = await started({ sessions: ['ok'], modelHealth: mem.health });
+    expect(modelsOf(second)).toEqual(['backup']);
+  });
+
+  it('forgets after a while (the model may have recovered), and the memory only ever reorders — nothing is dropped', async () => {
+    const mem = memory();
+    const r = await started({ sessions: ['ok', 'ok', 'ok'], modelHealth: mem.health, badModelMs: 1000 });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    r.conv.stop();
+    r.clock.t += 5000; // longer than it is held against the model
+    await r.conv.start();
+    expect(modelsOf(r)).toEqual(['fast', 'backup', 'fast']);
+  });
+
+  it('if every model has a mark against it, they are all still tried, in the configured order', async () => {
+    const far = 9_999_999_999_999;
+    const r = await started({ sessions: [new LiveOpenError('closed', 'closed', 1008, 'x'), 'ok'], modelHealth: memory({ fast: far, backup: far }).health });
+    expect(modelsOf(r)).toEqual(['fast', 'backup']);
+    expect(r.conv.active).toBe(true);
+  });
+
+  it('a held-against model that then finishes a reply is cleared, so it goes back to being tried first', async () => {
+    const far = 9_999_999_999_999;
+    const mem = memory({ fast: far });
+    const r = await started({ sessions: [new LiveOpenError('closed', 'closed', 1008, 'x'), 'ok'], modelHealth: mem.health });
+    expect(modelsOf(r)).toEqual(['backup', 'fast']); // fast was held against, so tried second, and it worked
+    r.session.emit({ type: 'turnComplete' });
+    expect(mem.store.data['fast']).toBeUndefined();
+  });
+
+  it('gives up after a couple of cut-offs in a row and says what happened, instead of looping forever', async () => {
+    const r = await started({ sessions: ['ok'], maxReconnects: 2 });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    r.sessions[1]?.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(r.conv.active).toBe(true);
+    r.sessions[2]?.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(r.sessions).toHaveLength(3); // the original and two reopenings, no more
+    expect(r.ended).toEqual([['closed', INTERNAL]]);
+    expect(r.conv.active).toBe(false);
+    expect(r.sink()).toBeNull();
+  });
+
+  it('the allowance renews after a quiet spell, so a long conversation can recover again later', async () => {
+    const r = await started({ sessions: ['ok'], maxReconnects: 1 });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    r.clock.t += 5 * 60_000;
+    r.sessions[1]?.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(r.conv.active).toBe(true);
+    expect(r.sessions).toHaveLength(3);
+  });
+
+  it('does not reopen for a usage limit: that cannot be fixed by trying again, and is reported', async () => {
+    const r = await started({ sessions: ['ok', 'ok'] });
+    r.session.serverHangsUp(1011, 'Resource has been exhausted (quota)');
+    await tick();
+    expect(r.sessions).toHaveLength(1);
+    expect(r.ended).toEqual([['closed', 'Resource has been exhausted (quota)']]);
+  });
+
+  it('ends honestly if nothing will open when it tries to reconnect', async () => {
+    const r = await started({ sessions: ['ok', new LiveOpenError('closed', 'closed', 1011, 'boom')] });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(r.ended).toEqual([['closed', INTERNAL]]);
+    expect(r.conv.active).toBe(false);
+    expect(r.sink()).toBeNull();
+  });
+
+  it('if the user stops while it is reconnecting, the new session is closed and the conversation ends once, as the user asked', async () => {
+    const r = await started({ sessions: ['ok', 'slow'] });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    r.conv.stop();
+    r.sessions[1]?.release();
+    await tick();
+    expect(r.sessions[1]?.closed).toBe(true);
+    expect(r.ended).toEqual([['user', undefined]]);
+    expect(r.conv.active).toBe(false);
+  });
+
+  it('a model the server refuses outright is remembered, so the next conversation does not try it first; a limit is not held against a model', async () => {
+    const refused = await started({ sessions: [new LiveOpenError('closed', 'closed', 1008, 'model not found'), 'ok', 'ok'] });
+    refused.conv.stop();
+    await refused.conv.start();
+    expect(modelsOf(refused)).toEqual(['fast', 'backup', 'backup']);
+
+    const limited = rig({ sessions: [new LiveOpenError('closed', 'closed', 1011, 'quota exceeded'), 'ok', 'ok'] });
+    await limited.conv.start();
+    limited.conv.stop();
+    await limited.conv.start();
+    expect(modelsOf(limited)).toEqual(['fast', 'backup', 'fast']); // the limit says nothing about which model is broken
+  });
+
+  it('a memory that cannot be read or written never breaks a conversation', async () => {
+    const broken = {
+      load: () => {
+        throw new Error('storage unavailable');
+      },
+      save: () => {
+        throw new Error('storage full');
+      },
+    };
+    const r = await started({ sessions: ['ok', 'ok'], modelHealth: broken });
+    r.session.serverHangsUp(1011, INTERNAL);
+    await tick();
+    expect(r.conv.active).toBe(true);
+    expect(modelsOf(r)).toEqual(['fast', 'backup']);
   });
 });

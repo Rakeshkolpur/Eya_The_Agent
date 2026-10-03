@@ -11,8 +11,21 @@ import { resample } from './wav';
 export type ConversationPhase = 'connecting' | 'listening' | 'thinking' | 'working' | 'speaking';
 export type ConversationEnd = 'user' | 'idle' | 'closed' | 'error';
 
+/** Which Live models have recently been cutting conversations off, so a broken one is tried last instead of first. */
+export interface ModelHealthStore {
+  /** Model name -> the time (ms since the epoch) until which it is tried last. */
+  load(): Readonly<Record<string, number>>;
+  save(triedLastUntil: Readonly<Record<string, number>>): void;
+}
+
+// A close whose reason is about limits: reopening cannot help, so it is reported instead.
+const QUOTA_LIKE = /quota|exhaust|resource|rate|limit|429/i;
+const RECONNECT_WINDOW_MS = 120_000;
+
 export interface ConversationHandlers {
   onPhase(phase: ConversationPhase): void;
+  /** The server cut the session off and Eya is reopening it on another model: the conversation goes on. */
+  onReconnecting?(failedModel: string, reason: string): void;
   /** What the user has said so far this turn. */
   onHeard(text: string): void;
   /** What Eya has said so far this turn. */
@@ -35,6 +48,12 @@ export interface ConversationDeps {
   echoTailMs?: number;
   /** How long a tool may run before onSlowTool fires. */
   slowToolMs?: number;
+  /** Remembers models that failed a session (optionally across restarts) so the next conversation does not begin with one. */
+  modelHealth?: ModelHealthStore;
+  /** How long a model that failed us is tried last (default 30 minutes). */
+  badModelMs?: number;
+  /** How many times one conversation may reopen itself after the server cut it off, per two minutes (default 2). */
+  maxReconnects?: number;
   now?: () => number;
 }
 
@@ -56,7 +75,7 @@ function parseJsonObject(text: string): Record<string, unknown> {
 export function describeOpenFailure(err: unknown): string {
   if (err instanceof LiveOpenError) {
     const detail = `${err.reason} ${err.message}`;
-    if (/quota|exhaust|resource|rate|limit|429/i.test(detail)) {
+    if (QUOTA_LIKE.test(detail)) {
       return liveLimitMessage(detail, new Date());
     }
     if (err.kind === 'timeout') return 'Live voice took too long to connect.';
@@ -88,6 +107,13 @@ export class LiveConversation {
   private lastSpoke: 'heard' | 'said' | null = null;
   private toolsRunning = 0;
   private unsubscribers: Array<() => void> = [];
+  /** Model -> when it stops being tried last. Loaded on first use from the store, if there is one. */
+  private triedLastUntil: Map<string, number> | null = null;
+  private currentModel = '';
+  /** Replies the current session's model has finished: zero when the server cuts it off means the model itself is the problem. */
+  private turnsCompleted = 0;
+  private reconnectTimes: number[] = [];
+  private reconnecting = false;
 
   constructor(
     private readonly deps: ConversationDeps,
@@ -105,9 +131,73 @@ export class LiveConversation {
     const config = await this.deps.getConfig();
     if (config === null) return { ok: false, reason: 'Live voice needs a Gemini key.' };
 
+    const opened = await this.openFirst(config);
+    if ('error' in opened) return { ok: false, reason: describeOpenFailure(opened.error) };
+
+    this.isActive = true;
+    this.speaking = false;
+    this.mutedUntil = 0;
+    this.heardText = '';
+    this.saidText = '';
+    this.lastSpoke = null;
+    this.toolsRunning = 0;
+    this.reconnectTimes = [];
+    this.cancelled.clear();
+    this.batcher.reset();
+    this.attach(opened.session, opened.model);
+    this.deps.setFrameSink((chunk, rate) => this.onFrame(chunk, rate));
+    this.handlers.onPhase('listening');
+    this.resetIdle();
+    return { ok: true };
+  }
+
+  // ------------------------------------------------------------- which model, and staying connected
+  private health(): Map<string, number> {
+    if (this.triedLastUntil === null) {
+      this.triedLastUntil = new Map();
+      try {
+        for (const [model, until] of Object.entries(this.deps.modelHealth?.load() ?? {})) {
+          if (typeof until === 'number') this.triedLastUntil.set(model, until);
+        }
+      } catch {
+        // An unreadable memory is no memory.
+      }
+    }
+    return this.triedLastUntil;
+  }
+
+  private remember(): void {
+    const now = this.now();
+    const live: Record<string, number> = {};
+    for (const [model, until] of this.health()) if (until > now) live[model] = until;
+    try {
+      this.deps.modelHealth?.save(live);
+    } catch {
+      // Not being able to write it down must never break a conversation.
+    }
+  }
+
+  private markBad(model: string): void {
+    this.health().set(model, this.now() + (this.deps.badModelMs ?? 30 * 60_000));
+    this.remember();
+  }
+
+  private markGood(model: string): void {
+    if (this.health().delete(model)) this.remember();
+  }
+
+  /** The configured models, those that have not recently failed first. A failed one is only moved to the back, never dropped, so it is used again if the rest fail or once it has recovered. */
+  private ordered(models: readonly string[]): string[] {
+    const now = this.now();
+    const health = this.health();
+    const failedRecently = (m: string): boolean => (health.get(m) ?? 0) > now;
+    return [...models.filter((m) => !failedRecently(m)), ...models.filter(failedRecently)];
+  }
+
+  /** Opens the first model that will connect. A model the server refuses outright (not for a limit) is remembered as bad. */
+  private async openFirst(config: LiveConfig): Promise<{ session: LiveSessionLike; model: string } | { error: unknown }> {
     let firstError: unknown;
-    let opened: LiveSessionLike | null = null;
-    for (const model of config.models) {
+    for (const model of this.ordered(config.models)) {
       const session = this.deps.makeSession();
       try {
         await session.open(config.url, {
@@ -116,32 +206,59 @@ export class LiveConversation {
           systemInstruction: config.systemInstruction,
           tools: config.tools,
         });
-        opened = session;
-        break;
+        return { session, model };
       } catch (err) {
         firstError ??= err;
+        if (err instanceof LiveOpenError && err.kind === 'closed' && !QUOTA_LIKE.test(`${err.reason} ${err.message}`)) this.markBad(model);
       }
     }
-    if (opened === null) return { ok: false, reason: describeOpenFailure(firstError) };
+    return { error: firstError };
+  }
 
-    this.session = opened;
-    this.isActive = true;
+  private attach(session: LiveSessionLike, model: string): void {
+    this.session = session;
+    this.currentModel = model;
+    this.turnsCompleted = 0;
+    this.unsubscribers = [session.onEvent((event) => this.handleEvent(event)), session.onClose((info) => this.handleClose(info))];
+  }
+
+  /**
+   * The server cut the session off (measured: gemini-3.1-flash-live-preview opens fine, then closes every audio session ~9 s
+   * in with "Internal error", while the other Live models work). Reopen on another model and carry on, so the user is not
+   * left talking to nothing — and remember which model failed.
+   */
+  private async reconnect(detail: string): Promise<void> {
+    this.reconnecting = true;
+    const failed = this.currentModel;
+    // A model that never finished one reply before it was cut off is the problem: it goes to the back of the line.
+    if (this.turnsCompleted === 0) this.markBad(failed);
+    for (const off of this.unsubscribers) off();
+    this.unsubscribers = [];
+    this.session = null;
+    this.player?.stop();
+    this.player = null;
     this.speaking = false;
-    this.mutedUntil = 0;
-    this.heardText = '';
-    this.saidText = '';
-    this.lastSpoke = null;
-    this.toolsRunning = 0;
-    this.cancelled.clear();
     this.batcher.reset();
-    this.unsubscribers = [
-      opened.onEvent((event) => this.handleEvent(event)),
-      opened.onClose((info) => this.handleClose(info)),
-    ];
-    this.deps.setFrameSink((chunk, rate) => this.onFrame(chunk, rate));
-    this.handlers.onPhase('listening');
-    this.resetIdle();
-    return { ok: true };
+    this.handlers.onPhase('connecting');
+    this.handlers.onReconnecting?.(failed, detail);
+    try {
+      const config = await this.deps.getConfig();
+      const opened = config === null ? null : await this.openFirst(config);
+      if (!this.isActive) {
+        // The user stopped while this was reconnecting.
+        if (opened !== null && 'session' in opened) opened.session.close();
+        return;
+      }
+      if (opened === null || 'error' in opened) {
+        this.finish('closed', detail);
+        return;
+      }
+      this.attach(opened.session, opened.model);
+      this.handlers.onPhase('listening');
+      this.resetIdle();
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   /** Lets the user interrupt her mid-sentence: the microphone stays open while she speaks. */
@@ -213,6 +330,9 @@ export class LiveConversation {
         this.resetIdle();
         break;
       case 'turnComplete':
+        // The model has delivered a whole reply: it is working, so it is no longer on the "tried last" list.
+        this.turnsCompleted += 1;
+        if (this.turnsCompleted === 1) this.markGood(this.currentModel);
         this.finishSpeaking();
         break;
       case 'interrupted':
@@ -283,8 +403,17 @@ export class LiveConversation {
   }
 
   private handleClose(info: LiveCloseInfo): void {
-    if (info.byUs || !this.isActive) return;
-    this.finish('closed', info.reason || `closed (${info.code})`);
+    if (info.byUs || !this.isActive || this.reconnecting) return;
+    const detail = info.reason || `closed (${info.code})`;
+    const now = this.now();
+    this.reconnectTimes = this.reconnectTimes.filter((t) => now - t < RECONNECT_WINDOW_MS);
+    // Reopening cannot fix a limit, and must not loop: a couple of tries, then say what happened.
+    if (QUOTA_LIKE.test(info.reason) || this.reconnectTimes.length >= (this.deps.maxReconnects ?? 2)) {
+      this.finish('closed', detail);
+      return;
+    }
+    this.reconnectTimes.push(now);
+    void this.reconnect(detail);
   }
 
   private resetIdle(): void {

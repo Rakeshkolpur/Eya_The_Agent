@@ -10,12 +10,17 @@ import { rootLogger } from '@main/logging/logger';
 
 const log = rootLogger.child('live');
 
-// Measured with a spoken "open notepad": 3.1-flash-live-preview asked for the
-// tool in ~1.1s and began speaking in ~1.8s; 3.8-live ~1.5s / 2.2s; the 2.5
-// native-audio model ~5.6s and leaks its own notes, so it is the last resort.
+// Measured with a spoken "open notepad" (an earlier day): 3.1-flash-live-preview asked for the tool in ~1.1s and began
+// speaking in ~1.8s; 3.8-live ~1.5s / 2.2s; the 2.5 native-audio model ~5.6s and leaks its own notes, so it is the last resort.
+//
+// Re-measured on 2026-10-03 with spoken audio into the real Live API: 3.1-flash-live-preview opens, then the server closes
+// EVERY audio session ~9 s in with 1011 "Internal error encountered." (even with no tools and a one-line prompt, so it is the
+// model, not Eya's setup), while 3.8-live and the 2.5 model hear, call tools and answer normally. So the one that works comes
+// first; the preview stays as a fallback in case it recovers. (LiveConversation also reopens on the next model, and tries a
+// model that cut a session off last for a while, so this order is a starting point and not a single point of failure.)
 const DEFAULT_LIVE_MODELS = [
-  'gemini-3.1-flash-live-preview',
   'gemini-3.8-live',
+  'gemini-3.1-flash-live-preview',
   'gemini-2.5-flash-native-audio-latest',
 ];
 

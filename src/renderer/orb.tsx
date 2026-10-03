@@ -27,6 +27,7 @@ const STATUS_LABEL: Record<OrbState, string> = {
 
 const VOICE_STORAGE_KEY = 'eya.voice';
 const VOICE_NAME_STORAGE_KEY = 'eya.voiceName';
+const LIVE_BAD_MODELS_KEY = 'eya.liveBadModels';
 const INTERRUPT_STORAGE_KEY = 'eya.interrupt';
 
 /** Talking over Eya is on by default (echo cancellation kept her voice out of the mic in testing); the pill turns it off. */
@@ -141,6 +142,24 @@ export function OrbApp(): JSX.Element {
           return content;
         },
         makeSession: () => new LiveSession((url) => new WebSocket(url) as unknown as SocketLike),
+        // Which Live models have been cutting conversations off: kept across restarts, so a broken one is not tried first again.
+        modelHealth: {
+          load: () => {
+            try {
+              const parsed: unknown = JSON.parse(window.localStorage.getItem(LIVE_BAD_MODELS_KEY) ?? '{}');
+              return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, number>) : {};
+            } catch {
+              return {};
+            }
+          },
+          save: (triedLastUntil) => {
+            try {
+              window.localStorage.setItem(LIVE_BAD_MODELS_KEY, JSON.stringify(triedLastUntil));
+            } catch {
+              // Not being able to remember is fine.
+            }
+          },
+        },
         createPlayback: () => createPcmPlayback(),
         setFrameSink: (sink) => {
           micSink.current = sink;
@@ -163,6 +182,9 @@ export function OrbApp(): JSX.Element {
           if (text.length > 0) console.info(`[eya] live: said "${text}"`);
           saidShown = text;
           show();
+        },
+        onReconnecting: (failedModel, reason) => {
+          console.info(`[eya] live: ${failedModel} was cut off (${reason}); reopening on another model`);
         },
         onSlowTool: (name) => {
           console.info(`[eya] live: ${name} is slow, saying so`);
