@@ -11,7 +11,7 @@
 import { Bridge } from './bridge.js';
 import { setBlocked } from './policy.js';
 import { startEventForwarding } from './events.js';
-import { goBack, goForward, inject, observeTab, reloadTab, runAction } from './actions.js';
+import { attachFile, goBack, goForward, inject, observeTab, reloadTab, runAction } from './actions.js';
 import {
   assertWebUrl,
   beginEyaAction,
@@ -51,6 +51,7 @@ const CAPABILITIES = [
   'search_page',
   'screenshot',
   'policy',
+  'attach_file',
   'events',
   'downloads',
 ];
@@ -148,6 +149,10 @@ async function perform(op, args) {
 
     case 'screenshot':
       return screenshotTab(args.tabId);
+
+    case 'attach_file':
+      // A file for a chat app's own file picker, sent in parts (see actions.js).
+      return attachFile(args);
 
     case 'set_policy':
       // Eya says which chat apps are NOT allowed right now (the user's Communication Access switch).

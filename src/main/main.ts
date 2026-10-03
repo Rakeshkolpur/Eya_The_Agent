@@ -24,6 +24,9 @@ import { createBrowserTools } from '@main/tools/impl/browserTools';
 import { createScreenshotTool } from '@main/tools/impl/screenshotTool';
 import { createWindowTools } from '@main/tools/impl/windowTools';
 import { createCommunicationStatusTool } from '@main/tools/impl/communicationTools';
+import { createChatSendGate, createChatTools } from '@main/tools/impl/chatTools';
+import { createArchiveTools } from '@main/tools/impl/archiveTools';
+import { ChatSession } from '@main/chat/chatSession';
 import { CommunicationPolicy } from '@main/privacy/communicationAccess';
 import { CommunicationAccessStore } from '@main/privacy/communicationAccessStore';
 import { registerCommunicationAccessIpc } from '@main/privacy/communicationAccessIpc';
@@ -150,6 +153,11 @@ async function bootstrap(): Promise<void> {
   communicationStore.load();
   const communication = new CommunicationPolicy(() => communicationStore.get());
   startPolicySync({ bridge: chromeBridge, blockRules: () => communication.blockRules(), onPolicyChange: (cb) => communicationStore.onChange(() => cb()) });
+  // What Eya remembers about the chat she is working in (memory only): forgotten the moment Communication Access is narrowed.
+  const chatSession = new ChatSession();
+  communicationStore.onChange((s) => {
+    if (!s.enabled || Object.values(s.apps).some((allowed) => !allowed)) chatSession.clear();
+  });
   const browserMode = parseBrowserMode(process.env['EYA_BROWSER_MODE']);
   const preferredEnv = (process.env['EYA_PREFERRED_BROWSER'] ?? '').toLowerCase();
   log.info('browser mode', { browserMode, ...(preferredEnv !== '' ? { preferred: preferredEnv } : {}) });
@@ -218,9 +226,18 @@ async function bootstrap(): Promise<void> {
     tools.register(tool);
   }
   for (const tool of createRecycleBinTools(folders)) tools.register(tool);
-  for (const tool of createBrowserTools(browserService, undefined, { tabs: browserService, connector: chromeConnector, session: browserService })) {
+  for (const tool of createBrowserTools(browserService, undefined, {
+    tabs: browserService,
+    connector: chromeConnector,
+    session: browserService,
+    // A send in a chat app names who it goes to and asks first.
+    chatGate: createChatSendGate(chatSession, communication),
+  })) {
     tools.register(tool);
   }
+  // Finding a chat, attaching a file to it, checking it went — and zipping a folder, since a chat app only takes files.
+  for (const tool of createChatTools({ service: browserService, policy: communication, session: chatSession, folders })) tools.register(tool);
+  for (const tool of createArchiveTools(folders)) tools.register(tool);
   tools.register(createCommunicationStatusTool(communication));
   tools.register(
     createScreenshotTool({

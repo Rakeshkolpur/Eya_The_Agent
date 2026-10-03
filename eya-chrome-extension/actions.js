@@ -143,6 +143,29 @@ export async function runAction(requestedTabId, perform) {
   };
 }
 
+/**
+ * Put a file on a chat app's file input — in pieces, because a message to the page can only be so big. "begin" starts the
+ * transfer, each "chunk" adds a part, "commit" rebuilds the file and hands it to the page's file picker. Nothing is sent to
+ * anyone by this: the app shows its own preview and waits for the user's Send. Like every way into a page, a chat app is
+ * refused (by inject) unless the user has allowed Eya into it.
+ */
+export async function attachFile(args) {
+  const tabId = await resolveTabId(args.tabId);
+  if (args.phase === 'probe') {
+    return { performed: await inject(tabId, 'attachProbe', {}), tabId };
+  }
+  if (args.phase === 'begin') {
+    return { performed: await inject(tabId, 'attachBegin', { id: args.id, name: args.name, mime: args.mime, size: args.size }), tabId };
+  }
+  if (args.phase === 'chunk') {
+    return { performed: await inject(tabId, 'attachChunk', { id: args.id, data: args.data }), tabId };
+  }
+  if (args.phase === 'commit') {
+    return runAction(tabId, (id) => inject(id, 'attachCommit', { id: args.id, prefer: args.prefer }));
+  }
+  throw new Error('Unknown file transfer step.');
+}
+
 export const goBack = (requestedTabId) => goHistory(requestedTabId, 'back');
 export const goForward = (requestedTabId) => goHistory(requestedTabId, 'forward');
 

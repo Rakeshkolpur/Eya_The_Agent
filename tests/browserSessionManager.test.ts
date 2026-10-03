@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { BrowserSessionManager, parseBrowserMode } from '../src/main/browser/BrowserSessionManager';
 import type { BrowserLauncher, BrowserMode, ManagedBridge, UserBrowser } from '../src/main/browser/BrowserSessionManager';
-import type { BrowserAutomationService, BrowserCapture, ScreenshotImage } from '../src/main/browser/BrowserAutomationService';
+import type { BrowserAutomationService, BrowserCapture, BrowserFileAttach, BrowserItemLister, ScreenshotImage } from '../src/main/browser/BrowserAutomationService';
 import { BrowserUnavailableError, CommunicationAccessError } from '../src/main/browser/errors';
 import { COMMUNICATION_OFF, CommunicationPolicy } from '../src/main/privacy/communicationAccess';
 import type { CommunicationSettings } from '../src/main/privacy/communicationAccess';
@@ -105,7 +105,7 @@ function rig(
 
   const shot = (environment: 'your_browser' | 'eya_browser', browser?: BrowserName): ScreenshotImage => ({ bytes: Buffer.from('png'), mime: 'image/png', url: opts.shotUrl ?? 'https://x.example/', title: browser ?? 'eya', environment, ...(browser !== undefined ? { browser } : {}) });
 
-  const userService = (browser: BrowserName): UserBrowser & BrowserCapture => ({
+  const userService = (browser: BrowserName): UserBrowser & BrowserCapture & BrowserItemLister & BrowserFileAttach => ({
     openWebsite: async (url) => (calls.push(`${browser}:open:${url}`), snap(`${browser} page`, { url })),
     inspectPage: async () => {
       calls.push(`${browser}:inspect`);
@@ -123,6 +123,8 @@ function rig(
     searchWeb: async () => (calls.push(`${browser}:search`), []),
     screenshot: async () => (calls.push(`${browser}:screenshot`), shot('your_browser', browser)),
     close: async () => undefined,
+    listItems: async () => (calls.push(`${browser}:items`), [{ name: 'Rahul Sharma ok', primary: 'Rahul Sharma', role: 'clickable' }]),
+    attachFile: async (request) => (calls.push(`${browser}:attach:${request.name}`), { ok: true as const, snapshot: snap(`${browser} page`, { url: opts.shotUrl ?? 'https://x.example/' }) }),
     listTabs: async () => (calls.push(`${browser}:tabs`), world.tabsOf(browser).map((t) => ({ browser, tabId: t.tabId, title: t.title, url: t.url, active: t.active, openedByEya: false, workingHere: false }))),
     switchToTab: async (id) => (calls.push(`${browser}:switch:${id}`), snap(`${browser} tab ${id}`)),
     closeTab: async (id, o) => (calls.push(`${browser}:close:${id}:${String(o?.allowUserTab)}`), { closed: true, remainingTabs: 1 }),
@@ -839,5 +841,110 @@ describe('Communication Access: chat apps are neither read nor acted in unless t
     r.setTabs('chrome', [{ tabId: 1, url: WA, active: true }], true);
     await r.manager.openWebsite(WA);
     await expect(r.manager.inspectPage()).resolves.toBeDefined();
+  });
+});
+
+describe('listing the page and attaching a file go through the same Communication Access check as everything else', () => {
+  const WA = 'https://web.whatsapp.com/';
+  const policyOf = (s: CommunicationSettings) => new CommunicationPolicy(() => s);
+  const request = { name: 'report.pdf', mime: 'application/pdf', size: 3, read: async () => Buffer.from('abc') };
+
+  async function inChat(settings: CommunicationSettings) {
+    const r = rig({ connected: ['chrome'], policy: policyOf(settings) });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
+    await r.manager.openWebsite('https://x.example/'); // pins the task to Chrome
+    r.setTabs('chrome', [{ tabId: 1, url: WA, active: true }], true);
+    r.calls.length = 0;
+    return r;
+  }
+
+  it('OFF: neither is done, and nothing reaches the browser', async () => {
+    const r = await inChat(COMMUNICATION_OFF);
+    await expect(r.manager.listItems()).rejects.toBeInstanceOf(CommunicationAccessError);
+    await expect(r.manager.attachFile(request)).rejects.toBeInstanceOf(CommunicationAccessError);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('ON: the page is listed, and a file is attached (and the page that comes back is stamped as the user\'s browser)', async () => {
+    const r = await inChat({ enabled: true, apps: {} });
+    expect(await r.manager.listItems()).toEqual([{ name: 'Rahul Sharma ok', primary: 'Rahul Sharma', role: 'clickable' }]);
+    const attached = await r.manager.attachFile(request);
+    expect(attached.ok).toBe(true);
+    expect(attached.ok && attached.snapshot.environment).toBe('your_browser');
+    expect(r.calls).toEqual(['chrome:items', 'chrome:attach:report.pdf']);
+  });
+
+  it('with no policy (older callers) nothing changes', async () => {
+    const r = rig({ connected: ['chrome'] });
+    r.setTabs('chrome', [{ tabId: 1, url: WA, active: true }], true);
+    await r.manager.openWebsite(WA);
+    await expect(r.manager.listItems()).resolves.toHaveLength(1);
+  });
+
+  it('a window of Eya\'s own (not the user\'s browser) cannot attach files, and says so', async () => {
+    const r = rig({ mode: 'eya_browser' });
+    const result = await r.manager.attachFile(request);
+    expect(result).toMatchObject({ ok: false, reason: 'failed' });
+  });
+});
+
+describe('opening a site in the browser the user NAMED', () => {
+  it('uses that browser even when the other one holds the session, and never the other', async () => {
+    const r = rig({ connected: ['chrome', 'edge'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://mysite.example/dashboard', active: true }], true);
+    r.setTabs('edge', [{ tabId: 1, url: 'https://other.example/' }]);
+    const s = await r.manager.openWebsite('https://mysite.example/', { browser: 'edge' });
+    expect(r.calls).toEqual(['edge:open:https://mysite.example/']);
+    expect(s.notes).toContain("Opened in the user's Edge.");
+    expect(r.manager.pinnedBrowser()).toBe('edge');
+    expect(r.launched).toEqual([]);
+  });
+
+  it('starts it if it is installed but not running, and uses it once its extension connects', async () => {
+    const r = rig({ connected: ['chrome'], installed: ['chrome', 'edge'], running: ['chrome'], startedBrowserConnects: true });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
+    await r.manager.openWebsite('https://web.whatsapp.com/', { browser: 'edge' });
+    expect(r.launched).toEqual([['edge', 'https://web.whatsapp.com/']]);
+    expect(r.calls).toEqual(['edge:open:https://web.whatsapp.com/']);
+  });
+
+  it('wakes it if it is running and its extension is just asleep', async () => {
+    const r = rig({ connected: ['chrome'], installed: ['chrome', 'edge'], running: ['chrome', 'edge'] });
+    r.bridge.connectsOnWait.add('edge');
+    await r.manager.openWebsite('https://web.whatsapp.com/', { browser: 'edge' });
+    expect(r.launched).toEqual([]);
+    expect(r.calls).toEqual(['edge:open:https://web.whatsapp.com/']);
+  });
+
+  it('says so when that browser is not on the PC, and opens nothing anywhere else', async () => {
+    const r = rig({ connected: ['chrome'], installed: ['chrome'], running: ['chrome'] });
+    const err = await caught(r.manager.openWebsite('https://x.example/', { browser: 'edge' }));
+    expect(err.detail.why).toBe('no_browser');
+    expect(err.message).toMatch(/Edge could not be found/);
+    expect(r.calls).toEqual([]);
+    expect(r.launched).toEqual([]);
+  });
+
+  it('says its extension needs pairing (or a reload) rather than quietly using the other browser', async () => {
+    const r = rig({ connected: ['chrome'], knocking: ['edge'], installed: ['chrome', 'edge'], running: ['chrome', 'edge'] });
+    const err = await caught(r.manager.openWebsite('https://x.example/', { browser: 'edge' }));
+    expect(err.detail.why).toBe('needs_pairing');
+    const old = rig({ connected: ['chrome'], knocking: ['edge'], outdated: ['edge'], installed: ['chrome', 'edge'], running: ['chrome', 'edge'] });
+    expect((await caught(old.manager.openWebsite('https://x.example/', { browser: 'edge' }))).detail.why).toBe('needs_reload');
+    expect(r.calls.concat(old.calls)).toEqual([]);
+  });
+
+  it('even in auto mode, a named browser that is unavailable is not swapped for Eya\'s own window', async () => {
+    const r = rig({ mode: 'auto', connected: [], installed: ['chrome'], running: [] });
+    await caught(r.manager.openWebsite('https://x.example/', { browser: 'edge' }));
+    expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false);
+  });
+
+  it('without a named browser, nothing changes: the one that already has the site', async () => {
+    const r = rig({ connected: ['chrome', 'edge'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://news.example/' }]);
+    r.setTabs('edge', [{ tabId: 1, url: 'https://mysite.example/dashboard' }]);
+    await r.manager.openWebsite('https://mysite.example/');
+    expect(r.calls).toEqual(['edge:open:https://mysite.example/']);
   });
 });

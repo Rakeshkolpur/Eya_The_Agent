@@ -58,6 +58,13 @@ storage, and re-sent whenever the switch changes); until she does, every chat si
 checked against Eya's by a test so the two cannot drift apart. Eya's own side enforces the same rule, so an older extension that does
 not know `set_policy` is still never used on a chat page while the switch is off.
 
+**Attaching a file to a chat app (extension 0.4.0):** a page's own "choose a file" window is native and no script can drive it, but chat apps keep
+(usually hidden) file inputs, and putting a file on one is exactly what the chooser would have done. When you have asked Eya to send a file in a chat
+app you have allowed, she hands the file to the extension in parts of 3 MB, it is rebuilt inside the page and put on the app's file input, and the app
+shows its own preview. **Nothing is sent by this** — the app waits for Send, which Eya only clicks after you said yes to that exact file and chat.
+It only ever does this for a chat app (never an ordinary website), only with Communication Access on for it, and only a file Eya has already checked
+(not a secret, not a program, not a folder).
+
 **What it tells Eya about the browser itself:** when it connects it says which browser and version it is, its
 extension version, what it can do, and which windows and tabs are open (address and title only; private windows
 are left out). While connected it reports tabs opening, closing, being switched to and navigating, windows gaining

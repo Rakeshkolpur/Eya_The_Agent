@@ -48,7 +48,7 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 | `get_brightness` / `set_brightness` | Exact screen brightness, read and set, verified after the change. Reports plainly if your display has no software brightness control (common on external monitors). |
 | `lock_screen` | Actually locks the Windows workstation. No confirmation needed. |
 | `restart_computer` / `shutdown_computer` | Actually restarts or shuts down the PC. Always asks first — see Safety. |
-| `open_website` | Opens a website (by its exact URL) in *your own* browser: a tab you already have on that site if there is one, else a new tab in the same browser, else your normal browser is started. The result says which browser and which tab. If your browser isn't connected it stops and says why (`data.why`) instead of opening some other window. Only with your say-so does `isolated: true` open Eya's separate signed-out window. Becomes the current page for the tools below. |
+| `open_website` | Opens a website (by its exact URL) in *your own* browser: a tab you already have on that site if there is one, else a new tab in the same browser, else your normal browser is started. The result says which browser and which tab. If your browser isn't connected it stops and says why (`data.why`) instead of opening some other window. Say "in Edge" / "on Chrome" and she passes `browser`, so it opens in the one you named (started or woken if need be, and never quietly swapped for the other). Only with your say-so does `isolated: true` open Eya's separate signed-out window. Becomes the current page for the tools below. |
 | `inspect_page` | Reads what's actually on the current page right now — headings, the page's own links (kept apart from the site's menu bar, which isn't repeated when unchanged), links held by closed hover/click menus, buttons, form fields, a piece of the text and any table. |
 | `find_on_page` | Searches the *whole* page — what's showing, what's further down, links inside closed menus, and the page's own text — for some words, and says where each match is. For when the option isn't in the first screenful. |
 | `read_page` | Reads the page's actual text a slice at a time (tables with the first slice), so Eya can answer from what a page says instead of searching the web for it. |
@@ -65,6 +65,11 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 | `list_windows` | The application windows that are open right now, front one first (name, title, whether minimised or maximised). |
 | `window_control` | Minimise, maximise, restore, close or switch to an application window that is already open ("minimise Chrome", "switch to Word", "close Notepad"). It does the action, then **checks the window really reached that state** — it never says "done" for a request that merely went out — and says so plainly when a window was already that way. Closing is polite (like clicking the X): a window that asks "save changes?" stays open and is reported as such. If several windows match a close, it asks which. Eya never touches her own windows. "Switch to WhatsApp" focuses the window if there is one, otherwise the browser tab that is already open. |
 | `communication_access_status` | Reads whether Communication Access is on (see below). It only reads: there is **no** tool that turns it on. |
+| `find_chat` | In a chat app that is open in your browser: finds one person's or group's chat by the name you gave (full, first, last or part of it) or by digits of the number ("ending 432", "starting 98765"), by typing it into the app's own search box and choosing between the results **locally** — the model is handed only the matching name(s), never the chat list, a message preview or anyone else's name. One clear match is opened; several ("Rahul" when there is a Rahul Sharma and a Rahul Verma) come back numbered for you to choose from; none says so. It never guesses. Works only while Communication Access is on for that app. |
+| `attach_file` | Puts a file from this PC on the chat app's own file picker so the app shows its preview — it does **not** send. First call (no `confirm`) checks the file and the chat and returns the question to ask you, word for word: *"Found Rahul Sharma, number ending in 432. Send the file "report.pdf" to this chat?"* After your yes it attaches (in parts of 3 MB, rebuilt inside the page), then checks the app really shows the attachment. Refuses secrets (`.env`, keys, browser profiles), programs, folders (use `zip_folder`), empty or over-100 MB files, and any page that is not a chat app. |
+| `verify_sent` | After the Send click: checks the message or file is really in the conversation **and** the app shows a *new* delivery mark (sent, delivered, read), or reports failed / pending / unconfirmed / not found. An old message's mark is never mistaken for this one's. |
+| `find_folder` | Finds a **folder** by the words in its name ("the folder Hello 2 on my desktop"), in the place you named or the usual ones a few levels down; returns every match for you to choose from. |
+| `zip_folder` | Makes a .zip **copy** of a folder in a temporary folder (the folder is untouched), checks every file went in, and returns its path to attach. Refuses a folder holding keys or secrets, an empty one, or one too big for a chat app. |
 
 ### Safety
 
@@ -295,6 +300,20 @@ web page or message telling her to, changes nothing).
 - Nothing from a chat is stored by Eya: the only thing written to disk is the switch itself (`communication-access.json` in her data
   folder). A damaged or unreadable file means OFF.
 - Turn it off at any time; it takes effect on her very next step, even in the middle of a task.
+
+## Sending a file or a message in a chat app
+
+With Communication Access on, "send the folder Hello 2 on my desktop to the Uber chat on WhatsApp" is a handful of small, general steps — **observe, act, observe, verify** — over the same browser tools as everywhere else, in the browser you are already signed in to. Nothing is written per app; what differs between WhatsApp, Telegram and Instagram lives in their own pages.
+
+1. Open the app in your browser (`open_website`, in the browser you name).
+2. `find_chat` — the name or digits you gave; asks you which one if two fit.
+3. A folder → `find_folder`, then `zip_folder` (she says she is sending a zip). A file → the exact path from `find_file` (searches the whole PC) or from earlier in the conversation.
+4. `attach_file` → she asks *"Found <name>, number ending in …. Send the file … to this chat?"* and waits for your yes.
+5. Send (the yes covers exactly that file and that chat, once) → `verify_sent`. She says "sent" only when the app itself shows a new delivery mark; otherwise she tells you what she saw.
+
+A typed message asks the same way before Send. Backing out of a preview withdraws the yes, and a yes runs out after a few minutes.
+
+**Tested for real** with the actual extension in a real Chrome, through the real tools, against two chat pages built nothing alike (a WhatsApp-style and a Telegram-style one): ambiguity, number search, byte-exact transfer of a 7 MB file in several parts (SHA-256 compared in the page), no-picker-until-the-attach-menu, a preview with a second "Send", a send the app reports as failed, a zipped folder, and everything refused when the switch is off. **Not** tested: the real WhatsApp, Telegram or Instagram sites (they need your signed-in account and phone, and change their pages without notice). The extension is where that will show first; if one of them behaves differently, the result says what it saw instead of claiming success.
 
 ## Lock, restart and shutdown
 

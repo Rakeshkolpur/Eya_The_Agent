@@ -64,9 +64,17 @@ describe('the browser extension manifest', () => {
 
   it('every request the desktop side can send is one the extension answers', () => {
     const worker = readFileSync(join(root, 'service-worker.js'), 'utf8');
-    for (const op of ['ping', 'list_tabs', 'focus_tab', 'focus_window', 'open_url', 'observe', 'click', 'fill', 'scroll', 'back', 'forward', 'reload', 'close_tab', 'search_page', 'screenshot', 'set_policy']) {
+    for (const op of ['ping', 'list_tabs', 'focus_tab', 'focus_window', 'open_url', 'observe', 'click', 'fill', 'scroll', 'back', 'forward', 'reload', 'close_tab', 'search_page', 'screenshot', 'set_policy', 'attach_file']) {
       expect(worker, op).toContain(`case '${op}'`);
     }
+  });
+
+  it('the page script answers every step of handing a file to a chat app\'s file picker, and the worker advertises it', () => {
+    const page = readFileSync(join(root, 'injected.js'), 'utf8');
+    for (const command of ['attachProbe', 'attachBegin', 'attachChunk', 'attachCommit']) expect(page, command).toContain(`case '${command}'`);
+    const actions = readFileSync(join(root, 'actions.js'), 'utf8');
+    for (const phase of ['probe', 'begin', 'chunk', 'commit']) expect(actions, phase).toContain(`'${phase}'`);
+    expect(readFileSync(join(root, 'service-worker.js'), 'utf8')).toMatch(/'attach_file',\n/);
   });
 
   it('reports the browser\'s tabs and windows in its handshake, and forwards live events', () => {

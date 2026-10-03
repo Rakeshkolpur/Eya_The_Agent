@@ -34,6 +34,8 @@ export interface PageSnapshot {
   readonly collapsedMenus?: Readonly<Record<string, readonly string[]>>;
   /** How many more links the page has than `links` shows. */
   readonly moreLinks?: number;
+  /** Delivery marks beside messages that were sent ("sent", "pending", "failed to send"…), oldest first — never the messages. */
+  readonly messageStatus?: readonly string[];
 }
 
 export type BrowserEnvironment = 'your_browser' | 'eya_browser';
@@ -64,6 +66,7 @@ export interface SnapshotExtras {
   readonly navigation?: readonly string[];
   readonly navigationSameAsPrevious?: number;
   readonly collapsedMenus?: Readonly<Record<string, readonly string[]>>;
+  readonly messageStatus?: readonly string[];
 }
 
 const MAX_ITEMS_PER_CATEGORY = 40;
@@ -133,6 +136,7 @@ export function buildSnapshot(
     ...(extras.challenge !== undefined ? { challenge: extras.challenge } : {}),
     ...(extras.notes !== undefined && extras.notes.length > 0 ? { notes: extras.notes } : {}),
     ...(extras.environment !== undefined ? { environment: extras.environment } : {}),
+    ...(extras.messageStatus !== undefined && extras.messageStatus.length > 0 ? { messageStatus: extras.messageStatus } : {}),
   };
 }
 

@@ -58,6 +58,8 @@ export interface OpenWebsiteOptions {
    * run that way: it starts signed out of everything, and is never chosen silently.
    */
   readonly isolated?: boolean;
+  /** Open it in this browser (the user named one: "in Edge"), instead of choosing by where their session is. */
+  readonly browser?: 'chrome' | 'edge';
 }
 
 export type ScrollDirection = 'up' | 'down' | 'top' | 'bottom';
@@ -111,4 +113,42 @@ export interface BrowserTabControl {
    * tool only passes after the user has said yes.
    */
   closeTab(tabId: number, options?: { readonly browser?: 'chrome' | 'edge' | 'other'; readonly allowUserTab?: boolean }): Promise<{ readonly closed: boolean; readonly remainingTabs: number }>;
+}
+
+/** One thing on the page that can be clicked, as seen by Eya's own code (never handed to the model as a list). */
+export interface PageItem {
+  /** The row's whole text. */
+  readonly name: string;
+  /** For a list row (a chat, a search result), its first line — what a person calls it. */
+  readonly primary?: string;
+  readonly role: string;
+  readonly region?: string;
+}
+
+/** Listing what is clickable on the current page, for Eya's own code to choose from (e.g. matching a contact name locally). */
+export interface BrowserItemLister {
+  listItems(): Promise<PageItem[]>;
+}
+
+export interface AttachFileRequest {
+  /** The file's name only — never its folder. */
+  readonly name: string;
+  readonly mime: string;
+  readonly size: number;
+  /** Reads `length` bytes of the file from `offset`. */
+  readonly read: (offset: number, length: number) => Promise<Buffer>;
+  /** As a document (any file) or as media (a photo or video); auto picks the file picker made for this kind of file. */
+  readonly prefer?: 'auto' | 'document' | 'media';
+}
+
+export type AttachFileResult =
+  | { readonly ok: true; readonly snapshot: PageSnapshot }
+  | { readonly ok: false; readonly reason: 'no_file_input' | 'type_not_accepted' | 'failed'; readonly message: string; readonly snapshot?: PageSnapshot };
+
+/**
+ * Putting a file on the open page's own file picker (so a chat app shows its preview). Nothing is sent: the page waits
+ * for the user's Send.
+ */
+export interface BrowserFileAttach {
+  attachFile(request: AttachFileRequest): Promise<AttachFileResult>;
 }

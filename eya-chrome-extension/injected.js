@@ -7,7 +7,7 @@
  * commands, one persistent bit of state per page (`globalThis.__eyaAgentState`,
  * in the extension's own isolated world, invisible to the page's scripts).
  *
- * Commands: observe | click | fill | press | waitQuiet | extractSearch.
+ * Commands: observe | click | fill | press | waitQuiet | extractSearch | attachBegin | attachChunk | attachCommit.
  *
  * What it will never do, on purpose:
  *  - report the value of a password / card / one-time-code field, or any
@@ -323,6 +323,27 @@ export async function eyaPageAgent(command, params) {
     return tables;
   }
 
+  // The delivery marks beside messages a person has sent ("Sent", "Delivered", "Read", "Pending", "Failed to send"…).
+  // Only these words are ever reported, never the message next to them, so a chat can be checked without reading it.
+  const STATUS_WORD =
+    /^(?:message )?(sent|delivered|read|seen|pending|sending|failed|failed to send|not sent|couldn'?t send|couldn'?t be sent|undelivered|send failed|retry|tap to retry|click to retry)$/;
+  function collectStatuses() {
+    const found = [];
+    let checked = 0;
+    for (const el of document.querySelectorAll('[aria-label], [title], [data-icon], span, small, i, time')) {
+      if (++checked > 8000) break;
+      let raw = el.getAttribute('aria-label');
+      if (raw === null || raw === '') raw = el.getAttribute('title');
+      if (raw === null || raw === '') raw = el.childElementCount === 0 ? el.textContent : '';
+      const label = norm(raw)
+        .replace(/^[^a-z]+/i, '')
+        .replace(/[^a-z']+$/i, '')
+        .toLowerCase();
+      if (label !== '' && label.length <= 20 && STATUS_WORD.test(label)) found.push(label.replace(/^message /, ''));
+    }
+    return found.slice(-6);
+  }
+
   function observe(opts) {
     const maxElements = Math.min(Math.max(Number(opts?.maxElements) || 300, 20), 500);
     state.epoch += 1;
@@ -388,7 +409,8 @@ export async function eyaPageAgent(command, params) {
       const name = clip(accName(el), MAX_NAME);
       const region = regionOf(el);
       const href = el.tagName === 'A' ? redactUrl(el.getAttribute('href') || '') : '';
-      const dedupeKey = `${role}|${name}|${href}|${role === 'input' || role === 'select' ? records.length : ''}`;
+      // A popup's "Send" is not the same control as the page's own "Send" behind it: both must stay, the popup's first.
+      const dedupeKey = `${role}|${name}|${href}|${region === 'dialog' ? 'dialog' : ''}|${role === 'input' || role === 'select' ? records.length : ''}`;
       if (name === '' && role !== 'input' && role !== 'select' && role !== 'checkbox' && role !== 'radio') return;
       if (seen.has(dedupeKey)) return;
       seen.add(dedupeKey);
@@ -419,6 +441,14 @@ export async function eyaPageAgent(command, params) {
       if (expanded !== null) rec.expanded = expanded === 'true';
       if (isDisabled(el)) rec.disabled = true;
       if (region) rec.region = region;
+      // A list row (a chat, a search result) shows several lines; its first line is what a person calls it.
+      if (role === 'clickable' || role === 'link' || role === 'option' || role === 'tab' || role === 'menuitem' || role === 'button') {
+        const lines = String(el.innerText ?? '')
+          .split('\n')
+          .map((l) => norm(l))
+          .filter(Boolean);
+        if (lines.length > 1 && lines[0].length < name.length) rec.primary = clip(lines[0], 80);
+      }
       if (hidden) {
         rec.hidden = true;
         const menu = menuLabelOf(el);
@@ -513,6 +543,7 @@ export async function eyaPageAgent(command, params) {
       challenge: detectChallenge(),
       loading: document.readyState !== 'complete',
       notes,
+      statuses: collectStatuses(),
     };
   }
 
@@ -804,6 +835,114 @@ export async function eyaPageAgent(command, params) {
     }));
   }
 
+  // ------------------------------------------------------------- file attach
+  // A page's own file chooser is a native window no script can drive. Chat apps keep (usually hidden) file inputs, though,
+  // and putting a file on one is exactly what the chooser would have done. The file arrives in pieces (a message to this
+  // page can only be so big), is rebuilt here, and is handed to the input; nothing is sent anywhere by this step.
+  const MAX_UPLOAD_BYTES = 110 * 1024 * 1024;
+
+  function fileFit(accept, file) {
+    const parts = String(accept || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (parts.length === 0) return 'any';
+    const name = file.name.toLowerCase();
+    const type = (file.type || '').toLowerCase();
+    let generic = false;
+    for (const p of parts) {
+      if (p === '*' || p === '*/*') generic = true;
+      else if (p.startsWith('.')) {
+        if (name.endsWith(p)) return 'specific';
+      } else if (p.endsWith('/*')) {
+        if (type.startsWith(p.slice(0, -1))) return 'specific';
+      } else if (type === p) return 'specific';
+    }
+    return generic ? 'any' : null;
+  }
+
+  function bytesFromBase64(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function fileInputs() {
+    return allElements()
+      .out.map(([el]) => el)
+      .filter((el) => el.tagName === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'file' && !el.disabled);
+  }
+
+  function noPicker() {
+    return {
+      ok: false,
+      reason: 'no_file_input',
+      detail:
+        'This page has no file picker right now. Open its attach menu (the paperclip, plus or Attach button) so the app creates one, then try again. Do not click Document or Photos inside it: that opens a window only the user can use.',
+    };
+  }
+
+  /** Is there a file picker on the page at all? Asked before a (possibly large) file is sent across. */
+  function attachProbe() {
+    const n = fileInputs().length;
+    return n === 0 ? noPicker() : { ok: true, inputs: n };
+  }
+
+  function attachBegin(p) {
+    const size = Number(p?.size);
+    if (!Number.isFinite(size) || size <= 0 || size > MAX_UPLOAD_BYTES) {
+      return { ok: false, reason: 'bad_size', detail: 'That file is empty or too large to attach this way.' };
+    }
+    state.upload = { id: String(p.id), name: clip(p.name, 200), mime: clip(p.mime, 100), size, parts: [], received: 0 };
+    return { ok: true };
+  }
+
+  function attachChunk(p) {
+    const up = state.upload;
+    if (!up || up.id !== String(p?.id)) return { ok: false, reason: 'no_upload', detail: 'The file transfer was not started on this page.' };
+    const bytes = bytesFromBase64(String(p.data));
+    if (up.received + bytes.length > up.size) {
+      state.upload = null;
+      return { ok: false, reason: 'too_much_data', detail: 'More data arrived than the file holds.' };
+    }
+    up.parts.push(bytes);
+    up.received += bytes.length;
+    return { ok: true, received: up.received };
+  }
+
+  function attachCommit(p) {
+    const up = state.upload;
+    if (!up || up.id !== String(p?.id)) return { ok: false, reason: 'no_upload', detail: 'The file transfer was not started on this page.' };
+    state.upload = null;
+    if (up.received !== up.size) return { ok: false, reason: 'incomplete', detail: `Only ${up.received} of ${up.size} bytes arrived.` };
+    const file = new File(up.parts, up.name, { type: up.mime || 'application/octet-stream', lastModified: Date.now() });
+
+    const inputs = fileInputs();
+    if (inputs.length === 0) return noPicker();
+    const fits = inputs.map((el) => ({ el, fit: fileFit(el.getAttribute('accept'), file) })).filter((x) => x.fit !== null);
+    if (fits.length === 0) {
+      return { ok: false, reason: 'type_not_accepted', detail: `None of this page's file pickers accepts a ${file.type || 'file like'} "${file.name}".` };
+    }
+    const specific = fits.filter((x) => x.fit === 'specific');
+    const generic = fits.filter((x) => x.fit === 'any');
+    const prefer = p?.prefer === 'media' || p?.prefer === 'document' ? p.prefer : 'auto';
+    // "As a document" wants the picker that takes anything; otherwise the picker made for this kind of file comes first.
+    const pool = prefer === 'document' ? (generic.length > 0 ? generic : specific) : specific.length > 0 ? specific : generic;
+    const target = pool[pool.length - 1].el;
+
+    try {
+      const transfer = new DataTransfer();
+      transfer.items.add(file);
+      target.files = transfer.files;
+    } catch (err) {
+      return { ok: false, reason: 'not_accepted', detail: `The page would not take the file: ${String(err?.message ?? err)}` };
+    }
+    target.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    target.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    return { ok: true, name: file.name, size: file.size, accept: clip(target.getAttribute('accept') || '', 60), inputs: inputs.length };
+  }
+
   // ---------------------------------------------------------------- dispatch
   switch (command) {
     case 'observe':
@@ -825,6 +964,14 @@ export async function eyaPageAgent(command, params) {
       return waitQuiet(params);
     case 'extractSearch':
       return extractSearch(params?.engine);
+    case 'attachProbe':
+      return attachProbe();
+    case 'attachBegin':
+      return attachBegin(params);
+    case 'attachChunk':
+      return attachChunk(params);
+    case 'attachCommit':
+      return attachCommit(params);
     default:
       return { ok: false, reason: 'unknown_command', detail: String(command) };
   }

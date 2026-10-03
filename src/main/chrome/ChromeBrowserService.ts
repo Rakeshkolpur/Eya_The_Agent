@@ -1,13 +1,19 @@
+import { randomUUID } from 'node:crypto';
 import { basename } from 'node:path';
 import { rootLogger } from '@main/logging/logger';
 import type {
   ActOnPageResult,
+  AttachFileRequest,
+  AttachFileResult,
   BrowserAutomationService,
   BrowserCapture,
+  BrowserFileAttach,
+  BrowserItemLister,
   BrowserTabControl,
   ClickGate,
   FillOptions,
   FindOnPageResult,
+  PageItem,
   ReadPageResult,
   ScreenshotImage,
   ScrollDirection,
@@ -103,10 +109,14 @@ export interface PageAgentServiceOptions {
   readonly browserName?: BrowserName;
 }
 
+// A page can be sent only so much in one message; base64 makes a part a third bigger again.
+const ATTACH_CHUNK_BYTES = 3 * 1024 * 1024;
+const ITEM_ROLES: ReadonlySet<string> = new Set(['link', 'button', 'menuitem', 'tab', 'option', 'clickable']);
+
 const DEFAULT_UNAVAILABLE =
   'Eya has lost her connection to your browser. Make sure the browser is open with the Eya Browser Bridge extension turned on (or ask Eya to "connect my browser").';
 
-export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl, BrowserCapture {
+export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl, BrowserCapture, BrowserItemLister, BrowserFileAttach {
   private readonly environment: BrowserEnvironment;
   private readonly unavailableMessage: string;
   private readonly browserName: BrowserName | undefined;
@@ -266,6 +276,57 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
       if (reply.performed.ok) return this.okResult(state, reply);
       if (reply.performed.reason === 'stale_element' && attempt === 0) continue;
       return this.failureResult(reply);
+    }
+  }
+
+  /** What can be clicked on the page right now, for Eya's own code to choose from (a chat list, say). Not shown to the model. */
+  async listItems(): Promise<PageItem[]> {
+    const { state } = await this.look();
+    return state.elements
+      .filter((e) => e.hidden !== true && e.name !== '' && ITEM_ROLES.has(e.role))
+      .map((e) => ({ name: e.name, ...(e.primary !== undefined ? { primary: e.primary } : {}), role: e.role, ...(e.region !== undefined ? { region: e.region } : {}) }));
+  }
+
+  /**
+   * Hands a file to the open page's own file picker, in parts. The page then shows its own preview and waits — nothing is
+   * sent by this. Reasons it cannot: no picker is on the page yet (the app's attach menu has to be opened first), the
+   * picker does not take this kind of file, or the extension is from before this existed.
+   */
+  async attachFile(request: AttachFileRequest): Promise<AttachFileResult> {
+    const id = randomUUID().replace(/-/g, '').slice(0, 16);
+    let tabId: number | null = null;
+    const step = async (args: Record<string, unknown>): Promise<ActionReply> =>
+      parseReply(await this.call('attach_file', { ...args, id, ...(tabId !== null ? { tabId } : {}) }, 90_000));
+    try {
+      // Is there a file picker at all? Asked first, so a big file is not sent across just to be turned away.
+      const probe = await step({ phase: 'probe' });
+      if (!probe.performed.ok) {
+        return { ok: false, reason: probe.performed.reason === 'no_file_input' ? 'no_file_input' : 'failed', message: probe.performed.detail ?? 'The page has no file picker.' };
+      }
+      tabId = probe.tabId;
+      const begin = await step({ phase: 'begin', name: request.name, mime: request.mime, size: request.size });
+      if (!begin.performed.ok) return { ok: false, reason: 'failed', message: begin.performed.detail ?? 'The page would not start taking the file.' };
+      tabId = begin.tabId;
+      for (let offset = 0; offset < request.size; offset += ATTACH_CHUNK_BYTES) {
+        const bytes = await request.read(offset, Math.min(ATTACH_CHUNK_BYTES, request.size - offset));
+        const part = await step({ phase: 'chunk', data: bytes.toString('base64') });
+        if (!part.performed.ok) return { ok: false, reason: 'failed', message: part.performed.detail ?? 'The page stopped taking the file part-way.' };
+      }
+      const done = await step({ phase: 'commit', prefer: request.prefer ?? 'auto' });
+      const snapshot = this.snapshot(done.state);
+      if (done.performed.ok) return { ok: true, snapshot };
+      const reason = done.performed.reason === 'no_file_input' || done.performed.reason === 'type_not_accepted' ? done.performed.reason : 'failed';
+      return { ok: false, reason, message: done.performed.detail ?? 'The page would not take the file.', snapshot };
+    } catch (err) {
+      if (err instanceof BridgeError && err.code === 'extension_error' && /unknown request/i.test(err.message)) {
+        return {
+          ok: false,
+          reason: 'failed',
+          message:
+            'The Eya extension in this browser is from before it could attach files. Ask the user to reload it once: open the browser\'s extensions page and click the circular reload arrow on "Eya Browser Bridge".',
+        };
+      }
+      throw err;
     }
   }
 

@@ -40,6 +40,8 @@ export interface PageElement {
   /** A password / card / one-time-code field: Eya neither reads nor types into it. */
   readonly sensitive?: boolean;
   readonly region?: string;
+  /** For a list row (a chat, a search result): its first line, which is what a person calls it. `name` is the row's whole text. */
+  readonly primary?: string;
   readonly inViewport: boolean;
   /** A link inside a menu that is closed until opened or hovered. It is a real link of the page, just not showing yet. */
   readonly hidden?: boolean;
@@ -65,6 +67,8 @@ export interface PageState {
   readonly notes: readonly string[];
   /** A browser-internal page extensions may not read. */
   readonly restricted: boolean;
+  /** Delivery marks beside sent messages ("sent", "delivered", "pending", "failed to send"…) — only those words, never a message. */
+  readonly statuses?: readonly string[];
 }
 
 const str = (v: unknown, max = 500): string => (typeof v === 'string' ? v.slice(0, max) : '');
@@ -90,6 +94,7 @@ function normalizeElement(raw: unknown): PageElement | null {
     ...(r['disabled'] === true ? { disabled: true } : {}),
     ...(r['sensitive'] === true ? { sensitive: true } : {}),
     ...(typeof r['region'] === 'string' ? { region: r['region'].slice(0, 12) } : {}),
+    ...(typeof r['primary'] === 'string' && r['primary'] !== '' ? { primary: r['primary'].slice(0, 80) } : {}),
     inViewport: r['inViewport'] === true,
     ...(r['hidden'] === true ? { hidden: true } : {}),
     ...(typeof r['menu'] === 'string' && r['menu'] !== '' ? { menu: r['menu'].slice(0, 40) } : {}),
@@ -139,6 +144,7 @@ export function normalizePageState(raw: unknown): PageState {
     loading: r['loading'] === true,
     notes: strList(r['notes'], 8, 200),
     restricted: r['restricted'] === true,
+    statuses: strList(r['statuses'], 6, 24),
   };
 }
 
@@ -302,6 +308,7 @@ export function stateToSnapshot(state: PageState, extras: SnapshotOptions = {}):
     scroll: state.scroll,
     ...(state.challenge !== null ? { challenge: state.challenge } : {}),
     notes: state.notes,
+    ...(state.statuses !== undefined && state.statuses.length > 0 ? { messageStatus: state.statuses } : {}),
     ...(extras.environment !== undefined ? { environment: extras.environment } : {}),
     navigation: navLinks,
     ...(sameNav ? { navigationSameAsPrevious: navLinks.length } : {}),

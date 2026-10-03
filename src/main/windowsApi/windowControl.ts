@@ -195,8 +195,17 @@ export function parseActResult(stdout: string): ActResult {
 
 export type ScriptRunner = (script: string) => Promise<string>;
 
+// PowerShell answers in the console's old code page unless told otherwise, which turns any non-Latin character in a window title
+// (a Telugu or Hindi document name, a zero-width space in a browser's title) into "?".
+const UTF8_OUTPUT = '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;';
+
 const runPowerShell: ScriptRunner = async (script) => {
-  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { windowsHide: true, timeout: 20_000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `${UTF8_OUTPUT}${script}`], {
+    windowsHide: true,
+    timeout: 20_000,
+    maxBuffer: 4 * 1024 * 1024,
+    encoding: 'utf8',
+  });
   return stdout;
 };
 

@@ -5,13 +5,18 @@ import type { BrowserWorldTracker } from '@main/chrome/browserWorld';
 import type { BrowserName } from '@main/chrome/protocol';
 import type {
   ActOnPageResult,
+  AttachFileRequest,
+  AttachFileResult,
   BrowserAutomationService,
   BrowserCapture,
+  BrowserFileAttach,
+  BrowserItemLister,
   BrowserTabControl,
   ClickGate,
   FillOptions,
   FindOnPageResult,
   OpenWebsiteOptions,
+  PageItem,
   ReadPageResult,
   ScreenshotImage,
   ScrollDirection,
@@ -157,7 +162,7 @@ function needsReload(browsers: readonly BrowserName[]): BrowserUnavailableError 
  *   - notices when the user changed something themselves, and says so instead of carrying on from a stale picture;
  *   - can wait, then carry on by itself, while the user signs in or completes a check.
  */
-export class BrowserSessionManager implements BrowserAutomationService, BrowserTabControl, BrowserCapture {
+export class BrowserSessionManager implements BrowserAutomationService, BrowserTabControl, BrowserCapture, BrowserItemLister, BrowserFileAttach {
   private pinned: Pinned = null;
   private readonly services = new Map<BrowserName, UserBrowser>();
   private readonly lastActionAt = new Map<BrowserName, number>();
@@ -315,7 +320,35 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     };
   }
 
-  private async resolveForOpen(url: string): Promise<{ browser: BrowserName; startedBrowser: boolean; via?: string }> {
+  /** The user said which browser ("open it in Edge"): that one — started or woken if need be, never quietly swapped for another. */
+  private async resolveNamed(url: string, want: BrowserName): Promise<{ browser: BrowserName; startedBrowser: boolean }> {
+    if (this.deps.bridge.isConnected(want)) {
+      log.info('browser chosen', { browser: want, reason: 'the user named it' });
+      return { browser: want, startedBrowser: false };
+    }
+    if (this.deps.bridge.waitingToPair().includes(want)) throw this.blockedError([want]);
+    const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
+    if (!installed.includes(want) && !running.includes(want)) {
+      throw new BrowserUnavailableError(`${NAME[want]} could not be found on this PC, so the page was not opened there. Nothing was opened in any other browser.`, { why: 'no_browser' });
+    }
+    if (running.includes(want)) {
+      if (await this.deps.bridge.waitForConnection(want, this.deps.runningWaitMs ?? 8000)) return { browser: want, startedBrowser: false };
+      if (this.deps.bridge.waitingToPair().includes(want)) throw this.blockedError([want]);
+    }
+    if (!(await this.deps.launcher.launch(want, url))) {
+      throw new BrowserUnavailableError(`Could not start the user's ${NAME[want]}.`, { why: 'no_browser' });
+    }
+    if (await this.deps.bridge.waitForConnection(want, this.deps.launchWaitMs ?? 25_000)) return { browser: want, startedBrowser: !running.includes(want) };
+    if (this.deps.bridge.waitingToPair().includes(want)) throw this.blockedError([want]);
+    throw new BrowserUnavailableError(
+      `I opened the page in the user's ${NAME[want]}, but the Eya Browser Bridge extension in it did not answer — it is probably not installed there or is switched off. ` +
+        'Tell the user: open the extensions page of that browser, turn on Developer mode, and make sure "Eya Browser Bridge" is added and switched on. Nothing was opened in any other browser.',
+      { why: 'no_extension' },
+    );
+  }
+
+  private async resolveForOpen(url: string, want?: BrowserName): Promise<{ browser: BrowserName; startedBrowser: boolean; via?: string }> {
+    if (want !== undefined) return this.resolveNamed(url, want);
     const sel = this.selectFor(url);
     if (sel !== null) {
       log.info('browser chosen', { browser: sel.browser, reason: sel.reason });
@@ -415,10 +448,10 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     let startedBrowser = false;
     let via: string | undefined;
     try {
-      ({ browser, startedBrowser, via } = await this.resolveForOpen(url));
+      ({ browser, startedBrowser, via } = await this.resolveForOpen(url, options?.browser));
     } catch (err) {
       // Legacy opt-in mode only: the older behaviour of using Eya's own window when the user's browser is not there.
-      if (this.deps.mode === 'auto' && err instanceof BrowserUnavailableError) {
+      if (this.deps.mode === 'auto' && options?.browser === undefined && err instanceof BrowserUnavailableError) {
         const snapshot = await this.deps.isolated.openWebsite(url);
         this.pinned = { kind: 'isolated' };
         return this.stamp(snapshot, 'eya_browser', [EYA_WINDOW_NOTE]);
@@ -447,6 +480,28 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
 
   async findOnPage(query: string): Promise<FindOnPageResult> {
     return this.forWork().svc.findOnPage(query);
+  }
+
+  /** What is clickable on the page, for Eya's own code (never the model) to choose from — refused for a chat app that is switched off. */
+  async listItems(): Promise<PageItem[]> {
+    const { svc, browser } = this.forWork();
+    const lister = svc as Partial<BrowserItemLister>;
+    if (typeof lister.listItems !== 'function') throw new Error('Listing the page is not available in this browser window.');
+    const items = await lister.listItems();
+    if (browser !== undefined) this.touched(browser);
+    return items;
+  }
+
+  /** Hands a file to the open page's own file picker (nothing is sent). Only through the user's own browser, and never into a chat app that is switched off. */
+  async attachFile(request: AttachFileRequest): Promise<AttachFileResult> {
+    const { svc, env, browser } = this.forWork();
+    const target = svc as Partial<BrowserFileAttach>;
+    if (typeof target.attachFile !== 'function') {
+      return { ok: false, reason: 'failed', message: "Attaching a file is only possible in the user's own browser (Chrome or Edge with the Eya extension), not in this window." };
+    }
+    const result = await target.attachFile(request);
+    if (browser !== undefined) this.touched(browser);
+    return result.snapshot !== undefined ? { ...result, snapshot: this.stamp(result.snapshot, env) } : result;
   }
 
   async readPage(offset?: number): Promise<ReadPageResult> {

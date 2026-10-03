@@ -12,6 +12,7 @@ import type { ChromeConnector } from '@main/chrome/chromeConnector';
 import { permissionRequest } from '@main/permissions/PermissionManager';
 import { verifyFileExists } from '../verify';
 import type { Tool, ToolArgs, ToolResult } from '../types';
+import type { ChatSendGate } from './chatTools';
 
 /**
  * Real, DOM-aware website navigation: open a page, see what is actually on
@@ -41,6 +42,8 @@ export interface BrowserToolOptions {
   readonly session?: BrowserSessionTools;
   /** Whether a downloaded file is really on disk. Defaults to checking the filesystem. */
   readonly verifyDownload?: (path: string) => Promise<boolean>;
+  /** Present with Communication Access: a send in a chat app says who it goes to, and asks, before it happens. */
+  readonly chatGate?: ChatSendGate;
 }
 
 function stringArg(args: ToolArgs, key: string): string | undefined {
@@ -232,6 +235,11 @@ export function createBrowserTools(
       args: {
         url: { type: 'string', required: true, description: 'The exact http(s) address to open, e.g. from a web_search result.' },
         isolated: { type: 'boolean', description: "Open in Eya's own separate, signed-out window instead of the user's browser. Only after the user agreed to that." },
+        browser: {
+          type: 'string',
+          enum: ['chrome', 'edge'],
+          description: 'Open it in this browser. Set it whenever the user names one ("in Edge", "on Chrome") — that is where they are signed in. Leave it out otherwise.',
+        },
       },
     },
     async execute(args): Promise<ToolResult> {
@@ -240,7 +248,13 @@ export function createBrowserTools(
       const url = parseWebUrl(raw);
       if (url === null) return { ok: false, summary: 'bad url', error: 'That is not a normal http or https address.' };
       try {
-        const snapshot = await service.openWebsite(url.href, args['isolated'] === true ? { isolated: true } : undefined);
+        const requested = args['browser'];
+        const named: 'chrome' | 'edge' | undefined = requested === 'chrome' ? 'chrome' : requested === 'edge' ? 'edge' : undefined;
+        const opening = {
+          ...(args['isolated'] === true ? { isolated: true } : {}),
+          ...(named !== undefined ? { browser: named } : {}),
+        };
+        const snapshot = await service.openWebsite(url.href, Object.keys(opening).length > 0 ? opening : undefined);
         return applyChallenge(
           {
             ok: true,
@@ -364,7 +378,7 @@ export function createBrowserTools(
   };
 
   /** Turns a service's non-success outcome into the tool result the model should see. */
-  function declined(result: Exclude<ActOnPageResult, { ok: true }>, action: string, text: string, verbForError: string): ToolResult {
+  function declined(result: Exclude<ActOnPageResult, { ok: true }>, action: string, text: string, verbForError: string, question?: string): ToolResult {
     const idle = { stateChanged: false, navigated: false };
     switch (result.reason) {
       case 'not_found':
@@ -375,6 +389,15 @@ export function createBrowserTools(
           data: currentPageData(action, text, idle, result.snapshot),
         };
       case 'needs_confirmation':
+        if (question !== undefined) {
+          // A send in a chat app: the question names who it goes to, and is put to the user word for word.
+          return {
+            ok: false,
+            summary: 'needs confirmation',
+            error: `Nothing was clicked. Ask the user exactly this and wait for a clear yes: "${question}" Only if they clearly say yes, call click_on_page again with confirm: true.`,
+            data: { ...currentPageData(action, text, idle, result.snapshot), ...permissionRequest('browser_sensitive_click', result.target, question), question },
+          };
+        }
         return {
           ok: false,
           summary: 'needs confirmation',
@@ -448,7 +471,20 @@ export function createBrowserTools(
         return loopResult('clicking', text, 'click', before, guard.maxRepeats);
       }
       const context = contextOf(before);
-      const gate: ClickGate | undefined = args['confirm'] === true ? undefined : (t) => sensitiveActionReason(t.name, t.role, context);
+      let question: string | undefined;
+      let sendCovered = false; // this click is the send the user already said yes to
+      const gate: ClickGate | undefined =
+        args['confirm'] === true
+          ? undefined
+          : (t) => {
+              const chat = options.chatGate?.forClick(before, t) ?? null;
+              if (chat !== null) {
+                if (chat.reason !== null) question = chat.question;
+                else sendCovered = true;
+                return chat.reason; // null: the user already agreed to exactly this send
+              }
+              return sensitiveActionReason(t.name, t.role, context);
+            };
       const record = () => {
         if (fingerprint !== null) guard.record(fingerprint, 'click', text);
       };
@@ -461,7 +497,8 @@ export function createBrowserTools(
       }
       // Asking the user is not an attempt that "went nowhere", so it does not count towards the loop limit.
       if (result.ok || (result.reason !== 'needs_confirmation' && result.reason !== 'needs_user')) record();
-      if (!result.ok) return declined(result, 'click', text, 'click');
+      if (!result.ok) return declined(result, 'click', text, 'click', question);
+      if (sendCovered) options.chatGate?.consumed(); // that yes is used up: the next send asks again
       return succeeded('click', text, `clicked "${text}"`, before, result);
     },
   };
@@ -499,7 +536,16 @@ export function createBrowserTools(
         return loopResult('filling in', label, 'fill', before, guard.maxRepeats);
       }
       if (submit && args['confirm'] !== true) {
-        const why = sensitiveSubmitReason(label);
+        const chat = options.chatGate?.forSubmit(before, label) ?? null;
+        if (chat !== null && chat.reason !== null) {
+          return {
+            ok: false,
+            summary: 'needs confirmation',
+            error: `Nothing was typed. Ask the user exactly this and wait for a clear yes: "${chat.question}" Only if they clearly say yes, call fill_on_page again with confirm: true.`,
+            data: { ...permissionRequest('browser_sensitive_click', label, chat.question), question: chat.question },
+          };
+        }
+        const why = chat !== null ? null : sensitiveSubmitReason(label);
         if (why !== null) {
           return {
             ok: false,
@@ -521,6 +567,7 @@ export function createBrowserTools(
       }
       if (result.ok || result.reason !== 'needs_user') record();
       if (!result.ok) return declined(result, 'fill', label, 'fill');
+      if (submit && options.chatGate?.forSubmit(before, label)?.reason === null) options.chatGate.consumed();
       return succeeded('fill', label, `filled "${label}"${submit ? ' and pressed Enter' : ''}`, before, result);
     },
   };

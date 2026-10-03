@@ -63,6 +63,11 @@ export type SensitiveAction =
   | 'list_windows'
   | 'window_control'
   | 'communication_access_status'
+  | 'find_chat'
+  | 'verify_sent'
+  | 'zip_folder'
+  | 'find_folder'
+  | 'send_file_to_chat'
   | 'browser_sensitive_click';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
@@ -132,6 +137,13 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   window_control: 'safe',
   // Read-only: whether the user's chat-app privacy switch is on. There is deliberately no action that changes it.
   communication_access_status: 'safe',
+  // Finding and opening a chat, and checking afterwards that something went, send nothing. Making a .zip of a folder adds a new file in the temp folder and removes nothing.
+  find_chat: 'safe',
+  verify_sent: 'safe',
+  zip_folder: 'safe',
+  find_folder: 'safe',
+  // Sending a file to someone: the question names the person and the file, and only a clear yes from the user lets it go.
+  send_file_to_chat: 'confirm',
   // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
   browser_sensitive_click: 'confirm',
 };
