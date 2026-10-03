@@ -62,6 +62,7 @@ export type SensitiveAction =
   | 'take_screenshot'
   | 'list_windows'
   | 'window_control'
+  | 'communication_access_status'
   | 'browser_sensitive_click';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
@@ -129,6 +130,8 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   // button, an app with unsaved work stays open and asks), and several matches are asked about, never guessed.
   list_windows: 'safe',
   window_control: 'safe',
+  // Read-only: whether the user's chat-app privacy switch is on. There is deliberately no action that changes it.
+  communication_access_status: 'safe',
   // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
   browser_sensitive_click: 'confirm',
 };

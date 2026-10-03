@@ -139,8 +139,8 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
     expect(bridge.connectedBrowsers()).toEqual(['chrome', 'edge']);
     const c = bridge.handshakeOf('chrome');
     const e = bridge.handshakeOf('edge');
-    expect(c).toMatchObject({ browser: 'chrome', protocolVersion: 2, extensionVersion: '0.3.0' });
-    expect(e).toMatchObject({ browser: 'edge', protocolVersion: 2, extensionVersion: '0.3.0' });
+    expect(c).toMatchObject({ browser: 'chrome', protocolVersion: 2, extensionVersion: '0.4.0' });
+    expect(e).toMatchObject({ browser: 'edge', protocolVersion: 2, extensionVersion: '0.4.0' });
     expect(c?.browserVersion).toMatch(/^\d+\./);
     expect(c?.capabilities).toEqual(expect.arrayContaining(['observe', 'click', 'scroll', 'events', 'close_tab']));
     expect(world.state('chrome')?.connected).toBe(true);

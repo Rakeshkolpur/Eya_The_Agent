@@ -37,7 +37,7 @@ describe('the browser extension manifest', () => {
   });
 
   it('ships every file it references', () => {
-    for (const rel of ['service-worker.js', 'bridge.js', 'events.js', 'tabs.js', 'actions.js', 'injected.js', 'options/options.html', 'options/options.js']) {
+    for (const rel of ['service-worker.js', 'bridge.js', 'events.js', 'tabs.js', 'actions.js', 'policy.js', 'injected.js', 'options/options.html', 'options/options.js']) {
       expect(existsSync(join(root, rel)), rel).toBe(true);
     }
     expect(existsSync(join(root, manifest['options_page'] as string))).toBe(true);
@@ -46,7 +46,7 @@ describe('the browser extension manifest', () => {
   it('only ever dials the loopback address and port the desktop side listens on', () => {
     const bridgeSource = readFileSync(join(root, 'bridge.js'), 'utf8');
     expect(bridgeSource).toContain(`ws://127.0.0.1:${BRIDGE_PORT}${BRIDGE_PATH}`);
-    for (const file of ['service-worker.js', 'bridge.js', 'events.js', 'tabs.js', 'actions.js', 'injected.js', 'options/options.js']) {
+    for (const file of ['service-worker.js', 'bridge.js', 'events.js', 'tabs.js', 'actions.js', 'policy.js', 'injected.js', 'options/options.js']) {
       const source = readFileSync(join(root, file), 'utf8');
       expect(source, file).not.toMatch(/fetch\(\s*['"`]https?:/);
       expect(source, file).not.toMatch(/XMLHttpRequest/);
@@ -64,7 +64,7 @@ describe('the browser extension manifest', () => {
 
   it('every request the desktop side can send is one the extension answers', () => {
     const worker = readFileSync(join(root, 'service-worker.js'), 'utf8');
-    for (const op of ['ping', 'list_tabs', 'focus_tab', 'focus_window', 'open_url', 'observe', 'click', 'fill', 'scroll', 'back', 'forward', 'reload', 'close_tab', 'search_page', 'screenshot']) {
+    for (const op of ['ping', 'list_tabs', 'focus_tab', 'focus_window', 'open_url', 'observe', 'click', 'fill', 'scroll', 'back', 'forward', 'reload', 'close_tab', 'search_page', 'screenshot', 'set_policy']) {
       expect(worker, op).toContain(`case '${op}'`);
     }
   });

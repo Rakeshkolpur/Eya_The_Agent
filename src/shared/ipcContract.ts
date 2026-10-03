@@ -25,6 +25,9 @@ export const IpcChannels = {
   ttsDone: 'eya:tts:done',
   ttsReady: 'eya:tts:ready',
   status: 'eya:status',
+  getCommunicationAccess: 'eya:comm:get',
+  setCommunicationAccess: 'eya:comm:set',
+  communicationAccessChanged: 'eya:comm:changed',
 } as const;
 
 export type IpcChannel = (typeof IpcChannels)[keyof typeof IpcChannels];
@@ -101,6 +104,19 @@ export interface StatusMessage {
   readonly ttsEngine: 'kokoro' | 'browser' | 'pending';
 }
 
+/** The Communication Access choice as the panel shows it. */
+export interface CommunicationAccessState {
+  /** The master switch: may Eya look at or use chat apps at all. OFF by default. */
+  readonly enabled: boolean;
+  readonly apps: readonly { readonly id: string; readonly name: string; readonly allowed: boolean }[];
+}
+
+/** What the panel can ask for: flip the master switch, and/or allow or exclude one app. */
+export interface CommunicationAccessChange {
+  readonly enabled?: boolean;
+  readonly app?: { readonly id: string; readonly allowed: boolean };
+}
+
 export interface EyaBridge {
   submit(request: AgentRequest): Promise<AgentResult>;
   submitAudio(request: AudioRequest): Promise<AgentResult>;
@@ -128,6 +144,10 @@ export interface EyaBridge {
   onTTSStop(cb: () => void): () => void;
   ttsDone(utteranceId: string): void;
   ttsReady(): void;
+  /** The privacy switch for chat apps (WhatsApp, Telegram, Instagram…). Only this panel can change it. */
+  getCommunicationAccess(): Promise<CommunicationAccessState>;
+  setCommunicationAccess(change: CommunicationAccessChange): Promise<CommunicationAccessState>;
+  onCommunicationAccessChanged(cb: (state: CommunicationAccessState) => void): () => void;
 }
 
 declare global {

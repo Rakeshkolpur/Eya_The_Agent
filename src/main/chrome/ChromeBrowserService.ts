@@ -16,7 +16,8 @@ import { decodeImageDataUrl } from '@main/browser/screenshotImage';
 import { redactUrl } from '@main/browser/redactUrl';
 import type { BrowserName } from './protocol';
 import { withExtras } from '@main/browser/pageSnapshot';
-import { BrowserUnavailableError } from '@main/browser/errors';
+import { BrowserUnavailableError, CommunicationAccessError } from '@main/browser/errors';
+import { appNameForHost } from '@main/privacy/communicationAccess';
 import type { ActionEffects, BrowserTabInfo, DownloadInfo } from '@main/browser/pageEffects';
 import { challengeMessage, isBlockingChallenge } from '@main/browser/challenges';
 import type { BrowserEnvironment, PageSnapshot } from '@main/browser/pageSnapshot';
@@ -127,6 +128,11 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
     } catch (err) {
       if (err instanceof BridgeError && (err.code === 'not_connected' || err.code === 'disconnected')) {
         throw new BrowserUnavailableError(this.unavailableMessage);
+      }
+      // The extension refused to touch a chat app's tab because Communication Access is off ("communication_access_off: <host>").
+      if (err instanceof BridgeError && err.code === 'extension_error') {
+        const refused = /communication_access_off:\s*([^\s]+)/.exec(err.message);
+        if (refused !== null) throw new CommunicationAccessError(appNameForHost(refused[1] as string));
       }
       throw err;
     }

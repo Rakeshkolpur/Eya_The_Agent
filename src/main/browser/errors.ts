@@ -22,3 +22,18 @@ export class BrowserUnavailableError extends Error {
     this.name = 'BrowserUnavailableError';
   }
 }
+
+/**
+ * Eya was about to look at, or act inside, a chat app (WhatsApp, Telegram, Instagram…) while the user has Communication
+ * Access switched off. A kind of "the browser is not available to you", so every tool already reports it the same way.
+ */
+export class CommunicationAccessError extends BrowserUnavailableError {
+  constructor(readonly app: string) {
+    super(
+      `${app} is a chat app and Communication Access is off, so Eya did not look at it or use it. Tell the user plainly that they can turn it on with the Chats switch in Eya's panel ` +
+        '(you cannot turn it on yourself). If they do not want that, leave it alone, and do not try another way to get at it.',
+      { why: 'communication_access_off' },
+    );
+    this.name = 'CommunicationAccessError';
+  }
+}

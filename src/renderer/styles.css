@@ -171,6 +171,60 @@ html, body {
   background: rgba(96, 214, 150, 0.22);
   border-color: rgba(96, 214, 150, 0.6);
 }
+/* Communication Access (the chat-app privacy switch). */
+.chats-pill {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  opacity: 0.7;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+.chats-pill:hover { opacity: 1; }
+.chats-pill.on {
+  opacity: 1;
+  color: #ffe9b8;
+  background: rgba(255, 190, 80, 0.2);
+  border-color: rgba(255, 190, 80, 0.6);
+}
+.comm-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.comm-title { font-weight: 700; letter-spacing: 0.02em; }
+.comm-explain { color: var(--text-dim); }
+.comm-foot { color: var(--text-dim); font-size: 11px; opacity: 0.85; }
+.comm-apps { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; }
+.comm-app { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.comm-actions { display: flex; gap: 8px; }
+.comm-on, .comm-off {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+}
+.comm-on { background: rgba(255, 190, 80, 0.25); border-color: rgba(255, 190, 80, 0.7); }
+.comm-on:hover, .comm-off:hover { background: rgba(255, 255, 255, 0.14); }
 @keyframes talkPulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(127, 178, 255, 0.5); }
   50%      { box-shadow: 0 0 0 5px rgba(127, 178, 255, 0); }

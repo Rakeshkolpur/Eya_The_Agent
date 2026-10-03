@@ -18,7 +18,9 @@ import type {
 } from './BrowserAutomationService';
 import { selectBrowser } from './browserSelection';
 import type { Selection } from './browserSelection';
-import { BrowserUnavailableError } from './errors';
+import { BrowserUnavailableError, CommunicationAccessError } from './errors';
+import type { CommunicationApp, CommunicationPolicy } from '@main/privacy/communicationAccess';
+import { communicationBlockedSnapshot } from '@main/privacy/redactSnapshot';
 import { pageFingerprint } from './loopGuard';
 import type { BrowserTabInfo } from './pageEffects';
 import { withExtras } from './pageSnapshot';
@@ -82,6 +84,8 @@ export interface SessionManagerDeps {
   readonly sleep?: (ms: number) => Promise<void>;
   readonly now?: () => number;
   readonly createService?: (link: BrowserLink, browser: BrowserName) => UserBrowser;
+  /** The Communication Access policy: chat apps are neither read nor acted in unless the user switched it on. */
+  readonly policy?: CommunicationPolicy;
 }
 
 export interface BrowserOverview {
@@ -157,6 +161,8 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
   private pinned: Pinned = null;
   private readonly services = new Map<BrowserName, UserBrowser>();
   private readonly lastActionAt = new Map<BrowserName, number>();
+  /** The address of the page Eya last handed back (used where there is no live tab list to ask, e.g. her own window). */
+  private lastSeenUrl: string | null = null;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly now: () => number;
 
@@ -192,8 +198,26 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     return s;
   }
 
+  /** The chat app this address belongs to, if Communication Access is OFF for it. */
+  private blockedApp(url: string | null | undefined): CommunicationApp | null {
+    return this.deps.policy?.blockedForUrl(url) ?? null;
+  }
+
+  /** Before acting on the current page: refuse if it is a chat app and Communication Access is off. */
+  private assertAllowedHere(browser: BrowserName | undefined): void {
+    const live = browser !== undefined ? this.deps.world.tabsOf(browser) : [];
+    const urls = live.length > 0 ? [live.find((t) => t.active)?.url] : [this.lastSeenUrl];
+    for (const url of urls) {
+      const app = this.blockedApp(url);
+      if (app !== null) throw new CommunicationAccessError(app.name);
+    }
+  }
+
   private stamp(snapshot: PageSnapshot, env: BrowserEnvironment, notes: readonly string[] = []): PageSnapshot {
-    return withExtras(snapshot, { environment: env, notes });
+    this.lastSeenUrl = snapshot.url;
+    // A chat page is never handed back: only that it is there.
+    const app = this.blockedApp(snapshot.url);
+    return withExtras(app === null ? snapshot : communicationBlockedSnapshot(snapshot, app.name), { environment: env, notes });
   }
 
   private stampResult(result: ActOnPageResult, env: BrowserEnvironment, notes: readonly string[] = []): ActOnPageResult {
@@ -342,8 +366,14 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     );
   }
 
-  /** Continuing a task: stay where it started. */
+  /** Continuing a task: stay where it started — and never act on a chat app while Communication Access is off. */
   private forWork(): { svc: BrowserAutomationService; env: BrowserEnvironment; browser?: BrowserName } {
+    const chosen = this.selectWork();
+    this.assertAllowedHere(chosen.browser);
+    return chosen;
+  }
+
+  private selectWork(): { svc: BrowserAutomationService; env: BrowserEnvironment; browser?: BrowserName } {
     const pinned = this.pinned;
     if (pinned?.kind === 'isolated') return { svc: this.deps.isolated, env: 'eya_browser' };
     if (pinned?.kind === 'user') {
@@ -480,7 +510,18 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
 
   async listTabs(browser?: BrowserName): Promise<BrowserTabInfo[]> {
     const lists = await Promise.all(this.browsersToQuery(browser).map((b) => this.service(b).listTabs()));
-    return lists.flat();
+    // A chat's own tab title can be a contact's name — even when Communication Access is on, the model needs only which app it is.
+    return lists.flat().map((t) => {
+      const app = this.deps.policy?.appForUrl(t.url) ?? null;
+      if (app === null) return t;
+      let origin = '';
+      try {
+        origin = new URL(t.url).origin;
+      } catch {
+        // keep it empty
+      }
+      return { ...t, title: app.name, url: origin };
+    });
   }
 
   private browserForTab(tabId: number, browser?: BrowserName): BrowserName {
@@ -519,7 +560,10 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     if (pinned?.kind === 'isolated' || (pinned === null && this.deps.mode === 'eya_browser')) {
       const own = this.deps.isolated as Partial<BrowserCapture>;
       if (typeof own.screenshot !== 'function') throw new Error('Screenshots are not available in this window.');
-      return own.screenshot();
+      const picture = await own.screenshot();
+      const blockedOwn = this.blockedApp(picture.url);
+      if (blockedOwn !== null) throw new CommunicationAccessError(blockedOwn.name);
+      return picture;
     }
     const connected = this.deps.bridge.connectedBrowsers();
     const active = this.deps.world.activeBrowser();
@@ -528,7 +572,11 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     if (browser === undefined) throw this.notConnectedError();
     const svc = this.service(browser) as Partial<BrowserCapture>;
     if (typeof svc.screenshot !== 'function') throw new Error('Screenshots are not available through this browser connection.');
+    const frontApp = this.blockedApp(this.deps.world.tabsOf(browser).find((t) => t.active)?.url);
+    if (frontApp !== null) throw new CommunicationAccessError(frontApp.name); // do not even take the picture
     const image = await svc.screenshot();
+    const takenApp = this.blockedApp(image.url);
+    if (takenApp !== null) throw new CommunicationAccessError(takenApp.name);
     log.info('screenshot taken', { browser, bytes: image.bytes.length });
     return { ...image, browser };
   }

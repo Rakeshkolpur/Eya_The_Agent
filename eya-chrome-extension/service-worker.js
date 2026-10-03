@@ -9,6 +9,7 @@
  * passwords or stored tokens, and it never talks to anything but Eya on this PC.
  */
 import { Bridge } from './bridge.js';
+import { setBlocked } from './policy.js';
 import { startEventForwarding } from './events.js';
 import { goBack, goForward, inject, observeTab, reloadTab, runAction } from './actions.js';
 import {
@@ -49,6 +50,7 @@ const CAPABILITIES = [
   'close_tab',
   'search_page',
   'screenshot',
+  'policy',
   'events',
   'downloads',
 ];
@@ -146,6 +148,10 @@ async function perform(op, args) {
 
     case 'screenshot':
       return screenshotTab(args.tabId);
+
+    case 'set_policy':
+      // Eya says which chat apps are NOT allowed right now (the user's Communication Access switch).
+      return { blockedRules: setBlocked(args.blocked) };
 
     case 'search_page': {
       // A background tab that closes again: searching never disturbs the tabs you are using.

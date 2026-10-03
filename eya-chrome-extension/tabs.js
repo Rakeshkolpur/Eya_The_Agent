@@ -8,6 +8,8 @@
  * the user already has open, and otherwise opens a new one.
  */
 
+import { CommunicationAccessOff, blockedHostFor, blockedHostForSync } from './policy.js';
+
 const EVENT_BUFFER = 30;
 const createdTabs = []; // { tabId, openerTabId, at }
 const tabUpdates = []; // { tabId, status, at }
@@ -113,12 +115,16 @@ export const eyaIsActing = () => eyaActions > 0;
 
 /** A tab as the desktop side sees it. The address has anything credential-like stripped. */
 export function wireTab(t) {
+  const address = t.url || t.pendingUrl || '';
+  const chatOff = blockedHostForSync(address) !== null;
   return {
     tabId: t.id,
     windowId: t.windowId,
-    title: (t.title ?? '').slice(0, 120),
+    // A chat app's tab title can be a contact's name, and its address can carry a phone number: neither is reported
+    // while Communication Access is off for it (the path stays, so the app is still recognised).
+    title: chatOff ? '' : (t.title ?? '').slice(0, 120),
     // A tab that is still loading has url '' (not undefined), so `??` would never reach pendingUrl: use `||`.
-    url: redactedUrl(t.url || t.pendingUrl || ''),
+    url: chatOff ? redactedUrl(address).split('?')[0] : redactedUrl(address),
     active: t.active === true,
     pinned: t.pinned === true,
     loading: t.status === 'loading',
@@ -254,7 +260,7 @@ export async function listTabs() {
     .slice(0, 40)
     .map((t) => ({
       ...wireTab(t),
-      title: (t.title ?? '').slice(0, 90),
+      title: wireTab(t).title.slice(0, 90),
       openedByEya: eya.includes(t.id),
       workingHere: t.id === taskId,
     }));
@@ -282,6 +288,8 @@ export async function screenshotTab(tabId) {
   if (!/^https?:/i.test(url)) {
     throw new Error('That is a browser page (not a website), and the browser does not let any extension take a picture of it.');
   }
+  const chatHost = await blockedHostFor(url);
+  if (chatHost !== null) throw new CommunicationAccessOff(chatHost); // not even a picture of a chat app
   if (!tab.active) await focusTab(tab.id); // a tab can only be photographed while it is the one showing
   let dataUrl;
   try {

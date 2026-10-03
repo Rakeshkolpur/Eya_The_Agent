@@ -23,7 +23,7 @@ Use Chrome *and* Edge? Add the extension to both, then say "connect my browser" 
 each browser separately, and both stay connected at the same time.
 
 **After updating Eya, reload the extension** (the circular arrow on its card). Each connection starts with a
-version check (protocol 2, extension 0.3.0); an older extension is refused with a plain message on the options
+version check (protocol 2, extension 0.4.0); an older extension is refused with a plain message on the options
 page asking you to reload it.
 
 The toolbar icon shows **ON** when Eya is connected. The extension's options page shows status.
@@ -48,6 +48,15 @@ Every action ends with a fresh look at the page so Eya works from what is really
 and hands it to Eya, who saves it on your Desktop. It uses the browser's own capture call under the access it already has — no new
 permission — touches nothing in the page, and cannot capture browser pages (`chrome://`, `edge://`) or private windows. Needs
 extension 0.3.0: reload the extension once after updating Eya.
+
+**Chat apps and Communication Access (extension 0.4.0):** whether Eya may look at or act in WhatsApp, Telegram, Instagram and similar
+chat sites is the user's choice, made with the **Chats** switch in Eya's panel. It starts **OFF**. A browser lets an extension read
+every site or none, so the extension cannot be given *less* access; instead it **declines to use** what it has: while the switch is off,
+a chat tab is never read, clicked in, typed into or photographed, and its title (which can be a contact's name) and any query in its
+address are never reported. Eya tells the extension which sites are off (`set_policy`, kept only in the browser's memory-only session
+storage, and re-sent whenever the switch changes); until she does, every chat site is treated as off. The list in `policy.js` is
+checked against Eya's by a test so the two cannot drift apart. Eya's own side enforces the same rule, so an older extension that does
+not know `set_policy` is still never used on a chat page while the switch is off.
 
 **What it tells Eya about the browser itself:** when it connects it says which browser and version it is, its
 extension version, what it can do, and which windows and tabs are open (address and title only; private windows

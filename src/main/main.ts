@@ -23,6 +23,11 @@ import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
 import { createBrowserTools } from '@main/tools/impl/browserTools';
 import { createScreenshotTool } from '@main/tools/impl/screenshotTool';
 import { createWindowTools } from '@main/tools/impl/windowTools';
+import { createCommunicationStatusTool } from '@main/tools/impl/communicationTools';
+import { CommunicationPolicy } from '@main/privacy/communicationAccess';
+import { CommunicationAccessStore } from '@main/privacy/communicationAccessStore';
+import { registerCommunicationAccessIpc } from '@main/privacy/communicationAccessIpc';
+import { startPolicySync } from '@main/privacy/policySync';
 import { createWindowControl } from '@main/windowsApi/windowControl';
 import { PlaywrightBrowserService } from '@main/browser/PlaywrightBrowserService';
 import { BrowserSessionManager, parseBrowserMode } from '@main/browser/BrowserSessionManager';
@@ -139,6 +144,12 @@ async function bootstrap(): Promise<void> {
       }
     }, 6000);
   });
+  // Communication Access: the user's privacy switch for chat apps (WhatsApp, Telegram, Instagram…). OFF unless they turn it on in
+  // Eya's panel; a missing or damaged settings file means OFF. The browser extension is kept in step with it.
+  const communicationStore = new CommunicationAccessStore(join(app.getPath('userData'), 'communication-access.json'));
+  communicationStore.load();
+  const communication = new CommunicationPolicy(() => communicationStore.get());
+  startPolicySync({ bridge: chromeBridge, blockRules: () => communication.blockRules(), onPolicyChange: (cb) => communicationStore.onChange(() => cb()) });
   const browserMode = parseBrowserMode(process.env['EYA_BROWSER_MODE']);
   const preferredEnv = (process.env['EYA_PREFERRED_BROWSER'] ?? '').toLowerCase();
   log.info('browser mode', { browserMode, ...(preferredEnv !== '' ? { preferred: preferredEnv } : {}) });
@@ -161,6 +172,7 @@ async function bootstrap(): Promise<void> {
     }),
     mode: browserMode,
     preferred: preferredEnv === 'chrome' || preferredEnv === 'edge' ? preferredEnv : null,
+    policy: communication,
   });
   const extensionFolder =
     [join(app.getAppPath(), 'eya-chrome-extension'), join(process.resourcesPath ?? '', 'eya-chrome-extension')].find((p) => existsSync(p)) ??
@@ -197,6 +209,8 @@ async function bootstrap(): Promise<void> {
     // Eya's own windows are never listed or touched.
     ownPids: () => [process.pid, ...app.getAppMetrics().map((m) => m.pid)],
     tabs: browserService,
+    // A chat app's window title can be a contact's name: the model is told which app it is, nothing more.
+    describeTitle: (w) => communication.appForWindow(w)?.name ?? w.title,
   })) {
     tools.register(tool);
   }
@@ -207,10 +221,12 @@ async function bootstrap(): Promise<void> {
   for (const tool of createBrowserTools(browserService, undefined, { tabs: browserService, connector: chromeConnector, session: browserService })) {
     tools.register(tool);
   }
+  tools.register(createCommunicationStatusTool(communication));
   tools.register(
     createScreenshotTool({
       capture: browserService,
       folders,
+      describeLabel: (title) => communication.appForWindow({ process: '', title })?.name ?? title,
       // The screen the mouse is on, or any application's window, through Electron's own capturer.
       screen: createScreenCapture({
         getSources: (options) => desktopCapturer.getSources(options),
@@ -248,13 +264,18 @@ async function bootstrap(): Promise<void> {
     composer,
     tts,
     context,
-    browserContext: () => browserWorld.summary(),
+    browserContext: () => [browserWorld.summary(), communication.summary()].filter((x) => x !== '').join('\n'),
     ...(ai !== undefined ? { ai } : {}),
     ...(gemini.hasKey() ? { gemini } : {}),
   });
   void permissions; void memory;
 
   registerLiveBridge({ gemini, tools });
+  registerCommunicationAccessIpc({
+    store: communicationStore,
+    policy: communication,
+    notify: (state) => getSender()?.send(IpcChannels.communicationAccessChanged, state),
+  });
 
   // On-device wake word ("hey Eya", heard as sound). Optional: if the native
   // model can't load on this machine, the renderer falls back to noticing the

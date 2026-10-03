@@ -95,7 +95,7 @@ describe.skipIf(!live || findBrowserExe(KIND) === undefined)('Eya Browser Bridge
 
   it('paired with the real extension in a real browser', () => {
     expect(bridge.isConnected(EXPECTED_BROWSER)).toBe(true);
-    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.3.0' });
+    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.4.0' });
     expect(secrets.hashes.get(EXPECTED_BROWSER)).toBeDefined();
   });
 

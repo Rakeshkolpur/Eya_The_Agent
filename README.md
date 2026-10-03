@@ -62,6 +62,9 @@ Windows-first AI desktop agent. Local-first where it can be, Gemini where it hel
 | `list_browser_tabs` / `switch_browser_tab` | Lists the tabs open in each connected browser (title, address and which browser; tab numbers repeat between browsers) and switches to one. |
 | `close_browser_tab` | Closes a tab Eya opened. A tab you opened yourself is refused until you have clearly said yes. |
 | `wait_for_user_in_browser` | After a sign-in, CAPTCHA or code prompt: waits (up to 30 s per call) while *you* deal with it, wakes as soon as you do something in the browser, and returns the page as it now is so the original task continues. |
+| `list_windows` | The application windows that are open right now, front one first (name, title, whether minimised or maximised). |
+| `window_control` | Minimise, maximise, restore, close or switch to an application window that is already open ("minimise Chrome", "switch to Word", "close Notepad"). It does the action, then **checks the window really reached that state** — it never says "done" for a request that merely went out — and says so plainly when a window was already that way. Closing is polite (like clicking the X): a window that asks "save changes?" stays open and is reported as such. If several windows match a close, it asks which. Eya never touches her own windows. "Switch to WhatsApp" focuses the window if there is one, otherwise the browser tab that is already open. |
+| `communication_access_status` | Reads whether Communication Access is on (see below). It only reads: there is **no** tool that turns it on. |
 
 ### Safety
 
@@ -274,6 +277,24 @@ Eya's own browser window starts signed out of everything, which is useless for "
 **Things found only by running it, and fixed:** the browser's own "Back" button skips pages that never received a real user gesture, which includes every page Eya reached with a script-made click, so `go_back` now uses the page's `history.back()`; a label wrapping a `<select>` swallowed every option into the field's name; and Edge disables an *unpacked* extension at its next restart when Developer mode is off (measured: enabled → disabled with reason `unsupportedDeveloperExtension`; with Developer mode on, it survives a hard kill and reconnects in about a second) — which is why the setup steps say to turn Developer mode on and leave it on.
 
 **Honest limits.** Chrome 137 and later ignore `--load-extension`, so there is no silent way to put the extension into your Chrome: it is the one-time "Load unpacked" click (the tests load it through Chrome's debugging protocol instead, and Chrome forgets a protocol-loaded extension at restart, whereas a real Load unpacked is remembered — that persistence I could only measure in Edge, where leaving Developer mode off made the browser disable the extension at its next restart; keep Developer mode on in Chrome too). Eya's clicks are script-made events, so a page that needs a *real* click to open a script popup (`window.open`), a file picker, fullscreen or the clipboard will not respond (pinned by a test so it's never forgotten; trusted clicks would need the `debugger` permission, which the extension declines). Controls inside another site's iframe can't be seen into. Browser-internal pages can't be read. Everything above ran against a temporary empty profile and local sites, plus read-only visits to a handful of real public sites through Eya's own window: **your own signed-in accounts, real MFA flows and the quirks of sites that sign you in have not been tested** — that needs your one-time install and a try.
+
+## Communication Access (chat apps are off until you switch them on)
+
+Eya can work inside chat apps and sites — WhatsApp, Telegram, Instagram, Messenger, Discord, Slack, Teams, Skype, Signal — but only
+if **you** allow it. The **Chats ON/OFF** pill in her panel opens the switch, with a plain explanation and a per-app list. It starts
+**OFF**, it is saved on this PC, it never turns itself on, and **Eya cannot turn it on** (no tool does; asking her in a chat, or a
+web page or message telling her to, changes nothing).
+
+- **While it is OFF** she does not read a chat page, click or type in one, take a picture of one, read its tab title (a contact's name)
+  or search contacts. Opening the chat for you is fine; what she gets back is only that it is open. This is enforced in two places:
+  in Eya, and in the browser extension (which declines to use its access for those sites — a browser lets an extension read every
+  site or none, so declining is the most it can do). E-mail is deliberately not a "chat app" here.
+- **When it is ON** (all apps, or all but the ones you untick) she works in them with the same general browser tools as anywhere else.
+  Even then, a chat's tab title and address reach the model only as the app's name, and the instructions tell her never to repeat
+  private messages or save them anywhere.
+- Nothing from a chat is stored by Eya: the only thing written to disk is the switch itself (`communication-access.json` in her data
+  folder). A damaged or unreadable file means OFF.
+- Turn it off at any time; it takes effect on her very next step, even in the middle of a task.
 
 ## Lock, restart and shutdown
 

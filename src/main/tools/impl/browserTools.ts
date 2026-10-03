@@ -1,7 +1,7 @@
 import { parseWebUrl } from './openTools';
 import type { ActOnPageResult, BrowserAutomationService, BrowserTabControl, ClickGate } from '@main/browser/BrowserAutomationService';
 import { challengeMessage, isBlockingChallenge } from '@main/browser/challenges';
-import { BrowserUnavailableError } from '@main/browser/errors';
+import { BrowserUnavailableError, CommunicationAccessError } from '@main/browser/errors';
 import { LoopGuard, pageFingerprint } from '@main/browser/loopGuard';
 import type { ActionEffects, DownloadInfo } from '@main/browser/pageEffects';
 import type { PageContext } from '@main/browser/sensitiveActions';
@@ -173,6 +173,10 @@ function applyChallenge(base: ToolResult, snapshot: PageSnapshot): ToolResult {
 }
 
 export function unavailable(err: BrowserUnavailableError): ToolResult {
+  if (err instanceof CommunicationAccessError) {
+    // Not "the browser is gone": a privacy switch is off. Say which app, and that nothing was looked at.
+    return { ok: false, summary: 'communication access is off', error: err.message, data: { communicationAccess: 'off', app: err.app, nothingWasRead: true } };
+  }
   return {
     ok: false,
     summary: err.detail.why === 'needs_reload' ? 'extension needs a reload' : 'browser not connected',

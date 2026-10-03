@@ -5,6 +5,7 @@
  * assumes an action worked; she is always given the page as it is after it.
  */
 import { eyaPageAgent } from './injected.js';
+import { CommunicationAccessOff, blockedHostFor, blockedHostForSync } from './policy.js';
 import {
   awaitDownload,
   newTabsSince,
@@ -17,8 +18,11 @@ import {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Run one command inside a tab's page. */
+/** Run one command inside a tab's page — never in a chat app's, unless the user has allowed Eya into that app. */
 export async function inject(tabId, command, params = {}) {
+  const tab = await chrome.tabs.get(tabId);
+  const chatHost = await blockedHostFor(tab.url || tab.pendingUrl || '');
+  if (chatHost !== null) throw new CommunicationAccessOff(chatHost);
   const [res] = await chrome.scripting.executeScript({
     target: { tabId },
     func: eyaPageAgent,
@@ -31,7 +35,8 @@ async function restrictedState(tabId, why) {
   const tab = await chrome.tabs.get(tabId);
   return {
     url: tab.url || tab.pendingUrl || '',
-    title: tab.title ?? '',
+    // A chat app's title can be a contact's name.
+    title: blockedHostForSync(tab.url || tab.pendingUrl || '') !== null ? '' : (tab.title ?? ''),
     epoch: 0,
     headings: [],
     elements: [],
@@ -53,6 +58,9 @@ export async function observeTab(tabId) {
   try {
     state = await inject(tabId, 'observe', {});
   } catch (err) {
+    if (err instanceof CommunicationAccessOff) {
+      return restrictedState(tabId, 'This is a chat app and Communication Access is off, so Eya did not look at anything in it.');
+    }
     const message = String(err?.message ?? err);
     if (/cannot access|extensions gallery|cannot be scripted|chrome-error|showing error page|not allowed/i.test(message)) {
       return restrictedState(tabId, 'This is a browser-internal or protected page that extensions are not allowed to read.');

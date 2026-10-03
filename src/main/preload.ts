@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import { IpcChannels } from '../shared/ipcContract';
 import type {
   AudioRequest,
+  CommunicationAccessState,
   EyaBridge,
   StatusMessage,
   TTSChunkMessage,
@@ -79,6 +80,13 @@ const bridge: EyaBridge = {
   },
   ttsDone: (utteranceId: string) => ipcRenderer.send(IpcChannels.ttsDone, utteranceId),
   ttsReady: () => ipcRenderer.send(IpcChannels.ttsReady),
+  getCommunicationAccess: () => ipcRenderer.invoke(IpcChannels.getCommunicationAccess),
+  setCommunicationAccess: (change) => ipcRenderer.invoke(IpcChannels.setCommunicationAccess, change),
+  onCommunicationAccessChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: CommunicationAccessState) => cb(s);
+    ipcRenderer.on(IpcChannels.communicationAccessChanged, listener);
+    return () => ipcRenderer.off(IpcChannels.communicationAccessChanged, listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('eya', bridge);

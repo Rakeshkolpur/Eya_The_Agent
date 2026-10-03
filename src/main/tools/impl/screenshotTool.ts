@@ -33,6 +33,8 @@ export interface ScreenshotToolDeps {
   readonly writeNew?: (path: string, bytes: Buffer) => Promise<void>;
   readonly now?: () => Date;
   readonly verify?: (path: string) => Promise<Verification>;
+  /** How a window's title is named in the file and to the model (the privacy layer shows a chat app by its name, not a contact's). */
+  readonly describeLabel?: (title: string) => string;
 }
 
 type Target = 'screen' | 'window' | 'page';
@@ -94,15 +96,16 @@ export function createScreenshotTool(deps: ScreenshotToolDeps): Tool {
       };
     }
     const shot = target === 'window' ? await (deps.screen as ScreenCapture).window(windowTitle ?? '') : await (deps.screen as ScreenCapture).screen();
+    const label = shot.kind === 'window' && deps.describeLabel !== undefined ? deps.describeLabel(shot.label) : shot.label;
     return {
       bytes: shot.bytes,
       mime: shot.mime,
       width: shot.width,
       height: shot.height,
-      defaultName: (when) => labelledScreenshotName(shot.label, when, shot.mime),
+      defaultName: (when) => labelledScreenshotName(label, when, shot.mime),
       about:
         shot.kind === 'window'
-          ? { target: 'window', window: shot.label, capturedPart: 'that application window' }
+          ? { target: 'window', window: label, capturedPart: 'that application window' }
           : { target: 'screen', capturedPart: 'everything showing on the screen the user is on' },
     };
   }

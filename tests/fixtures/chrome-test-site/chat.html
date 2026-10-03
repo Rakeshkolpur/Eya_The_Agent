@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MockChat Web</title>
+<style>
+  body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
+  #side { width: 300px; border-right: 1px solid #ccc; display: flex; flex-direction: column; }
+  #list { overflow: auto; flex: 1; margin: 0; padding: 0; list-style: none; }
+  .chat-item { padding: 10px 12px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .chat-item .name { font-weight: bold; }
+  .chat-item .last { color: #666; font-size: 12px; }
+  #main { flex: 1; display: flex; flex-direction: column; }
+  #head { padding: 10px 14px; border-bottom: 1px solid #ccc; min-height: 40px; }
+  #thread { flex: 1; overflow: auto; padding: 10px 14px; }
+  .bubble { background: #dcf8c6; border-radius: 6px; padding: 6px 10px; margin: 6px 0; max-width: 60%; }
+  .bubble.in { background: #fff; border: 1px solid #ddd; }
+  .tick { color: #4a90d9; font-size: 12px; margin-left: 8px; }
+  .tick.failed { color: #c00; }
+  #composer { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #ccc; }
+  #composer textarea { flex: 1; }
+  #attach-menu { position: absolute; bottom: 56px; left: 316px; background: #fff; border: 1px solid #aaa; padding: 6px; }
+  #preview { position: fixed; inset: 20% 25%; background: #fff; border: 2px solid #333; padding: 16px; z-index: 5; }
+</style>
+</head>
+<body>
+<div id="side">
+  <input id="search" type="text" aria-label="Search or start new chat" placeholder="Search or start new chat">
+  <ul id="list"></ul>
+</div>
+<div id="main">
+  <div id="head"><h2 id="chat-title">Select a chat</h2><div id="chat-sub"></div></div>
+  <div id="thread" role="log" aria-label="Message list"></div>
+  <div id="composer" hidden>
+    <button id="attach" aria-label="Attach" aria-haspopup="menu">Attach</button>
+    <textarea id="msg" aria-label="Type a message" placeholder="Type a message"></textarea>
+    <button id="send">Send</button>
+  </div>
+</div>
+<div id="attach-menu" role="menu" hidden>
+  <button role="menuitem" id="pick-doc">Document</button>
+  <button role="menuitem" id="pick-photo">Photos &amp; videos</button>
+</div>
+<div id="preview" role="dialog" aria-label="Send file" hidden>
+  <h3>Send file</h3>
+  <div id="preview-file"></div>
+  <input id="caption" type="text" aria-label="Add a caption" placeholder="Add a caption">
+  <button id="preview-send">Send</button>
+  <button id="preview-cancel">Cancel</button>
+</div>
+<div id="fileholder"></div>
+
+<script>
+  // The people the mock account knows. Numbers are deliberately similar, so that matching can be tested for ambiguity.
+  const CHATS = [
+    { id: 1, name: 'Rahul Sharma', phone: '+91 98765 00432', last: 'See you tomorrow' },
+    { id: 2, name: 'Rahul Verma', phone: '+91 91234 55987', last: 'ok' },
+    { id: 3, name: 'Priya Singh', phone: '+91 99887 70432', last: 'Thanks!' },
+    { id: 4, name: 'Mum', phone: '+91 90000 11111', last: 'Call me' },
+    { id: 5, name: 'Amit Kumar', phone: '+91 98111 22333', last: 'Done' },
+    { id: 6, name: 'Dr. Meera Iyer', phone: '+91 97000 45678', last: 'Report attached' },
+  ];
+  const THREADS = new Map(CHATS.map((c) => [c.id, [{ from: 'them', text: c.last }]]));
+  let current = null;
+  window.__sent = []; // what the "server" accepted — read by the tests, never by Eya
+
+  const $ = (id) => document.getElementById(id);
+
+  function renderList(filter) {
+    const f = (filter || '').trim().toLowerCase();
+    $('list').innerHTML = '';
+    for (const c of CHATS) {
+      if (f && !(c.name.toLowerCase().includes(f) || c.phone.replace(/\D/g, '').includes(f.replace(/\D/g, '') || '@@'))) continue;
+      const li = document.createElement('li');
+      li.className = 'chat-item';
+      li.setAttribute('role', 'listitem');
+      li.tabIndex = 0;
+      li.dataset.id = String(c.id);
+      li.innerHTML = '<div class="name"></div><div class="last"></div>';
+      li.querySelector('.name').textContent = c.name;
+      li.querySelector('.last').textContent = c.last;
+      li.addEventListener('click', () => openChat(c.id));
+      $('list').appendChild(li);
+    }
+  }
+
+  function renderThread() {
+    const t = $('thread');
+    t.innerHTML = '';
+    for (const m of THREADS.get(current) || []) {
+      const b = document.createElement('div');
+      b.className = 'bubble' + (m.from === 'them' ? ' in' : '');
+      const text = document.createElement('span');
+      text.textContent = m.file ? 'File: ' + m.file + (m.text ? ' — ' + m.text : '') : m.text;
+      b.appendChild(text);
+      if (m.from === 'me') {
+        const tick = document.createElement('span');
+        tick.className = 'tick' + (m.status === 'failed' ? ' failed' : '');
+        tick.setAttribute('aria-label', m.status === 'sent' ? 'Sent' : m.status === 'failed' ? 'Failed to send' : 'Sending');
+        tick.textContent = m.status === 'sent' ? '✓ Sent' : m.status === 'failed' ? '⚠ Failed to send' : '🕓 Sending';
+        b.appendChild(tick);
+      }
+      t.appendChild(b);
+    }
+    t.scrollTop = t.scrollHeight;
+  }
+
+  function openChat(id) {
+    current = id;
+    const c = CHATS.find((x) => x.id === id);
+    $('chat-title').textContent = c.name;
+    $('chat-sub').textContent = c.phone;
+    $('composer').hidden = false;
+    document.title = c.name + ' - MockChat Web';
+    renderThread();
+  }
+
+  function deliver(message, failing) {
+    THREADS.get(current).push(message);
+    renderThread();
+    setTimeout(() => {
+      message.status = failing ? 'failed' : 'sent';
+      if (!failing) window.__sent.push({ chat: current, text: message.text || '', file: message.file || null });
+      renderThread();
+    }, 450);
+  }
+
+  $('search').addEventListener('input', (e) => renderList(e.target.value));
+
+  $('send').addEventListener('click', () => {
+    const text = $('msg').value.trim();
+    if (!text || current === null) return;
+    $('msg').value = '';
+    deliver({ from: 'me', text, status: 'sending' }, false);
+  });
+
+  $('attach').addEventListener('click', () => {
+    const menu = $('attach-menu');
+    menu.hidden = !menu.hidden;
+    // Like the real apps: the hidden file inputs only exist once the menu has been opened.
+    if (!menu.hidden && !$('doc-input')) {
+      const doc = document.createElement('input');
+      doc.type = 'file';
+      doc.id = 'doc-input';
+      doc.hidden = true;
+      doc.addEventListener('change', () => {
+        const f = doc.files && doc.files[0];
+        if (!f) return;
+        $('preview-file').textContent = f.name;
+        $('preview').hidden = false;
+        $('attach-menu').hidden = true;
+        window.__picked = { name: f.name, size: f.size, type: f.type };
+      });
+      $('fileholder').appendChild(doc);
+    }
+  });
+  $('pick-doc').addEventListener('click', () => { const d = $('doc-input'); if (d) d.click(); });
+
+  $('preview-send').addEventListener('click', () => {
+    const name = $('preview-file').textContent;
+    const caption = $('caption').value.trim();
+    $('preview').hidden = true;
+    $('caption').value = '';
+    deliver({ from: 'me', file: name, text: caption, status: 'sending' }, /fail/i.test(name));
+  });
+  $('preview-cancel').addEventListener('click', () => { $('preview').hidden = true; });
+
+  renderList('');
+</script>
+</body>
+</html>

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { OrbState, AgentResult } from '../shared/types';
-import type { StatusMessage } from '../shared/ipcContract';
+import type { CommunicationAccessState, StatusMessage } from '../shared/ipcContract';
 import { ACK_WORKING, DEFAULT_VOICE, VOICE_OPTIONS } from '../shared/constants';
 import { initRendererTTS, setTTSMuted, setTTSVoice, speakPreview, stopSpeaking } from './tts';
 import { createLiveListener } from './liveListener';
@@ -108,6 +108,16 @@ export function OrbApp(): JSX.Element {
   const [voiceName, setVoiceName] = useState<string>(readVoiceName);
   const [sttState, setSttState] = useState<SttState>('idle');
   const [talk, setTalk] = useState<'off' | 'connecting' | 'on'>('off');
+  // Communication Access: the user's switch for whether Eya may look at or use chat apps. OFF until they turn it on here.
+  const [comm, setComm] = useState<CommunicationAccessState | null>(null);
+  const [commOpen, setCommOpen] = useState(false);
+  useEffect(() => {
+    void window.eya.getCommunicationAccess().then(setComm).catch(() => undefined);
+    return window.eya.onCommunicationAccessChanged(setComm);
+  }, []);
+  const changeComm = useCallback((change: Parameters<typeof window.eya.setCommunicationAccess>[0]) => {
+    void window.eya.setCommunicationAccess(change).then(setComm).catch(() => undefined);
+  }, []);
   const voiceNameRef = useRef(voiceName);
   voiceNameRef.current = voiceName;
   const micSink = useRef<((chunk: Float32Array, sampleRate: number) => void) | null>(null);
@@ -557,8 +567,59 @@ export function OrbApp(): JSX.Element {
             >
               Interrupt
             </button>
+            <button
+              type="button"
+              className={`chats-pill ${comm?.enabled === true ? 'on' : ''}`}
+              onClick={() => setCommOpen((v) => !v)}
+              title={comm?.enabled === true ? 'Eya may use the chat apps you allowed. Click to review or turn off.' : 'Eya does not look at chat apps. Click to read what turning this on allows.'}
+              aria-expanded={commOpen}
+            >
+              Chats {comm?.enabled === true ? 'ON' : 'OFF'}
+            </button>
             <span className="ai-badge">{aiStatusLine}</span>
           </div>
+          {commOpen && comm !== null && (
+            <div className="comm-panel" role="region" aria-label="Communication Access">
+              <div className="comm-title">Communication Access: {comm.enabled ? 'ON' : 'OFF'}</div>
+              <div className="comm-explain">
+                Allows Eya to read and interact with communication apps and websites such as WhatsApp, Telegram and Instagram, so she can find chats and contacts and send
+                files or messages when you ask. It is off unless you turn it on, and you can turn it off at any time.
+              </div>
+              {comm.enabled ? (
+                <>
+                  <div className="comm-apps">
+                    {comm.apps.map((a) => (
+                      <label key={a.id} className="comm-app">
+                        <input type="checkbox" checked={a.allowed} onChange={(e) => changeComm({ app: { id: a.id, allowed: e.target.checked } })} />
+                        {a.name}
+                      </label>
+                    ))}
+                  </div>
+                  <div className="comm-actions">
+                    <button type="button" className="comm-off" onClick={() => changeComm({ enabled: false })}>
+                      Turn off
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="comm-actions">
+                  <button
+                    type="button"
+                    className="comm-on"
+                    onClick={() => {
+                      changeComm({ enabled: true });
+                    }}
+                  >
+                    I understand, turn on
+                  </button>
+                  <button type="button" className="comm-off" onClick={() => setCommOpen(false)}>
+                    Not now
+                  </button>
+                </div>
+              )}
+              <div className="comm-foot">Eya looks only at what a task needs, keeps no copy of your chats, and never sees your passwords.</div>
+            </div>
+          )}
           <div className="transcript">
             {transcript || (listening ? 'Listening. Just say a command.' : 'Type a command.')}
           </div>

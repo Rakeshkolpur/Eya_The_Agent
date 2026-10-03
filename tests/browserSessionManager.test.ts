@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { BrowserSessionManager, parseBrowserMode } from '../src/main/browser/BrowserSessionManager';
 import type { BrowserLauncher, BrowserMode, ManagedBridge, UserBrowser } from '../src/main/browser/BrowserSessionManager';
 import type { BrowserAutomationService, BrowserCapture, ScreenshotImage } from '../src/main/browser/BrowserAutomationService';
-import { BrowserUnavailableError } from '../src/main/browser/errors';
+import { BrowserUnavailableError, CommunicationAccessError } from '../src/main/browser/errors';
+import { COMMUNICATION_OFF, CommunicationPolicy } from '../src/main/privacy/communicationAccess';
+import type { CommunicationSettings } from '../src/main/privacy/communicationAccess';
 import type { PageSnapshot } from '../src/main/browser/pageSnapshot';
 import type { BridgeInfo } from '../src/main/chrome/ChromeBridge';
 import { BrowserWorldTracker } from '../src/main/chrome/browserWorld';
@@ -84,6 +86,10 @@ function rig(
     withLookup?: boolean;
     launchOk?: boolean;
     sleep?: (ms: number) => Promise<void>;
+    /** The Communication Access policy (chat apps are only touched when the user switched it on). */
+    policy?: CommunicationPolicy;
+    /** The address the picture itself reports once taken. */
+    shotUrl?: string;
   } = {},
 ): Rig {
   const calls: string[] = [];
@@ -97,7 +103,7 @@ function rig(
   const world = new BrowserWorldTracker(() => clock.now);
   const inspectQueue = new Map<BrowserName, PageSnapshot[]>();
 
-  const shot = (environment: 'your_browser' | 'eya_browser', browser?: BrowserName): ScreenshotImage => ({ bytes: Buffer.from('png'), mime: 'image/png', url: 'https://x.example/', title: browser ?? 'eya', environment, ...(browser !== undefined ? { browser } : {}) });
+  const shot = (environment: 'your_browser' | 'eya_browser', browser?: BrowserName): ScreenshotImage => ({ bytes: Buffer.from('png'), mime: 'image/png', url: opts.shotUrl ?? 'https://x.example/', title: browser ?? 'eya', environment, ...(browser !== undefined ? { browser } : {}) });
 
   const userService = (browser: BrowserName): UserBrowser & BrowserCapture => ({
     openWebsite: async (url) => (calls.push(`${browser}:open:${url}`), snap(`${browser} page`, { url })),
@@ -163,6 +169,7 @@ function rig(
     sleep: opts.sleep ?? (async (ms) => void (clock.now += ms)),
     now: () => clock.now,
     createService: (_link, browser) => userService(browser),
+    ...(opts.policy !== undefined ? { policy: opts.policy } : {}),
   });
 
   return {
@@ -687,5 +694,150 @@ describe('taking a screenshot of the page that is open', () => {
       createService: () => ({ close: async () => undefined }) as unknown as UserBrowser,
     });
     await expect(bare.screenshot()).rejects.toThrow(/not available/);
+  });
+});
+
+describe('Communication Access: chat apps are neither read nor acted in unless the user switched it on', () => {
+  const WA = 'https://web.whatsapp.com/';
+  const ON: CommunicationSettings = { enabled: true, apps: {} };
+  const policyOf = (s: CommunicationSettings) => new CommunicationPolicy(() => s);
+
+  /** A task already in Chrome, with the chat in front. */
+  async function inChat(policy: CommunicationPolicy, opts: { shotUrl?: string } = {}) {
+    const r = rig({ connected: ['chrome'], policy, ...(opts.shotUrl !== undefined ? { shotUrl: opts.shotUrl } : {}) });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
+    await r.manager.openWebsite('https://x.example/'); // pins the task to Chrome
+    r.setTabs('chrome', [{ tabId: 1, url: WA, active: true, title: 'Rahul Sharma' }], true);
+    r.inspectQueue.set('chrome', [snap('chat', { url: WA, title: 'Rahul Sharma', buttons: ['Send'] })]);
+    return r;
+  }
+
+  async function refused(p: Promise<unknown>): Promise<CommunicationAccessError> {
+    try {
+      await p;
+    } catch (e) {
+      expect(e).toBeInstanceOf(CommunicationAccessError);
+      expect(e).toBeInstanceOf(BrowserUnavailableError); // so every existing catch site still handles it
+      return e as CommunicationAccessError;
+    }
+    throw new Error('expected it to be refused');
+  }
+
+  it('OFF: nothing is read, clicked or typed in a chat, and the page is never even asked', async () => {
+    const r = await inChat(policyOf(COMMUNICATION_OFF));
+    r.calls.length = 0;
+    const err = await refused(r.manager.inspectPage());
+    expect(err.app).toBe('WhatsApp');
+    expect(err.detail.why).toBe('communication_access_off');
+    await refused(r.manager.findOnPage('Rahul'));
+    await refused(r.manager.readPage());
+    await refused(r.manager.clickOnPage('Send'));
+    await refused(r.manager.fillOnPage('Type a message', 'hello'));
+    await refused(r.manager.scroll('down'));
+    await refused(r.manager.goBack());
+    await refused(r.manager.reload());
+    await refused(r.manager.waitForUserChange(50));
+    expect(r.calls).toEqual([]); // not one call reached the browser
+  });
+
+  it('OFF: opening the chat for the user is fine, but what comes back is only that it is open', async () => {
+    const r = rig({ connected: ['chrome'], policy: policyOf(COMMUNICATION_OFF) });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
+    const s = await r.manager.openWebsite(WA);
+    expect(s.url).toBe('https://web.whatsapp.com');
+    expect(s.title).toBe('WhatsApp');
+    expect(s.buttons).toEqual([]);
+    expect(s.links).toEqual([]);
+    expect(s.inputs).toEqual([]);
+    expect(s.notes?.join(' ')).toMatch(/Communication Access is OFF/i);
+  });
+
+  it('OFF: a page that turns out to be a chat after a click is redacted, and the next step is refused', async () => {
+    const r = rig({ connected: ['chrome'], policy: policyOf(COMMUNICATION_OFF) });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
+    await r.manager.openWebsite('https://x.example/');
+    const svc = (r.manager as unknown as { service(b: BrowserName): UserBrowser }).service('chrome');
+    svc.clickOnPage = async () => ({ ok: true as const, snapshot: snap('chat', { url: WA, title: 'Rahul Sharma', buttons: ['Call'] }) });
+    const result = await r.manager.clickOnPage('Open WhatsApp');
+    expect(result.snapshot.title).toBe('WhatsApp');
+    expect(result.snapshot.buttons).toEqual([]);
+    r.setTabs('chrome', [{ tabId: 1, url: WA, active: true }], true);
+    await refused(r.manager.inspectPage());
+  });
+
+  it('OFF: the list of tabs says which app it is, never the contact name or the conversation address', async () => {
+    const r = await inChat(policyOf(COMMUNICATION_OFF));
+    r.setTabs('chrome', [{ tabId: 1, url: `${WA}send?phone=919876543210`, active: true, title: '(2) Rahul Sharma' }, { tabId: 2, url: 'https://news.example/a', title: 'Headlines' }], true);
+    const tabs = await r.manager.listTabs();
+    expect(tabs.find((t) => t.tabId === 1)).toMatchObject({ title: 'WhatsApp', url: 'https://web.whatsapp.com' });
+    expect(JSON.stringify(tabs)).not.toMatch(/Rahul|919876543210/);
+    expect(tabs.find((t) => t.tabId === 2)).toMatchObject({ title: 'Headlines', url: 'https://news.example/a' });
+  });
+
+  it('ON: the tab list still shows only the app (a contact name is private even when access is on)', async () => {
+    const r = await inChat(policyOf(ON));
+    r.setTabs('chrome', [{ tabId: 1, url: `${WA}send?phone=919876543210`, active: true, title: '(2) Rahul Sharma' }], true);
+    const tabs = await r.manager.listTabs();
+    expect(JSON.stringify(tabs)).not.toMatch(/Rahul|919876543210/);
+  });
+
+  it('ON: the chat is read and acted in like any other page', async () => {
+    const r = await inChat(policyOf(ON));
+    r.calls.length = 0;
+    const s = await r.manager.inspectPage();
+    expect(s.title).toBe('Rahul Sharma');
+    await r.manager.clickOnPage('Send');
+    expect(r.calls).toEqual(['chrome:inspect', 'chrome:click:Send']);
+  });
+
+  it('turning it OFF mid-task takes effect on the very next step', async () => {
+    let current: CommunicationSettings = ON;
+    const r = await inChat(new CommunicationPolicy(() => current));
+    await r.manager.inspectPage();
+    current = COMMUNICATION_OFF;
+    r.calls.length = 0;
+    await refused(r.manager.clickOnPage('Send'));
+    expect(r.calls).toEqual([]);
+  });
+
+  it('only an excluded app is refused when the master switch is on', async () => {
+    const r = rig({ connected: ['chrome'], policy: policyOf({ enabled: true, apps: { instagram: false } }) });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
+    await r.manager.openWebsite('https://x.example/');
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://www.instagram.com/direct/inbox/', active: true }], true);
+    expect((await refused(r.manager.inspectPage())).app).toBe('Instagram');
+    r.setTabs('chrome', [{ tabId: 1, url: WA, active: true }], true);
+    await expect(r.manager.inspectPage()).resolves.toBeDefined();
+  });
+
+  it('other sites are never affected, whatever the setting', async () => {
+    const r = rig({ connected: ['chrome'], policy: policyOf(COMMUNICATION_OFF) });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://tshc.gov.in/', active: true }], true);
+    await r.manager.openWebsite('https://tshc.gov.in/');
+    await expect(r.manager.inspectPage()).resolves.toBeDefined();
+    await expect(r.manager.screenshot()).resolves.toBeDefined();
+  });
+
+  it('OFF: no picture is taken of a chat (no request is even made), and one that turns out to be a chat is dropped', async () => {
+    const r = await inChat(policyOf(COMMUNICATION_OFF));
+    r.calls.length = 0;
+    await refused(r.manager.screenshot());
+    expect(r.calls).toEqual([]);
+
+    const late = rig({ connected: ['chrome'], policy: policyOf(COMMUNICATION_OFF), shotUrl: WA });
+    late.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/', active: true }], true); // looked harmless when asked
+    await refused(late.manager.screenshot());
+  });
+
+  it('ON: the picture is taken', async () => {
+    const r = await inChat(policyOf(ON), { shotUrl: WA });
+    await expect(r.manager.screenshot()).resolves.toMatchObject({ browser: 'chrome' });
+  });
+
+  it('without a policy at all (older callers) nothing changes', async () => {
+    const r = rig({ connected: ['chrome'] });
+    r.setTabs('chrome', [{ tabId: 1, url: WA, active: true }], true);
+    await r.manager.openWebsite(WA);
+    await expect(r.manager.inspectPage()).resolves.toBeDefined();
   });
 });
