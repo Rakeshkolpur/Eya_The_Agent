@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { app, clipboard, desktopCapturer, ipcMain, screen, session, shell } from 'electron';
+import { app, clipboard, desktopCapturer, ipcMain, nativeImage, screen, session, shell } from 'electron';
 import { createScreenCapture } from '@main/screen/screenCapture';
 import { queryWindowSize } from '@main/screen/windowSize';
 import { OrbWindow } from '@main/windows/OrbWindow';
@@ -26,6 +26,8 @@ import { createWindowTools } from '@main/tools/impl/windowTools';
 import { createCommunicationStatusTool } from '@main/tools/impl/communicationTools';
 import { createChatSendGate, createChatTools } from '@main/tools/impl/chatTools';
 import { createArchiveTools } from '@main/tools/impl/archiveTools';
+import { createScreenTools } from '@main/tools/impl/screenTools';
+import { createUiAutomation } from '@main/screen/uiAutomation';
 import { ChatSession } from '@main/chat/chatSession';
 import { CommunicationPolicy } from '@main/privacy/communicationAccess';
 import { CommunicationAccessStore } from '@main/privacy/communicationAccessStore';
@@ -211,9 +213,17 @@ async function bootstrap(): Promise<void> {
   for (const tool of createFileOpsTools(folders)) tools.register(tool);
   for (const tool of createClipboardTools(clipboard)) tools.register(tool);
   tools.register(closeFileTool);
+  const windowControl = createWindowControl();
+  // The screen the mouse is on, or any application's window, through Electron's own capturer.
+  const screenCapture = createScreenCapture({
+    getSources: (options) => desktopCapturer.getSources(options),
+    cursorDisplay: () => screen.getDisplayNearestPoint(screen.getCursorScreenPoint()),
+    // The capturer enlarges a window's picture to whatever size it is asked for, so ask Windows for the window's real size first.
+    windowSize: (sourceId) => queryWindowSize(sourceId),
+  });
   // Real control of other applications' windows (list, minimise, maximise, restore, close, switch), checked from Windows itself.
   for (const tool of createWindowTools({
-    control: createWindowControl(),
+    control: windowControl,
     // Eya's own windows are never listed or touched.
     ownPids: () => [process.pid, ...app.getAppMetrics().map((m) => m.pid)],
     tabs: browserService,
@@ -244,15 +254,28 @@ async function bootstrap(): Promise<void> {
       capture: browserService,
       folders,
       describeLabel: (title) => communication.appForWindow({ process: '', title })?.name ?? title,
-      // The screen the mouse is on, or any application's window, through Electron's own capturer.
-      screen: createScreenCapture({
-        getSources: (options) => desktopCapturer.getSources(options),
-        cursorDisplay: () => screen.getDisplayNearestPoint(screen.getCursorScreenPoint()),
-        // The capturer enlarges a window's picture to whatever size it is asked for, so ask Windows for the window's real size first.
-        windowSize: (sourceId) => queryWindowSize(sourceId),
-      }),
+      screen: screenCapture,
     }),
   );
+  // Eya's eyes and hands on the screen: look (asked first), list a window's parts, click one, check what changed.
+  for (const tool of createScreenTools({
+    control: windowControl,
+    ui: createUiAutomation(),
+    screen: screenCapture,
+    ...(gemini.hasKey() ? { brain: gemini } : {}),
+    policy: communication,
+    ownPids: () => [process.pid, ...app.getAppMetrics().map((m) => m.pid)],
+    // A picture is shrunk before it is sent to be read.
+    prepareImage: (png) => {
+      const image = nativeImage.createFromBuffer(png);
+      const { width, height } = image.getSize();
+      const longest = Math.max(width, height);
+      const scaled = longest > 1600 ? image.resize({ width: Math.round((width * 1600) / longest), height: Math.round((height * 1600) / longest), quality: 'good' }) : image;
+      return { bytes: scaled.toJPEG(82), mime: 'image/jpeg' };
+    },
+  })) {
+    tools.register(tool);
+  }
 
   const window = orb.create();
   const getSender = () => (window.isDestroyed() ? null : window.webContents);

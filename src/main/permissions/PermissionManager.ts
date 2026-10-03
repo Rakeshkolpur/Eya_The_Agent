@@ -67,6 +67,10 @@ export type SensitiveAction =
   | 'verify_sent'
   | 'zip_folder'
   | 'find_folder'
+  | 'describe_screen'
+  | 'screen_elements'
+  | 'screen_click'
+  | 'screen_sensitive_click'
   | 'send_file_to_chat'
   | 'browser_sensitive_click';
 
@@ -142,6 +146,12 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   verify_sent: 'safe',
   zip_folder: 'safe',
   find_folder: 'safe',
+  // Looking at the screen: a picture read by Gemini (asked first, never saved), or Windows' own text description of one window. Clicking a control uses the
+  // control's own button-press where there is one; a control that would send, delete, buy or change something important asks first (screen_sensitive_click).
+  describe_screen: 'confirm',
+  screen_elements: 'safe',
+  screen_click: 'safe',
+  screen_sensitive_click: 'confirm',
   // Sending a file to someone: the question names the person and the file, and only a clear yes from the user lets it go.
   send_file_to_chat: 'confirm',
   // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
