@@ -31,12 +31,19 @@ export interface SecretStore {
   saveHash(browser: BrowserName, hash: string): void;
   /** Forget one browser's pairing, or all of them. */
   clear(browser?: BrowserName): void;
+  /**
+   * The key that lets an extension pair without the user asking: Eya leaves it in the extension's own folder, and only something
+   * that can read that folder has it. Stable across restarts, so the copy the extension reads stays valid. Absent = pairing is only
+   * ever done inside the window the user opens.
+   */
+  bootstrapToken?(): string;
 }
 
 interface StoredSecrets {
   hashes?: Partial<Record<BrowserName, string>>;
   /** Written by the first version, before Chrome and Edge were paired separately: valid for whichever browser uses it first. */
   secretHash?: string;
+  bootstrapToken?: string;
 }
 
 export class FileSecretStore implements SecretStore {
@@ -71,9 +78,20 @@ export class FileSecretStore implements SecretStore {
     this.write({ ...rest, hashes, ...(legacy !== undefined && legacy !== hash ? { secretHash: legacy } : {}) });
   }
 
+  bootstrapToken(): string {
+    const data = this.read();
+    if (typeof data.bootstrapToken === 'string' && data.bootstrapToken.length >= 32) return data.bootstrapToken;
+    const token = randomBytes(32).toString('hex');
+    this.write({ ...data, bootstrapToken: token });
+    return token;
+  }
+
   clear(browser?: BrowserName): void {
     if (browser === undefined) {
-      rmSync(this.path, { force: true });
+      // Every pairing goes; the folder key stays, because the copy in the extension's folder has to keep matching it.
+      const token = this.read().bootstrapToken;
+      if (typeof token === 'string' && token.length > 0) this.write({ bootstrapToken: token });
+      else rmSync(this.path, { force: true });
       return;
     }
     const data = this.read();
@@ -178,8 +196,10 @@ function sameHash(a: string, b: string): boolean {
  *   2. the first message must speak this protocol version and offer the
  *      capabilities Eya relies on (an out-of-date extension is refused with
  *      a plain reason, never half-used);
- *   3. it must present the pairing secret for ITS browser — handed out only
- *      inside a short window the user opens from Eya itself, once per browser;
+ *   3. it must present the pairing secret for ITS browser — handed out only to
+ *      an extension that presents the key Eya left in the extension's own
+ *      folder (so loading the extension is enough), or, failing that, inside a
+ *      short window the user opens from Eya itself, once per browser;
  *   4. one connection per browser; a newer authenticated one replaces the old.
  * There is no unauthenticated way to send a command.
  */
@@ -396,12 +416,22 @@ export class ChromeBridge {
     }
     const target = conn;
     const id = this.nextId++;
+    const asked = Date.now();
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new BridgeError('timeout', `Your browser did not answer "${op}" in time.`));
       }, timeoutMs ?? this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
-      this.pending.set(id, { ws: target.ws, resolve: (v) => resolve(v as T), reject, timer });
+      this.pending.set(id, {
+        ws: target.ws,
+        resolve: (v) => {
+          // EYA_BRIDGE_TIMING=1: what each browser operation costs (for finding what is slow; never logs what was on the page).
+          if (process.env['EYA_BRIDGE_TIMING'] === '1') log.info('bridge op', { op, ms: Date.now() - asked });
+          resolve(v as T);
+        },
+        reject,
+        timer,
+      });
       this.send(target.ws, { t: 'req', id, op, args });
     });
   }
@@ -502,18 +532,43 @@ export class ChromeBridge {
       this.send(ws, { t: 'ready', protocolVersion: PROTOCOL_VERSION });
       return true;
     }
+    if (hello.bootstrap !== undefined && this.isFolderKey(hello.bootstrap)) {
+      // The extension read the key Eya left in its own folder: no window and no request from the user needed. One extension per
+      // browser — a second profile of the same browser must not take the pairing away from the one that is connected.
+      const live = this.conns.get(browser);
+      if (live !== undefined && live.ws !== ws && live.ws.readyState === WebSocket.OPEN) {
+        this.knock(browser, hello);
+        this.refuse(ws, 'not_pairing', 4002);
+        return false;
+      }
+      this.pairWith(ws, hello, browser, 'automatically');
+      return true;
+    }
     if (!this.pairingOpen() || this.pairedThisWindow.has(browser)) {
       this.knock(browser, hello);
       this.refuse(ws, 'not_pairing', 4002);
       return false;
     }
+    this.pairedThisWindow.add(browser); // this browser is done for this window; the other one may still pair
+    this.pairWith(ws, hello, browser, 'in the pairing window');
+    return true;
+  }
+
+  private isFolderKey(presented: string): boolean {
+    const expected = this.options.secrets.bootstrapToken?.();
+    if (expected === undefined || expected.length < 32) return false;
+    const a = Buffer.from(presented, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  /** Mints this browser's own secret (only its hash is kept here), hands it over, and makes the connection active. */
+  private pairWith(ws: WebSocket, hello: WireHello, browser: BrowserName, how: string): void {
     const secret = randomBytes(32).toString('hex');
     this.options.secrets.saveHash(browser, hashSecret(secret));
-    this.pairedThisWindow.add(browser); // this browser is done for this window; the other one may still pair
     this.becomeActive(ws, hello, browser);
     this.send(ws, { t: 'paired', secret, protocolVersion: PROTOCOL_VERSION });
-    log.info('browser paired with Eya', { browser });
-    return true;
+    log.info('browser paired with Eya', { browser, how });
   }
 
   private becomeActive(ws: WebSocket, hello: WireHello, browser: BrowserName): void {

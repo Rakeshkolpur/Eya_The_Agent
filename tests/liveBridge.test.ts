@@ -56,6 +56,36 @@ describe('buildLiveConfig', () => {
   });
 });
 
+describe('what a live tool finds is remembered for what the user says next', () => {
+  const finder = (): ToolRegistry => {
+    const tools = new ToolRegistry();
+    tools.register({
+      schema: { name: 'find_file', description: 'find', args: { query: { type: 'string', required: true, description: 'q' } } },
+      async execute() {
+        return { ok: true, summary: 'found', data: { files: [{ path: 'C:\\Users\\Test\\Desktop\\Raju.docx', name: 'Raju.docx' }] } };
+      },
+    });
+    tools.register({ schema: { name: 'open_application', description: 'o', args: { name: { type: 'string', required: true, description: 'n' } } }, async execute() { return { ok: true, summary: 'ok' }; } });
+    return tools;
+  };
+
+  it('a file the model found goes into the conversation, so "send it to Uber" has something to send', async () => {
+    const pushed: Array<{ toolUsed?: string; refs: ReadonlyArray<{ kind: string; value: string }> }> = [];
+    await runLiveTool(finder(), { name: 'find_file', args: { query: 'raju' }, heard: 'find the raju file' }, undefined, undefined, undefined, undefined, { push: (t) => void pushed.push(t) });
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]?.toolUsed).toBe('find_file');
+    expect(pushed[0]?.refs[0]).toMatchObject({ kind: 'file', value: 'C:\\Users\\Test\\Desktop\\Raju.docx' });
+  });
+
+  it('a tool that found nothing to remember adds nothing, and a context that fails never breaks the tool', async () => {
+    const pushed: unknown[] = [];
+    await runLiveTool(finder(), { name: 'open_application', args: { name: 'notepad' } }, undefined, undefined, undefined, undefined, { push: (t) => void pushed.push(t) });
+    expect(pushed).toEqual([]);
+    const out = await runLiveTool(finder(), { name: 'find_file', args: { query: 'x' } }, undefined, undefined, undefined, undefined, { push: () => { throw new Error('boom'); } });
+    expect(JSON.parse(out.content).ok).toBe(true);
+  });
+});
+
 describe('runLiveTool', () => {
   it('runs the requested tool through the registry and returns its result as JSON', async () => {
     const { tools, calls } = registry();

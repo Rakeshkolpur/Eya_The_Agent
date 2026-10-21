@@ -3,6 +3,7 @@ import {
   LIVE_INPUT_MIME,
   buildAudio,
   buildSetup,
+  buildText,
   buildToolResponse,
   parseServerMessage,
 } from '../src/renderer/liveProtocol';
@@ -39,6 +40,12 @@ describe('client messages', () => {
     expect(msg.realtimeInput.audio.mimeType).toBe(LIVE_INPUT_MIME);
     expect(LIVE_INPUT_MIME).toBe('audio/pcm;rate=16000');
     expect(msg.realtimeInput.audio.data).toBe(b64([1, 2, 3, 4]));
+  });
+
+  it('gives the model a line of text from Eya and asks it to take its turn', () => {
+    const msg = JSON.parse(buildText('The step you started has finished.'));
+    expect(msg.clientContent.turns).toEqual([{ role: 'user', parts: [{ text: 'The step you started has finished.' }] }]);
+    expect(msg.clientContent.turnComplete).toBe(true);
   });
 
   it('answers tool calls by id and name', () => {

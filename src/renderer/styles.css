@@ -1,5 +1,5 @@
 :root {
-  --orb-size: 88px;
+  --orb-size: 64px;
   --panel-radius: 20px;
   --bg-glass: rgba(18, 20, 28, 0.68);
   --bg-orb: radial-gradient(circle at 30% 30%, #7fb2ff 0%, #4c6ef5 45%, #1c2450 100%);
@@ -31,11 +31,56 @@ html, body {
   height: 100%;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   justify-content: flex-end;
-  padding: 4px;
+  padding: 0;
   box-sizing: border-box;
 }
+/* The window is the bubble (80x80), the bubble with its quick panel, or the full app. The bubble keeps its corner of the window and
+   the panel opens away from the screen edge: above a low bubble, below a high one. */
+.app[data-mode='bubble'] { align-items: center; justify-content: center; }
+.app[data-anchor^='top'] { flex-direction: column-reverse; }
+.app[data-anchor$='left'] { align-items: flex-start; }
+.app[data-mode='app'] { align-items: stretch; justify-content: stretch; }
+.app[data-anchor^='bottom'] .panel { margin-bottom: 4px; }
+.app[data-anchor^='top'] .panel { margin-bottom: 0; margin-top: 4px; }
+.app[data-anchor$='right'] .panel { margin-right: 8px; }
+.app[data-anchor$='left'] .panel { margin-left: 8px; }
+
+.bubble-cell {
+  position: relative;
+  flex: 0 0 auto;
+  width: 80px;
+  height: 80px;
+  display: grid;
+  place-items: center;
+}
+/* Small signals on the bubble: Chats are ON (amber), Eya has a question (blue, pulsing). */
+.bubble-badge {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid #0b1228;
+  pointer-events: none;
+}
+.bubble-badge.chats { right: 11px; bottom: 11px; background: #ffbe50; }
+.bubble-badge.offer { left: 11px; top: 11px; background: #7fb2ff; box-shadow: var(--pulse-ring); }
+
+.panel-head { display: flex; align-items: center; gap: 4px; }
+.panel-title { font-weight: 700; letter-spacing: 0.04em; font-size: 13px; }
+.panel-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.panel-icon:hover { color: var(--text); background: rgba(255, 255, 255, 0.12); }
 
 .orb {
   width: var(--orb-size);
@@ -44,8 +89,8 @@ html, body {
   background: var(--bg-orb);
   box-shadow: var(--shadow), inset 0 0 20px rgba(255, 255, 255, 0.15);
   position: relative;
-  -webkit-app-region: drag;
   cursor: pointer;
+  touch-action: none; /* the bubble is dragged with the pointer: the page must not scroll or pan instead */
   transition: transform 200ms ease, filter 200ms ease;
 }
 
@@ -59,35 +104,21 @@ html, body {
   transition: opacity 200ms ease;
 }
 
-.orb[data-state='idle']       { animation: breathe 3.6s ease-in-out infinite; }
-.orb[data-state='listening']  { animation: pulse 1.2s ease-in-out infinite; filter: brightness(1.2) saturate(1.2); }
-.orb[data-state='thinking']   { animation: shimmer 1.4s ease-in-out infinite; }
-.orb[data-state='working']    { animation: spinGlow 1.4s linear infinite; }
-.orb[data-state='speaking']   { animation: wave 0.9s ease-in-out infinite; filter: brightness(1.3); }
-.orb[data-state='error']      { animation: none; filter: hue-rotate(180deg) saturate(1.3); }
+/* NOTHING HERE LOOPS IN CSS. This window is transparent, and on Windows each frame of such a window is costly to present: one looping
+   animation (even the idle "breathing") kept the graphics process at 65-130% of a core on a small laptop, and still at 65% when stepped
+   down to one change a second, because the animation clock still runs at full speed. Instead, while something is happening the page's
+   motion clock (motion.ts) sets --tri (a 0,1,2,1 pulse) a few times a second, and each state draws itself from it. Idle is perfectly
+   still; when the clock is not running --tri is unset and each state shows its resting look. */
+html[data-motion='on'] .orb, html[data-motion='on'] .big-orb { transition: none; }
+.orb[data-state='idle']       { }
+.orb[data-state='listening']  { transform: scale(calc(1 + var(--tri, 0) * 0.05)); filter: brightness(calc(1.15 + var(--tri, 0) * 0.12)) saturate(1.2); }
+.orb[data-state='thinking']   { filter: brightness(calc(1 + var(--tri, 0) * 0.15)) hue-rotate(calc(var(--tri, 0) * 8deg)); }
+.orb[data-state='working']    { box-shadow: var(--shadow), 0 0 calc(var(--tri, 0) * 15px) calc(var(--tri, 0) * 4px) rgba(127, 178, 255, 0.5); }
+.orb[data-state='speaking']   { transform: scaleY(calc(1 + var(--tri, 0) * 0.06)); filter: brightness(1.3); }
+.orb[data-state='error']      { filter: hue-rotate(180deg) saturate(1.3); }
 
 .orb[data-expanded='true']::after { opacity: 1; }
 
-@keyframes breathe {
-  0%, 100% { transform: scale(1); }
-  50%      { transform: scale(1.06); }
-}
-@keyframes pulse {
-  0%, 100% { transform: scale(1); filter: brightness(1.1); }
-  50%      { transform: scale(1.1); filter: brightness(1.4); }
-}
-@keyframes shimmer {
-  0%, 100% { filter: brightness(1) hue-rotate(0deg); }
-  50%      { filter: brightness(1.3) hue-rotate(15deg); }
-}
-@keyframes spinGlow {
-  0%   { box-shadow: var(--shadow), 0 0 0 0 rgba(127, 178, 255, 0.6); }
-  100% { box-shadow: var(--shadow), 0 0 30px 8px rgba(127, 178, 255, 0); }
-}
-@keyframes wave {
-  0%, 100% { transform: scaleY(1); }
-  50%      { transform: scaleY(1.12); }
-}
 
 .panel {
   width: calc(100% - 16px);
@@ -128,6 +159,39 @@ html, body {
   border-radius: 999px;
 }
 
+/* Which AI is answering: a badge that is also a picker (a select laid invisibly over it). */
+.ai-picker {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 100%;
+  line-height: 1.25;
+  border-radius: 12px;
+}
+.ai-picker.pickable { cursor: pointer; }
+.ai-badge-main { max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-badge-sub { font-size: 9px; opacity: 0.8; }
+.ai-picker-select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.ai-picker-select option, .ai-picker-select optgroup { color: #111; background: #fff; }
+.home-ai { margin-top: 6px; display: flex; justify-content: center; }
+.home-ai .ai-badge { font-size: 12px; padding: 4px 12px; }
+.home-ai .ai-badge-sub { font-size: 10.5px; }
+.home-ai .ai-badge-main { max-width: 320px; }
+.ai-picker.in-row { font-size: 12px; }
+.ai-picker.in-row .ai-badge-main { max-width: 320px; }
+
+/* The task that most needs a look, in the quick panel (a question waiting for the person's yes comes first). */
+.task-strip { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 6px 0; padding: 6px 10px; border-radius: 12px; background: rgba(127, 178, 255, 0.1); border: 1px solid rgba(127, 178, 255, 0.3); }
+.task-strip.needs_you { background: rgba(255, 159, 107, 0.12); border-color: rgba(255, 159, 107, 0.45); }
+.task-strip-text { min-width: 0; flex: 1; }
+.task-strip-title { font-size: 11.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-strip-note { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-strip.needs_you .task-strip-note { white-space: normal; color: var(--text); }
+.task-strip .task-actions { padding-left: 0; display: flex; gap: 6px; flex: 0 0 auto; }
+.task-strip .task-btn { font: inherit; font-size: 11px; padding: 2px 10px; color: var(--text); background: rgba(127, 178, 255, 0.16); border: 1px solid rgba(127, 178, 255, 0.45); border-radius: 999px; cursor: pointer; }
+.task-strip .task-btn.yes { background: rgba(95, 211, 141, 0.2); border-color: rgba(95, 211, 141, 0.55); font-weight: 600; }
+
 /* Start/stop a live spoken conversation. */
 .talk-pill {
   font-family: inherit;
@@ -148,7 +212,7 @@ html, body {
 .talk-pill.on {
   color: #d8e8ff;
   background: rgba(127, 178, 255, 0.34);
-  animation: talkPulse 1.6s ease-in-out infinite;
+  box-shadow: var(--pulse-ring);
 }
 .interrupt-pill {
   font-family: inherit;
@@ -225,10 +289,8 @@ html, body {
 }
 .comm-on { background: rgba(255, 190, 80, 0.25); border-color: rgba(255, 190, 80, 0.7); }
 .comm-on:hover, .comm-off:hover { background: rgba(255, 255, 255, 0.14); }
-@keyframes talkPulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(127, 178, 255, 0.5); }
-  50%      { box-shadow: 0 0 0 5px rgba(127, 178, 255, 0); }
-}
+/* The ring that pulses around a pill or badge that is asking for attention: from the same motion clock as everything else. */
+:root { --pulse-ring: 0 0 0 calc(var(--tri, 0) * 2.5px) rgba(127, 178, 255, calc(0.5 - var(--tri, 0) * 0.22)); }
 
 .transcript { white-space: pre-wrap; }
 
@@ -338,3 +400,188 @@ html, body {
 .voice-select option {
   color: #111;
 }
+
+/* Memory: routines Eya has learned and things she was asked to remember. */
+.status-row { flex-wrap: wrap; row-gap: 6px; }
+.memory-pill {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  opacity: 0.7;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+.memory-pill:hover { opacity: 1; }
+.memory-pill.open { opacity: 1; color: #d8e6ff; background: rgba(127, 178, 255, 0.2); border-color: rgba(127, 178, 255, 0.6); }
+.memory-pill.offer { opacity: 1; box-shadow: var(--pulse-ring); }
+
+.mem-offer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(127, 178, 255, 0.14);
+  border: 1px solid rgba(127, 178, 255, 0.5);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.mem-offer-actions { display: flex; gap: 8px; }
+
+.mem-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.mem-title { font-weight: 700; }
+.mem-tabs { display: flex; gap: 6px; }
+.mem-tab {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+.mem-tab.on { color: var(--text); background: rgba(127, 178, 255, 0.2); border-color: rgba(127, 178, 255, 0.55); }
+.mem-list { display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto; padding-right: 2px; }
+.mem-empty, .mem-foot { color: var(--text-dim); }
+.mem-foot { font-size: 11px; opacity: 0.85; }
+.mem-msg { color: #ffd9a0; }
+.mem-card { display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: 8px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); }
+.mem-card.off { opacity: 0.6; }
+.mem-card-head { display: flex; align-items: center; gap: 6px; }
+.mem-check { margin: 0; cursor: pointer; }
+.mem-name {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.mem-spacer { flex: 1; }
+.mem-stats { color: var(--text-dim); font-size: 11px; }
+.mem-detail { display: flex; flex-direction: column; gap: 4px; margin-top: 2px; }
+.mem-sub { color: var(--text-dim); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+.mem-phrases { display: flex; flex-wrap: wrap; gap: 4px; }
+.mem-phrase { display: inline-flex; align-items: center; gap: 2px; padding: 1px 4px 1px 8px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); }
+.mem-steps { margin: 0; padding-left: 18px; color: var(--text-dim); }
+.mem-add { display: flex; gap: 6px; align-items: center; }
+.mem-edit, .mem-kind {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  padding: 3px 6px;
+  outline: none;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.mem-kind { flex: 0 0 auto; }
+.mem-kind option { background: #1b1f2c; color: var(--text); }
+.mem-edit:focus { border-color: rgba(127, 178, 255, 0.7); }
+.mem-mini {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 6px;
+  padding: 2px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mem-mini:hover { background: rgba(255, 255, 255, 0.14); }
+.mem-mini.danger { background: rgba(255, 110, 110, 0.25); border-color: rgba(255, 110, 110, 0.7); }
+.mem-x { font-family: inherit; font-size: 14px; line-height: 1; color: var(--text-dim); background: transparent; border: none; cursor: pointer; padding: 0 3px; }
+.mem-x:hover { color: #ff9a9a; }
+.mem-row { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 8px; background: rgba(255, 255, 255, 0.06); }
+.mem-badge { flex: 0 0 auto; font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.12); }
+.mem-badge.preference { color: #cfe0ff; background: rgba(127, 178, 255, 0.2); }
+.mem-badge.fact { color: #d3ffe4; background: rgba(96, 214, 150, 0.2); }
+.mem-value { flex: 1; min-width: 0; font-family: inherit; font-size: 12px; color: var(--text); background: transparent; border: none; padding: 0; text-align: left; cursor: text; }
+.mem-value.static { cursor: default; overflow-wrap: anywhere; }
+.mem-sub-inline { color: var(--text-dim); font-size: 11px; }
+.mem-toggle { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--text); padding: 2px 2px 6px; cursor: pointer; }
+.mem-toggle input { margin-top: 2px; }
+
+/* When the screen leaves less room than the panel wants, the panel is trimmed and scrolls (the bubble never moves to make room). */
+.panel { flex: 0 1 auto; min-height: 0; overflow-y: auto; }
+.app { min-height: 0; }
+
+/* Screen sharing: the bubble shows it all the time, so it can never be on without being noticed. */
+.orb[data-sharing='true'] { box-shadow: var(--shadow), 0 0 0 3px rgba(74, 222, 128, 0.85), 0 0 18px 4px rgba(74, 222, 128, 0.45); }
+.bubble-badge.sharing { left: 11px; bottom: 11px; background: #4ade80; box-shadow: var(--pulse-ring); }
+.share-pill-btn {
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: var(--text);
+  opacity: 0.7;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.share-pill-btn:hover { opacity: 1; }
+.share-pill-btn.on { opacity: 1; color: #c9ffdc; background: rgba(74, 222, 128, 0.18); border-color: rgba(74, 222, 128, 0.6); }
+.screen-ask-btn {
+  flex-shrink: 0;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: #c9ffdc;
+  background: rgba(74, 222, 128, 0.14);
+  border: 1px solid rgba(74, 222, 128, 0.5);
+  border-radius: 10px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.screen-ask-btn:disabled { opacity: 0.45; cursor: default; }
+.screen-reply { font-size: 13px; line-height: 1.45; padding: 8px 10px; border-radius: 10px; background: rgba(74, 222, 128, 0.1); border: 1px solid rgba(74, 222, 128, 0.35); max-height: 140px; overflow-y: auto; -webkit-user-select: text; user-select: text; white-space: pre-wrap; }
+.screen-reply.error { color: #ffb3b3; background: rgba(255, 110, 110, 0.1); border-color: rgba(255, 110, 110, 0.4); }
+.share-consent.compact { display: flex; flex-direction: column; gap: 8px; padding: 10px; border-radius: 10px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.12); font-size: 12px; line-height: 1.4; }
+.share-consent.compact .share-consent-title { display: flex; align-items: center; gap: 6px; font-weight: 700; }
+.share-consent.compact .share-consent-list { margin: 0; padding-left: 16px; color: var(--text-dim); display: flex; flex-direction: column; gap: 3px; }
+.share-consent.compact .share-consent-actions { display: flex; gap: 8px; }
+.share-consent.compact .btn { padding: 5px 12px; font-size: 12px; font-weight: 600; font-family: inherit; color: var(--text); background: transparent; border: 1px solid rgba(255, 255, 255, 0.28); border-radius: 8px; cursor: pointer; }
+.share-consent.compact .btn.primary { background: rgba(74, 222, 128, 0.22); border-color: rgba(74, 222, 128, 0.65); }
+
+/* The input row wraps (the Ask screen and Voice buttons drop under the box) instead of pushing the panel wider. */
+.panel { overflow-x: hidden; }
+.panel .input { flex-wrap: wrap; }
+.panel .input input { flex: 1 1 150px; min-width: 120px; }

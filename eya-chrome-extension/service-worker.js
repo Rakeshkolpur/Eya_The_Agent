@@ -54,6 +54,12 @@ const CAPABILITIES = [
   'attach_file',
   'events',
   'downloads',
+  // Chat apps: a short settle and no download wait for click/fill/open_url when Eya says `quick` (see actions.js).
+  'quick_actions',
+  // Skipping skippable adverts on YouTube and closing its overlay adverts, once or watching (see injected.js `ads`).
+  'ads',
+  // Typing a one-time verification code the user said out loud into a one-time-code field (never a password or a card number).
+  'one_time_code',
 ];
 
 function browserName() {
@@ -105,12 +111,17 @@ async function perform(op, args) {
     case 'open_url': {
       assertWebUrl(args.url);
       const opened = await openUrl(args.url);
-      const result = await runAction(opened.tabId, async (tabId) => {
-        // tabs.update() can resolve a beat before the tab reports "loading"; let it start, then wait for it to finish.
-        await new Promise((r) => setTimeout(r, 120));
-        const loaded = await waitTabComplete(tabId, 20000);
-        return { ok: true, opened: true, loaded };
-      });
+      const result = await runAction(
+        opened.tabId,
+        async (tabId) => {
+          // tabs.update() can resolve a beat before the tab reports "loading"; let it start, then wait for it to finish.
+          await new Promise((r) => setTimeout(r, 120));
+          const loaded = await waitTabComplete(tabId, 20000);
+          return { ok: true, opened: true, loaded };
+        },
+        // Going back to a tab that is already open starts no download; a chat app (quick) never does.
+        { quick: args.quick === true, downloads: opened.reuse !== 'focused' },
+      );
       return { ...result, reuse: opened.reuse };
     }
 
@@ -120,20 +131,33 @@ async function perform(op, args) {
     }
 
     case 'click':
-      return runAction(args.tabId, (tabId) => inject(tabId, 'click', { id: args.id, expectName: args.name }));
+      // `quick`: the page is a single-page app such as a chat (Eya says so; an older Eya never sends it, and then nothing changes).
+      return runAction(args.tabId, (tabId) => inject(tabId, 'click', { id: args.id, expectName: args.name }), { quick: args.quick === true });
 
     case 'fill':
-      return runAction(args.tabId, async (tabId) => {
-        const filled = await inject(tabId, 'fill', { id: args.id, expectName: args.name, value: args.value });
-        if (filled?.ok && args.submit === true) {
-          const pressed = await inject(tabId, 'press', { id: args.id, expectName: args.name });
-          return { ...filled, submitted: pressed?.ok === true };
-        }
-        return filled;
-      });
+      return runAction(
+        args.tabId,
+        async (tabId) => {
+          const filled = await inject(tabId, 'fill', { id: args.id, expectName: args.name, value: args.value, allowCode: args.allowCode === true });
+          if (filled?.ok && args.submit === true) {
+            const pressed = await inject(tabId, 'press', { id: args.id, expectName: args.name });
+            return { ...filled, submitted: pressed?.ok === true };
+          }
+          return filled;
+        },
+        // Typing in a box starts no download (pressing Enter in it might submit a form that does).
+        { quick: args.quick === true, downloads: args.submit === true },
+      );
+
+    case 'ads': {
+      // The page's own Skip / close buttons, once or watched (nothing is hidden or blocked). Not for a chat app (inject refuses those).
+      const tabId = await resolveTabId(args.tabId);
+      const state = await inject(tabId, 'ads', { mode: args.mode, keepPlaying: args.keepPlaying === true, play: args.play === true });
+      return { tabId, state };
+    }
 
     case 'scroll':
-      return runAction(args.tabId, (tabId) => inject(tabId, 'scroll', { direction: args.direction, amount: args.amount }));
+      return runAction(args.tabId, (tabId) => inject(tabId, 'scroll', { direction: args.direction, amount: args.amount }), { downloads: false });
 
     case 'back':
       return goBack(args.tabId);

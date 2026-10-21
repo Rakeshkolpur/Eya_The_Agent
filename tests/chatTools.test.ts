@@ -22,6 +22,7 @@ const folders: KnownFolders = {
 };
 
 const ON: CommunicationSettings = { enabled: true, apps: {} };
+const LONG = `${HOME}\\Desktop\\Chaluvagali Raghavendra Raju.docx`;
 const PDF = `${HOME}\\Desktop\\report.pdf`;
 
 function rig(opts: { settings?: CommunicationSettings; behaviour?: Behaviour } = {}) {
@@ -31,6 +32,7 @@ function rig(opts: { settings?: CommunicationSettings; behaviour?: Behaviour } =
   const session = new ChatSession();
   const disk = new FakeDisk({
     [PDF]: { isFile: true, isDirectory: false, size: 10, content: Buffer.from('0123456789') },
+    [LONG]: { isFile: true, isDirectory: false, size: 10, content: Buffer.from('0123456789') },
     [`${HOME}\\Desktop\\Hello 2`]: { isFile: false, isDirectory: true, size: 0 },
     [`${HOME}\\Desktop\\empty.txt`]: { isFile: true, isDirectory: false, size: 0, content: Buffer.alloc(0) },
     [`${HOME}\\Desktop\\huge.zip`]: { isFile: true, isDirectory: false, size: 300 * 1024 * 1024 },
@@ -58,6 +60,34 @@ describe('find_chat: choosing the right chat locally', () => {
     // It typed the name into the app's own search box, and clicked the row.
     expect(app.calls).toContain('fill:Search or start new chat=rahul sharma');
     expect(app.calls.some((c) => c.startsWith('click:Rahul Sharma'))).toBe(true);
+  });
+
+  it('waits for a search that updates the list late, and never chooses from the stale list before it', async () => {
+    // The app answers the search only a few looks later (a real chat app is not instant): at first the list is still the recent chats,
+    // which do not include this person. Choosing from it straight after typing would say "no such chat".
+    class SlowSearch extends FakeChatApp {
+      private typed = '';
+      private looks = 0;
+      override async fillOnPage(label: string, value: string, options?: Parameters<FakeChatApp['fillOnPage']>[2]) {
+        if (/search/i.test(label)) {
+          this.typed = value;
+          this.looks = 0;
+        }
+        return super.fillOnPage(label, value, options);
+      }
+      override async listItems() {
+        this.looks += 1;
+        const all = await super.listItems();
+        return this.typed !== '' && this.looks < 3 ? all.filter((i) => !/priya/i.test(i.name)) : all;
+      }
+    }
+    const app = new SlowSearch();
+    const tools = createChatTools({ service: app, policy: new CommunicationPolicy(() => ON), session: new ChatSession(), folders, files: new FakeDisk({}), sleep: async () => undefined });
+    const find = tools.find((t) => t.schema.name === 'find_chat') as Tool;
+    const out = await find.execute({ query: 'Priya' });
+    expect(out.ok).toBe(true);
+    expect(out.data?.['status']).toBe('opened');
+    expect(out.data?.['chat']).toBe('Priya Singh');
   });
 
   it('never hands the model the chat list, other people\'s names, or a message preview', async () => {
@@ -347,6 +377,59 @@ describe('the send gate: who it goes to is said before anything is sent', () => 
     const d = gate.forClick(app.snapshot(), { name: 'Send', role: 'button' });
     expect(d?.reason).not.toBeNull();
     expect(d?.question).toMatch(/no longer see the file "report\.pdf"/);
+  });
+
+  it('a real preview writes a long name cut short and without its extension: the yes still covers the send (the loop seen in real use)', async () => {
+    // Seen with real WhatsApp: attach_file succeeded, the user had said yes, and then Send was refused again and again with "I can no longer
+    // see the file ... waiting on the page", because the page never shows the whole name.
+    const { run, app, gate, session } = rig({ behaviour: 'cut_name' });
+    await run('find_chat', { query: 'Rahul Sharma' });
+    const attached = await run('attach_file', { path: LONG, confirm: true });
+    expect(attached.ok).toBe(true);
+    expect(JSON.stringify(app.snapshot().dialogs)).not.toContain('Raju.docx'); // the page really does not show the whole name
+    expect(gate.forClick(app.snapshot(), { name: 'Send', role: 'button' })).toMatchObject({ reason: null });
+    expect(session.isAuthorized('Rahul Sharma', 'Chaluvagali Raghavendra Raju.docx')).toBe(true);
+  });
+
+  it('and the check that it went still finds a file whose bubble shows a cut name (and does not mistake the open preview for a send)', async () => {
+    const { run, app } = rig({ behaviour: 'cut_name' });
+    await run('find_chat', { query: 'Rahul Sharma' });
+    await run('attach_file', { path: LONG, confirm: true });
+    // the thread shows the file with its name cut short, as the real page does
+    await app.clickOnPage('Send', () => null);
+    const checked = await run('verify_sent', {});
+    expect(checked.data).toMatchObject({ status: 'sent', file: 'Chaluvagali Raghavendra Raju.docx' });
+  });
+
+  it('after a send that really went, a user never asked about remembering names is asked once (and the model is told to ask it)', async () => {
+    const offers: string[] = [];
+    const app = new FakeChatApp();
+    const tools = createChatTools({
+      service: app,
+      policy: new CommunicationPolicy(() => ON),
+      session: new ChatSession(),
+      folders,
+      files: new FakeDisk({ [PDF]: { isFile: true, isDirectory: false, size: 10, content: Buffer.from('0123456789') } }),
+      sleep: async () => undefined,
+      names: { learn: () => 0, used: () => undefined, learning: () => false, offerConsent: (a, l) => { offers.push(`${a}:${l}`); return 'Want me to remember names?'; } },
+    });
+    const call = (name: string, args: ToolArgs = {}) => (tools.find((t) => t.schema.name === name) as Tool).execute(args);
+    await call('find_chat', { query: 'Rahul Sharma' });
+    await call('attach_file', { path: PDF, confirm: true });
+    await app.clickOnPage('Send', () => null);
+    const checked = await call('verify_sent', {});
+    expect(checked.data).toMatchObject({ status: 'sent', alsoAsk: 'Want me to remember names?' });
+    expect(offers).toEqual(['whatsapp:Rahul Sharma']);
+  });
+
+  it('but a preview that is really gone is still noticed, even when a name is cut short', async () => {
+    const { run, app, gate } = rig({ behaviour: 'cut_name' });
+    await run('find_chat', { query: 'Rahul Sharma' });
+    await run('attach_file', { path: LONG, confirm: true });
+    app.previewOpen = false;
+    const d = gate.forClick(app.snapshot(), { name: 'Send', role: 'button' });
+    expect(d?.reason).not.toBeNull();
+    expect(d?.question).toMatch(/no longer see the file/);
   });
 
   it('cancelling the preview withdraws the yes and the attachment, so a message that follows is asked about as a message', async () => {

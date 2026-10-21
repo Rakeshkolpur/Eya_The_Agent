@@ -12,6 +12,7 @@ class FakeSession implements LiveSessionLike {
   readonly opened: Array<{ url: string; setup: LiveSetupOptions }> = [];
   readonly audio: Uint8Array[] = [];
   readonly toolResults: Array<readonly LiveToolResult[]> = [];
+  readonly texts: string[] = [];
   closed = false;
   private readonly events = new Set<(e: LiveEvent) => void>();
   private readonly closes = new Set<(c: LiveCloseInfo) => void>();
@@ -43,6 +44,9 @@ class FakeSession implements LiveSessionLike {
   }
   sendAudio(pcm: Uint8Array): void {
     this.audio.push(pcm);
+  }
+  sendText(text: string): void {
+    this.texts.push(text);
   }
   sendToolResults(r: readonly LiveToolResult[]): void {
     this.toolResults.push(r);
@@ -112,6 +116,8 @@ function rig(
     sessions?: Array<'ok' | 'slow' | Error>;
     config?: LiveConfig | null;
     idleMs?: number;
+    keepOpen?: () => boolean;
+    keepOpenMs?: number;
     slowToolMs?: number;
     runTool?: ConversationDeps['runTool'];
     maxReconnects?: number;
@@ -156,6 +162,8 @@ function rig(
         sink = s;
       },
       idleMs: opts.idleMs ?? 60_000,
+      ...(opts.keepOpen !== undefined ? { keepOpen: opts.keepOpen } : {}),
+      ...(opts.keepOpenMs !== undefined ? { keepOpenMs: opts.keepOpenMs } : {}),
       ...(opts.slowToolMs !== undefined ? { slowToolMs: opts.slowToolMs } : {}),
       echoTailMs: 250,
       now: () => clock.t,
@@ -535,6 +543,44 @@ describe('ending a conversation', () => {
     r.playbacks[0]?.finish();
     await new Promise((res) => setTimeout(res, 100));
     expect(r.ended.map(([why]) => why)).toEqual(['idle']);
+  });
+
+  it('is not ended for being quiet while Eya is keeping a task for the person, and ends once there is none', async () => {
+    let task = true;
+    const r = await started({ idleMs: 20, keepOpen: () => task });
+    await new Promise((res) => setTimeout(res, 120));
+    expect(r.conv.active).toBe(true); // quiet for several times the idle time, but a task is waiting
+    expect(r.ended).toEqual([]);
+    task = false; // it was finished and told
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.ended.map(([why]) => why)).toEqual(['idle']);
+  });
+
+  it('does not stay open for a task for ever: after the longest allowed it ends', async () => {
+    const r = await started({ idleMs: 20, keepOpen: () => true, keepOpenMs: 1_000 });
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.conv.active).toBe(true);
+    r.clock.t += 2_000; // the task has now held it open past the limit
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.ended.map(([why]) => why)).toEqual(['idle']);
+  });
+
+  it('lets Eya tell the model something in her own words, and counts that as the conversation being alive', async () => {
+    const r = await started({ idleMs: 60 });
+    expect(r.conv.tell('The step you started has finished.')).toBe(true);
+    expect(r.session.texts).toEqual(['The step you started has finished.']);
+    await new Promise((res) => setTimeout(res, 40));
+    expect(r.conv.tell('A question is waiting.')).toBe(true); // still open: telling it restarted the quiet time
+    await new Promise((res) => setTimeout(res, 40));
+    expect(r.conv.active).toBe(true);
+  });
+
+  it('cannot tell a conversation that is not open, or a session that cannot take text', async () => {
+    const closed = rig();
+    expect(closed.conv.tell('hello')).toBe(false);
+    const r = await started();
+    r.conv.stop('user');
+    expect(r.conv.tell('hello')).toBe(false);
   });
 
   it('reports the reason if the server or network drops it (once it will not reconnect)', async () => {

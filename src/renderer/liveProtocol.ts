@@ -67,6 +67,19 @@ export function buildAudio(pcm: Uint8Array): string {
   });
 }
 
+/**
+ * A line of text given to the conversation as if the user's side had written it (Eya telling the model that the step it started has
+ * finished, or that it is waiting for an answer), and the model is asked to take its turn.
+ */
+export function buildText(text: string): string {
+  return JSON.stringify({ clientContent: { turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true } });
+}
+
+/** One picture of the user's screen, for a live conversation that is looking at it with them. */
+export function buildImage(jpegBase64: string): string {
+  return JSON.stringify({ realtimeInput: { video: { mimeType: 'image/jpeg', data: jpegBase64 } } });
+}
+
 export function buildToolResponse(results: readonly LiveToolResult[]): string {
   return JSON.stringify({
     toolResponse: {

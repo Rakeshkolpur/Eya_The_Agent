@@ -540,3 +540,78 @@ describe('when every model is limited: the error says the real best case', () =>
     expect(describeAIFailure(await complete(new GeminiAIProvider(opts)), now)).toMatch(/comes back at .+ (today|tomorrow)/);
   });
 });
+
+describe('planning when the first model hangs or is overloaded', () => {
+  const reply = (text: string) => makeResponse({ candidates: [{ content: { parts: [{ text }] } }] });
+  const user = [{ role: 'user' as const, content: 'go to page 10' }];
+
+  it('a slow planning model is raced by the next one, and the answer comes at the next model\'s speed', async () => {
+    const urls: string[] = [];
+    let slowAborted = false;
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      urls.push(url);
+      if (url.includes('hangs')) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            slowAborted = true;
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      }
+      return reply('done');
+    }) as unknown as typeof fetch;
+    const started = Date.now();
+    const out = await new GeminiAIProvider({ models: ['hangs', 'works'], planningHedgeMs: 40 }).complete(user, []);
+    expect(out.text).toBe('done');
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(urls[0]).toContain('hangs');
+    expect(urls[1]).toContain('works');
+    expect(slowAborted).toBe(true);
+  });
+
+  it('a healthy model is not raced at all', async () => {
+    let calls = 0;
+    globalThis.fetch = vi.fn(async () => {
+      calls += 1;
+      return reply('fine');
+    }) as unknown as typeof fetch;
+    expect((await new GeminiAIProvider({ models: ['m1', 'm2'], planningHedgeMs: 500 }).complete(user, [])).text).toBe('fine');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(calls).toBe(1);
+  });
+
+  it('a model that just failed with "high demand" is left alone for the next steps, not retried on every one', async () => {
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      urls.push(url);
+      return url.includes('busy') ? new Response('high demand', { status: 503 }) : reply('ok');
+    }) as unknown as typeof fetch;
+    const provider = new GeminiAIProvider({ models: ['busy', 'steady'], retryDelaysMs: [5, 5] });
+    expect((await provider.complete(user, [])).text).toBe('ok');
+    expect(urls.filter((u) => u.includes('busy'))).toHaveLength(1);
+    // the next planning steps go straight to the model that works
+    await provider.complete(user, []);
+    await provider.complete(user, []);
+    expect(urls.filter((u) => u.includes('busy'))).toHaveLength(1);
+    expect(urls.filter((u) => u.includes('steady'))).toHaveLength(3);
+  });
+});
+
+describe('a planning model that hangs is given up on sooner than a big upload would be', () => {
+  it('aborts at the planning timeout and goes to the next model', async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('hangs')) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }
+      return makeResponse({ candidates: [{ content: { parts: [{ text: 'ok' }] } }] });
+    }) as unknown as typeof fetch;
+    const started = Date.now();
+    const out = await new GeminiAIProvider({ models: ['hangs', 'works'], planningHedgeMs: 60_000, planningTimeoutMs: 80, timeoutMs: 60_000, retryDelaysMs: [] }).complete([{ role: 'user', content: 'x' }], []);
+    expect(out.text).toBe('ok');
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+});

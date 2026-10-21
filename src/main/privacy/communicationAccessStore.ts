@@ -12,10 +12,11 @@ export interface StoreIo {
   write(path: string, text: string): void;
 }
 
-const realIo: StoreIo = {
+export const realIo: StoreIo = {
   read: (path) => {
     try {
-      return readFileSync(path, 'utf8');
+      // Editors such as Notepad (and PowerShell's -Encoding utf8) put an invisible byte-order mark first; JSON.parse refuses it.
+      return readFileSync(path, 'utf8').replace(/^﻿/, '');
     } catch {
       return null;
     }

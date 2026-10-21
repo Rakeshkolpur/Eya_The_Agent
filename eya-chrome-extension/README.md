@@ -23,8 +23,9 @@ Use Chrome *and* Edge? Add the extension to both, then say "connect my browser" 
 each browser separately, and both stay connected at the same time.
 
 **After updating Eya, reload the extension** (the circular arrow on its card). Each connection starts with a
-version check (protocol 2, extension 0.4.0); an older extension is refused with a plain message on the options
-page asking you to reload it.
+version check (protocol 2, extension 0.5.0); an extension that is too old to work at all is refused with a plain message on the
+options page asking you to reload it. A 0.4.0 extension still works, but chat steps are several seconds slower until it is
+reloaded (see "Quick mode" below).
 
 The toolbar icon shows **ON** when Eya is connected. The extension's options page shows status.
 
@@ -130,3 +131,22 @@ There are no content scripts: nothing runs on any page until Eya asks for someth
 The extension ID is fixed by the public `key` in `manifest.json` so Eya can insist that a connection
 really comes from this extension. The matching private key was discarded, so nobody can publish a
 look-alike under the same ID.
+
+**Quick mode (extension 0.5.0, capability `quick_actions`):** after every click and fill the extension used to wait up to 2.2 s to see whether
+a download had started, then for the page to go completely quiet (up to 2.5 s). Typing in a box and scrolling can't start a download, so
+they no longer wait for one on any site; and when Eya says `quick` (she does, for chat apps only) a click, fill, tab switch or file hand-over
+settles after a short calm (80 ms minimum, 150 ms quiet, 500 ms ceiling) because a chat page never goes fully quiet. An Eya that doesn't send
+`quick` behaves exactly as before. Opening a site whose tab is already open (focusing it) no longer waits for a download either.
+
+**Quiet reconnecting (extension 0.5.1) — why the "Errors" button on the extensions page used to fill up.** The browser writes a line to the
+extension's Errors list every time a connection fails (`WebSocket connection to 'ws://127.0.0.1:47821/eya-bridge' failed:
+net::ERR_CONNECTION_REFUSED`), and the extension tried to connect whenever the browser woke it (any tab switch) and every 30 seconds — so while
+Eya was not running (closed, restarting, the PC just started) the list grew all day. It now **looks first**: a plain, no-cookies request to
+the same loopback address (it can neither read nor send anything), which the browser does not record as an error when nobody answers; only when Eya
+answers does it open the connection. Measured in a real Chrome (`tests/live/extensionerrors.live.test.ts`): 5 errors in 25 seconds with Eya off and 4
+across two restarts before; **0 in both** after, and 0 while she works. Reconnecting is as quick as before (the look is repeated on the same
+1.5 s to 15 s back-off). Reload the extension once to get it, and press **Clear all** on the Errors page to remove the old lines.
+
+**Pairing by itself (extension 0.6.0).** When the extension has no pairing secret of its own (just loaded, reinstalled, or one Eya no longer knows) it reads `eya-pairing.json` from its own folder — a key Eya writes there when she starts — and sends it in its handshake as `bootstrap`; Eya answers with a secret for this browser, which the extension stores. An extension that already has a secret sends that and never reads the file. If the file is not there (an older Eya, a read-only folder) it simply says hello without it and waits for the pairing window, as before — and a missing file adds nothing to the Errors list (measured). The file is not a web-accessible resource, so no page can fetch it.
+
+**Adverts (extension 0.7.0, capability `ads`).** One new request, `ads` (`mode` once / watch / stop), runs a small routine in the page (`injected.js`, command `ads`): it presses the page's own YouTube Skip button when it is visible, closes an overlay advert's close button and a survey's dismiss button, and, with `watch`, repeats every half second until stopped or the page goes. With `keepPlaying` it starts the video again if the page leaves it paused right after an advert, and with `play` it presses the player's own Play button if the browser left the video waiting. It answers with what it saw (an advert showing, whether it has no Skip button, how many it skipped or closed, whether the video is playing). It never hides, speeds up or blocks an advert, and it does not run in a chat app's tab while Communication Access is off (like every other request). An extension older than 0.7.0 answers "Unknown request: ads" and Eya tells you to reload it once.

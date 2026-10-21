@@ -31,7 +31,8 @@ export const ROWS: readonly FakeChatRow[] = [
   { name: 'Amit Kumar', phone: '+91 98111 22333', preview: 'Done' },
 ];
 
-export type Behaviour = 'normal' | 'no_picker' | 'never_shows' | 'fails' | 'pending' | 'no_marks' | 'old_mark_only' | 'stays_in_preview';
+/** 'cut_name': like the real WhatsApp preview, which shows a long file name cut short and without its extension. */
+export type Behaviour = 'normal' | 'no_picker' | 'never_shows' | 'fails' | 'pending' | 'no_marks' | 'old_mark_only' | 'stays_in_preview' | 'cut_name';
 
 /**
  * A stand-in for a chat app open in the user's browser, driven through the same service interface the tools use. It
@@ -51,9 +52,15 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
   calls: string[] = [];
   attached: { name: string; mime: string; size: number; bytes: Buffer; prefer?: string } | null = null;
   previewOpen = false;
+  /** What is typed in the message box and not sent yet. */
+  draft = '';
   thread: Array<{ text: string; file?: string; mark: string | null }> = [];
   /** Delivery marks of OLDER messages already in the thread. */
   oldMarks: string[] = ['read'];
+  /** The page is still loading for this many more looks at it (a slow connection): no search box, no chats. */
+  loadingFor = 0;
+  /** The page shows the log-in QR code instead of the chats. */
+  loginScreen = false;
 
   constructor(public rows: readonly FakeChatRow[] = ROWS) {}
 
@@ -75,6 +82,12 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
 
   snapshot(): PageSnapshot {
     const marks = this.marks();
+    if (this.loginScreen) {
+      return { url: this.url, title: this.title, headings: ['Use WhatsApp on your phone'], links: [], buttons: [], inputs: [], dialogs: [], truncated: false, visibleText: 'Scan the QR code to log in' };
+    }
+    if (this.loadingFor > 0) {
+      return { url: this.url, title: this.title, headings: [], links: [], buttons: [], inputs: [], dialogs: [], truncated: false, visibleText: 'Loading your chats' };
+    }
     return {
       url: this.url,
       title: this.open !== null && !this.headerInHeadings ? this.title : this.open !== null ? `${this.open.name} - ${this.title}` : this.title,
@@ -82,28 +95,38 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
       links: [],
       buttons: ['Attach', 'Send'],
       inputs: ['Search or start new chat', ...(this.open !== null ? ['Type a message'] : [])],
-      dialogs: this.previewOpen && this.attached !== null ? [`Send file ${this.attached.name} Add a caption`] : [],
+      dialogs: this.previewOpen && this.attached !== null ? [`Send file ${this.shownName(this.attached.name)} Add a caption`] : [],
       truncated: false,
       ...(marks.length > 0 ? { messageStatus: marks } : {}),
     };
   }
 
-  async openWebsite(): Promise<PageSnapshot> {
+  /** How the preview writes the file's name. */
+  private shownName(name: string): string {
+    if (this.behaviour !== 'cut_name') return name;
+    const base = name.replace(/\.[^.]+$/, '');
+    return base.length > 18 ? `${base.slice(0, 18).trim()}…` : base;
+  }
+
+  async openWebsite(url?: string): Promise<PageSnapshot> {
     this.calls.push('open');
+    if (url !== undefined) this.url = url;
     return this.snapshot();
   }
 
   async inspectPage(): Promise<PageSnapshot> {
     this.guard();
     this.calls.push('inspect');
-    return this.snapshot();
+    const seen = this.snapshot();
+    if (this.loadingFor > 0) this.loadingFor -= 1; // each look at a loading page gets it nearer to ready
+    return seen;
   }
 
   async findOnPage(query: string): Promise<FindOnPageResult> {
     this.guard();
     this.calls.push(`find:${query}`);
     const q = normalizeText(query);
-    const hit = this.thread.some((m) => normalizeText(`${m.text} ${m.file ?? ''}`).includes(q));
+    const hit = this.thread.some((m) => normalizeText(`${m.text} ${m.file === undefined ? '' : this.shownName(m.file)}`).includes(q));
     return { url: this.url, title: this.title, query, matches: [], textMatches: hit ? [`…${query}…`] : [], totalControls: 0 };
   }
 
@@ -137,6 +160,7 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
     this.guard();
     this.calls.push(`fill:${label}=${value}${options?.submit === true ? '+enter' : ''}`);
     if (/search/i.test(label)) this.search = value;
+    else if (/message/i.test(label) && this.open !== null) this.draft = value;
     return { ok: true, snapshot: this.snapshot() };
   }
 
@@ -162,6 +186,7 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
   async listItems(): Promise<PageItem[]> {
     this.guard();
     this.calls.push('list');
+    if (this.loadingFor > 0 || this.loginScreen) return [];
     return [
       { name: 'Chats', role: 'clickable', region: 'nav' },
       { name: 'Attach', role: 'button' },
@@ -187,7 +212,8 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
   private send(): void {
     if (this.behaviour === 'stays_in_preview') return;
     const file = this.attached?.name;
-    const text = file === undefined ? 'a typed message' : '';
+    const text = file === undefined ? (this.draft !== '' ? this.draft : 'a typed message') : '';
+    this.draft = '';
     const mark = this.behaviour === 'fails' ? 'failed to send' : this.behaviour === 'pending' ? 'pending' : this.behaviour === 'no_marks' || this.behaviour === 'old_mark_only' ? null : 'sent';
     this.thread.push({ text, ...(file !== undefined ? { file } : {}), mark });
     if (this.behaviour === 'no_marks') this.oldMarks = [];

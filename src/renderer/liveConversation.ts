@@ -32,22 +32,32 @@ export interface ConversationHandlers {
   onSaid(text: string): void;
   onEnded(reason: ConversationEnd, detail?: string): void;
   /** A tool has been running a while: a chance to say something so the user isn't left in silence. */
-  onSlowTool?(toolName: string): void;
+  /** A tool is taking a while: say something (what is being done at first, then that it is slow). `stage` says which. */
+  onSlowTool?(toolName: string, args?: Readonly<Record<string, unknown>>, stage?: 'start' | 'slow' | 'long'): void;
 }
 
 export interface ConversationDeps {
   getConfig(): Promise<LiveConfig | null>;
   /** Runs a tool in the main process; resolves with the result as JSON text. */
-  runTool(name: string, args: Readonly<Record<string, unknown>>): Promise<string>;
+  runTool(name: string, args: Readonly<Record<string, unknown>>, context?: { readonly heard: string; readonly turn: number }): Promise<string>;
   makeSession(): LiveSessionLike;
   createPlayback(): PcmPlayback;
   setFrameSink(sink: ((chunk: Float32Array, sampleRate: number) => void) | null): void;
   /** Ends the conversation after this long with nothing happening. */
   idleMs?: number;
+  /**
+   * True while Eya is keeping a task for the person (it is waiting on a slow page, or on their answer): the conversation is not ended for
+   * being quiet then, so she can tell them how it went. It still ends after `keepOpenMs` of that.
+   */
+  keepOpen?: () => boolean;
+  /** The longest a quiet conversation is kept open for a task (default 10 minutes). */
+  keepOpenMs?: number;
   /** How long after Eya stops speaking the microphone stays muted (her voice fading in the room). */
   echoTailMs?: number;
   /** How long a tool may run before onSlowTool fires. */
   slowToolMs?: number;
+  /** After the first cue, how long before the next (a different one), and the one after that comes at three times this. */
+  slowFollowUpMs?: number;
   /** Remembers models that failed a session (optionally across restarts) so the next conversation does not begin with one. */
   modelHealth?: ModelHealthStore;
   /** How long a model that failed us is tried last (default 30 minutes). */
@@ -105,7 +115,11 @@ export class LiveConversation {
   private heardText = '';
   private saidText = '';
   private lastSpoke: 'heard' | 'said' | null = null;
+  /** Counts the user's turns, so Eya's memory can tell two identical requests in a row from one request. */
+  private turn = 0;
   private toolsRunning = 0;
+  /** When the conversation was first kept open past its quiet time for a task (null when it is not being). */
+  private heldSince: number | null = null;
   private unsubscribers: Array<() => void> = [];
   /** Model -> when it stops being tried last. Loaded on first use from the store, if there is one. */
   private triedLastUntil: Map<string, number> | null = null;
@@ -122,6 +136,11 @@ export class LiveConversation {
 
   get active(): boolean {
     return this.isActive;
+  }
+
+  /** Shows the conversation what is on the user's screen right now (they are sharing it). Does nothing when there is no conversation. */
+  sendScreenFrame(jpegBase64: string): void {
+    if (this.isActive) this.session?.sendImage?.(jpegBase64);
   }
 
   async start(): Promise<StartResult> {
@@ -272,6 +291,18 @@ export class LiveConversation {
   }
 
   /** Mutes the microphone until `ms` from now (0 lifts it), e.g. while a cue plays that must not be heard as the user. */
+  /**
+   * Eya tells the conversation something in her own words (a step that finished late, a question waiting for the user), and the model
+   * says it. False when there is no open conversation to tell.
+   */
+  tell(text: string): boolean {
+    const session = this.session;
+    if (!this.isActive || session === null || !session.isOpen || session.sendText === undefined) return false;
+    session.sendText(text);
+    this.resetIdle();
+    return true;
+  }
+
   muteMicFor(ms: number): void {
     this.mutedUntil = this.now() + ms;
     this.batcher.reset();
@@ -309,6 +340,7 @@ export class LiveConversation {
           this.saidText = '';
           this.handlers.onSaid('');
         }
+        if (this.lastSpoke !== 'heard') this.turn += 1; // the user has started a new turn of their own
         this.lastSpoke = 'heard';
         this.heardText += event.text;
         this.handlers.onHeard(this.heardText.trim());
@@ -378,22 +410,26 @@ export class LiveConversation {
   private async runTools(calls: readonly LiveToolCall[]): Promise<void> {
     this.toolsRunning += 1;
     this.handlers.onPhase('working');
-    const slowTimer = setTimeout(() => {
-      if (this.isActive && !this.speaking) this.handlers.onSlowTool?.(calls[0]?.name ?? '');
-    }, this.deps.slowToolMs ?? 2500);
+    const cue = (stage: 'start' | 'slow' | 'long') => (): void => {
+      if (this.isActive && !this.speaking) this.handlers.onSlowTool?.(calls[0]?.name ?? '', calls[0]?.args, stage);
+    };
+    const first = this.deps.slowToolMs ?? 2500;
+    const gap = this.deps.slowFollowUpMs ?? 11_000;
+    const slowTimers = [setTimeout(cue('start'), first), setTimeout(cue('slow'), first + gap), setTimeout(cue('long'), first + gap * 3)];
     const results: LiveToolResult[] = [];
     try {
       for (const call of calls) {
         let response: Record<string, unknown>;
         try {
-          response = parseJsonObject(await this.deps.runTool(call.name, call.args));
+          // What the user said this turn goes along, so Eya's memory can tell that several calls were one task (and what it was).
+          response = parseJsonObject(await this.deps.runTool(call.name, call.args, { heard: this.heardText.trim(), turn: this.turn }));
         } catch {
           response = { ok: false, error: 'The tool failed to run.' };
         }
         if (!this.cancelled.has(call.id)) results.push({ id: call.id, name: call.name, response });
       }
     } finally {
-      clearTimeout(slowTimer);
+      for (const timer of slowTimers) clearTimeout(timer);
       this.toolsRunning -= 1;
     }
     if (!this.isActive) return;
@@ -417,6 +453,12 @@ export class LiveConversation {
   }
 
   private resetIdle(): void {
+    // Something happened: the time kept open for a task starts over.
+    this.heldSince = null;
+    this.armIdle();
+  }
+
+  private armIdle(): void {
     if (this.idleTimer !== null) clearTimeout(this.idleTimer);
     if (!this.isActive) return;
     const idleMs = this.deps.idleMs ?? 30_000;
@@ -425,6 +467,15 @@ export class LiveConversation {
       if (this.speaking || this.toolsRunning > 0) {
         this.resetIdle();
         return;
+      }
+      // A task Eya is keeping for the person is not "nothing happening": stay open (for a while) so she can tell them how it went.
+      if (this.deps.keepOpen?.() === true) {
+        const now = this.now();
+        this.heldSince ??= now;
+        if (now - this.heldSince < (this.deps.keepOpenMs ?? 10 * 60_000)) {
+          this.armIdle();
+          return;
+        }
       }
       this.stop('idle');
     }, idleMs);

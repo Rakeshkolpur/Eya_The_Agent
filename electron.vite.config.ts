@@ -23,7 +23,7 @@ export default defineConfig({
     build: {
       outDir: 'out/preload',
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/main/preload.ts') },
+        input: { index: resolve(__dirname, 'src/main/preload.ts'), card: resolve(__dirname, 'src/main/cardPreload.ts') },
       },
     },
   },

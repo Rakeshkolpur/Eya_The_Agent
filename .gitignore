@@ -12,3 +12,10 @@ Thumbs.db
 coverage/
 .vscode/
 .idea/
+
+# Downloaded by scripts/fetch-models.mjs (checked against scripts/models.lock.json); the installer carries them
+models/onnx-community/
+release/
+
+# The pairing key Eya leaves in the extension folder (per install; never committed or shipped)
+eya-chrome-extension/eya-pairing.json

@@ -16,7 +16,7 @@ interface Fakes {
 function fakes(
   installed: string[],
   running = true,
-  options: { startApps?: StartMenuApp[]; runningProcesses?: string[]; newProcessAfterLaunch?: string | null } = {},
+  options: { startApps?: StartMenuApp[]; runningProcesses?: string[]; newProcessAfterLaunch?: string | null; noChrome?: boolean } = {},
 ): Fakes {
   const started: string[][] = [];
   const waited: string[] = [];
@@ -50,6 +50,7 @@ function fakes(
       listRunningProcessNames: async () => runningProcesses,
       waitForNewProcess: async () => newProcessAfterLaunch,
       launchBrowser: async (browser, url) => {
+        if (options.noChrome === true && browser === 'chrome') return false; // not installed on this PC
         browserLaunches.push({ browser, url });
         return true;
       },
@@ -150,19 +151,27 @@ describe('open_application: beyond the known list', () => {
     expect(result.summary).toBe('launched but not verified');
   });
 
-  it('falls back to a known web app, reusing a browser that already looks in active use', async () => {
+  it('falls back to a known web app in Chrome — even when Edge is the browser that is busy', async () => {
     const f = fakes([], true, { runningProcesses: Array(5).fill('msedge.exe') });
     const result = await createOpenApplicationTool(f.deps).execute({ name: 'WhatsApp' });
     expect(result.ok).toBe(true);
-    expect(f.browserLaunches).toEqual([{ browser: 'edge', url: 'https://web.whatsapp.com/' }]);
+    expect(f.browserLaunches).toEqual([{ browser: 'chrome', url: 'https://web.whatsapp.com/' }]);
     expect(f.opened).toEqual([]); // did not also fall through to the OS default
+    expect(result.data).toEqual({ app: 'WhatsApp', usedWeb: true, browser: 'chrome' });
+  });
+
+  it('on a PC without Chrome, reuses a browser that already looks in active use', async () => {
+    const f = fakes([], true, { runningProcesses: Array(5).fill('msedge.exe'), noChrome: true });
+    const result = await createOpenApplicationTool(f.deps).execute({ name: 'WhatsApp' });
+    expect(result.ok).toBe(true);
+    expect(f.browserLaunches).toEqual([{ browser: 'edge', url: 'https://web.whatsapp.com/' }]);
+    expect(f.opened).toEqual([]);
     expect(result.data).toEqual({ app: 'WhatsApp', usedWeb: true, browser: 'edge' });
   });
 
-  it('opens the default browser when no browser looks genuinely in active use', async () => {
-    // Two chrome.exe processes: below the "actually in use" threshold — a
-    // background updater/helper, not a real open window.
-    const f = fakes([], true, { runningProcesses: ['chrome.exe', 'chrome.exe'] });
+  it('on a PC without Chrome, opens the default browser when no browser looks genuinely in active use', async () => {
+    // Two msedge.exe processes: below the "actually in use" threshold — a background updater/helper, not a real open window.
+    const f = fakes([], true, { runningProcesses: ['msedge.exe', 'msedge.exe'], noChrome: true });
     const result = await createOpenApplicationTool(f.deps).execute({ name: 'telegram' });
     expect(result.ok).toBe(true);
     expect(f.browserLaunches).toEqual([]);
@@ -185,7 +194,7 @@ describe('open_application: beyond the known list', () => {
     };
     const result = await createOpenApplicationTool(f.deps).execute({ name: 'discord' });
     expect(result.ok).toBe(true);
-    expect(f.opened).toEqual(['https://discord.com/app']);
+    expect(f.browserLaunches).toEqual([{ browser: 'chrome', url: 'https://discord.com/app' }]);
   });
 });
 

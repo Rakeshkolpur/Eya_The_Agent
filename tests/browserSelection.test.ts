@@ -66,3 +66,26 @@ describe('which browser a piece of work belongs in', () => {
     ).toEqual({ browser: 'chrome', reason: 'matching_tab' });
   });
 });
+
+describe('the default browser (Chrome) when the user did not name one', () => {
+  const chrome = { defaultBrowser: 'chrome' as const };
+  const edgeHasSite = [{ browser: 'edge' as const, url: 'https://shop.example/', active: true }];
+
+  it('beats where the site is open and where the user happens to be', () => {
+    expect(pick({ ...chrome, tabsOnSite: edgeHasSite, activeBrowser: 'edge', url: 'https://shop.example/' })).toEqual({ browser: 'chrome', reason: 'default' });
+    expect(pick({ ...chrome, activeBrowser: 'edge', preferred: 'edge' })).toEqual({ browser: 'chrome', reason: 'default' });
+  });
+
+  it('but a task already underway stays in the browser it is in', () => {
+    expect(pick({ ...chrome, taskBrowser: 'edge' })).toEqual({ browser: 'edge', reason: 'task' });
+  });
+
+  it('is only used when it is connected — otherwise the older rules decide, and the caller starts Chrome first if it is on the PC', () => {
+    expect(pick({ ...chrome, connected: ['edge'], tabsOnSite: edgeHasSite, url: 'https://shop.example/' })).toEqual({ browser: 'edge', reason: 'matching_tab' });
+    expect(pick({ ...chrome, connected: ['edge', 'other'], activeBrowser: 'other' })).toEqual({ browser: 'other', reason: 'active' });
+  });
+
+  it('can be Edge (EYA_PREFERRED_BROWSER=edge)', () => {
+    expect(pick({ defaultBrowser: 'edge', activeBrowser: 'chrome' })).toEqual({ browser: 'edge', reason: 'default' });
+  });
+});

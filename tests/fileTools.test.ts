@@ -169,15 +169,22 @@ describe('find_file: when / date range', () => {
     expect((await find({ when: 'next tuesday' })).ok).toBe(false);
   });
 
+  // The tool reads a YYYY-MM-DD as a day in the user's own time zone, so the test must write "yesterday" the same way. (toISOString is
+  // UTC: between midnight and the UTC offset, e.g. 00:00-05:30 in India, it names the wrong day and these tests failed every night.)
+  const localDay = (daysAgo: number): string => {
+    const d = new Date();
+    d.setDate(d.getDate() - daysAgo);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+
   it('onDate matches a specific day', async () => {
-    const isoYesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
-    const result = await find({ folder: dated(), onDate: isoYesterday });
+    const result = await find({ folder: dated(), onDate: localDay(1) });
     expect(names(result.data?.['files'])).toEqual(['yesterday.pdf']);
   });
 
   it('fromDate/toDate cover an inclusive range', async () => {
-    const from = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
-    const to = new Date().toISOString().slice(0, 10);
+    const from = localDay(2);
+    const to = localDay(0);
     const result = await find({ folder: dated(), fromDate: from, toDate: to });
     expect(names(result.data?.['files']).sort()).toEqual(['today.pdf', 'yesterday.pdf']);
   });

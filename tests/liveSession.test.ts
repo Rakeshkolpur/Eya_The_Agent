@@ -128,6 +128,18 @@ describe('a live session', () => {
     expect(socket.sent).toHaveLength(before + 2);
   });
 
+  it('sends a line of text from Eya only while open', async () => {
+    const { socket, s } = await openReady();
+    const before = socket.sent.length;
+    s.sendText('A question is waiting.');
+    expect(socket.sent).toHaveLength(before + 1);
+    expect(JSON.parse(socket.sent[before] ?? '{}').clientContent.turns[0].parts[0].text).toBe('A question is waiting.');
+    s.close();
+    socket.drop(1000);
+    s.sendText('too late');
+    expect(socket.sent).toHaveLength(before + 1);
+  });
+
   it('never sends audio before it is ready', () => {
     const { socket, s } = session();
     void s.open('wss://x', setup, 50).catch(() => undefined);

@@ -5,6 +5,7 @@ import type {
   AIProvider,
   AIToolCall,
   AIToolSpec,
+  CompleteOptions,
 } from './AIProvider';
 
 const log = rootLogger.child('ai.gemini');
@@ -18,11 +19,20 @@ export interface GeminiConfig {
   readonly baseUrl: string;
   readonly timeoutMs: number;
   /**
+   * A planning step answers in 1.5-9 s even when the service is struggling; one that has not by now is hung (a model was seen taking its
+   * whole 30 s and then failing, which on its own used up a third of a task's time).
+   */
+  readonly planningTimeoutMs: number;
+  /**
    * If the first transcription model hasn't answered by then, the next races
-   * it. Only for transcription: it is latency-critical, whereas racing
-   * planning calls just burns rate limit when the API is already struggling.
+   * it. Transcription is latency-critical, so this is early.
    */
   readonly transcribeHedgeMs: number;
+  /**
+   * Planning calls are raced only when one is genuinely slow (they answer in 1.5-4.6 s when healthy), so that an overloaded model that
+   * hangs costs a few seconds instead of its whole 30 s timeout, without doubling the load on an API that is already struggling.
+   */
+  readonly planningHedgeMs: number;
   /** Waits between rounds when every model failed transiently; one per retry. */
   readonly retryDelaysMs: readonly number[];
 }
@@ -77,8 +87,14 @@ interface GeminiCandidate {
 interface GeminiResponse {
   readonly candidates?: readonly GeminiCandidate[];
   readonly promptFeedback?: unknown;
+  readonly usageMetadata?: { readonly promptTokenCount?: number; readonly candidatesTokenCount?: number; readonly totalTokenCount?: number };
   readonly error?: { readonly message?: string; readonly code?: number };
 }
+
+/** When another AI is ready to take over, Gemini gets this long and this many models before it hands the request on. */
+const FAIL_FAST_TIMEOUT_MS = 10_000;
+const FAIL_FAST_HEDGE_MS = 4000;
+const FAIL_FAST_MODELS = 2;
 
 interface GenerateResult {
   readonly data: GeminiResponse;
@@ -108,6 +124,12 @@ class GeminiHttpError extends Error {
 // A per-day cap is spent for hours: re-check every half hour at most (in case billing was switched on), sooner only if
 // Google itself says it comes back sooner. Measured: its 429 carries the wait, which for this cap ends at midnight UTC.
 const DAILY_QUOTA_COOLDOWN_MS = 30 * 60_000;
+
+/** Default for `planningHedgeMs`: past this a planning call is raced by the next model and the first answer wins. */
+const PLANNING_HEDGE_MS = 8000;
+/** How long a model that just failed is left alone: an overloaded model is not back in 15 s, and retrying it on every step cost 2–30 s a time. */
+const COOLDOWN_OVERLOADED_MS = 60_000;
+const COOLDOWN_TIMED_OUT_MS = 120_000;
 
 const TRANSIENT_STATUSES = new Set([500, 502, 503, 504]);
 const DEFAULT_RETRY_DELAYS_MS: readonly number[] = [1200, 2500];
@@ -180,6 +202,8 @@ export class GeminiAIProvider implements AIProvider {
    * ("back in 40 seconds") rather than only the first model's failure ("used up for today").
    */
   private readonly limitState = new Map<string, { readonly daily: boolean; readonly retryAt?: number }>();
+  /** The model that answered last, so the interface can say which one Eya is talking to. */
+  private lastModel: string | undefined;
 
   constructor(overrides?: Partial<GeminiConfig>) {
     this.cfg = {
@@ -194,7 +218,9 @@ export class GeminiAIProvider implements AIProvider {
       ]),
       baseUrl: DEFAULT_BASE_URL,
       timeoutMs: 30_000,
+      planningTimeoutMs: 20_000,
       transcribeHedgeMs: 3500,
+      planningHedgeMs: PLANNING_HEDGE_MS,
       retryDelaysMs: DEFAULT_RETRY_DELAYS_MS,
       ...overrides,
     };
@@ -206,6 +232,10 @@ export class GeminiAIProvider implements AIProvider {
 
   hasKey(): boolean {
     return this.cfg.apiKey.length > 0;
+  }
+
+  currentModel(): string | undefined {
+    return this.lastModel ?? this.cfg.models[0];
   }
 
   /**
@@ -253,7 +283,9 @@ export class GeminiAIProvider implements AIProvider {
   async complete(
     messages: readonly AIChatMessage[],
     tools: readonly AIToolSpec[],
+    options?: CompleteOptions,
   ): Promise<AICompletion> {
+    const fast = options?.failFast === true;
     const { systemInstruction, contents } = toGeminiMessages(messages);
     const body: Record<string, unknown> = {
       contents,
@@ -279,9 +311,21 @@ export class GeminiAIProvider implements AIProvider {
       body['toolConfig'] = { functionCallingConfig: { mode: 'AUTO' } };
     }
 
-    const { data, model, ms } = await this.generate(this.cfg.models, body);
+    const { data, model, ms } = await this.generate(
+      this.cfg.models,
+      body,
+      fast ? Math.min(FAIL_FAST_HEDGE_MS, this.cfg.planningHedgeMs) : this.cfg.planningHedgeMs,
+      fast ? Math.min(FAIL_FAST_TIMEOUT_MS, this.cfg.planningTimeoutMs) : this.cfg.planningTimeoutMs,
+      fast,
+    );
     const completion = this.parseCandidate(data);
-    log.info('completed', { model, ms, tools: completion.toolCalls.length });
+    this.lastModel = model;
+    log.info('completed', {
+      model,
+      ms,
+      tools: completion.toolCalls.length,
+      ...(data.usageMetadata?.totalTokenCount !== undefined ? { tokens: data.usageMetadata.totalTokenCount } : {}),
+    });
     return completion;
   }
 
@@ -340,15 +384,19 @@ export class GeminiAIProvider implements AIProvider {
     models: readonly string[],
     body: unknown,
     hedgeAfterMs?: number,
+    timeoutMs?: number,
+    fast = false,
   ): Promise<GenerateResult> {
     if (this.cfg.apiKey.length === 0) {
       throw new Error('Gemini API key missing (set EYA_GEMINI_API_KEY)');
     }
+    // "fast": another AI will take over if this one fails, so no waiting rounds and only the first couple of models.
+    const delays = fast ? [] : this.cfg.retryDelaysMs;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await this.generateRound(models, body, hedgeAfterMs, attempt > 0);
+        return await this.generateRound(models, body, hedgeAfterMs, attempt > 0, timeoutMs, fast ? FAIL_FAST_MODELS : undefined);
       } catch (err) {
-        const wait = retryDelayFor(err, attempt, this.cfg.retryDelaysMs);
+        const wait = retryDelayFor(err, attempt, delays);
         if (wait === null) throw err;
         log.info('all models failed for now; trying again shortly', { attempt: attempt + 1, waitMs: wait });
         await new Promise((resolve) => setTimeout(resolve, wait));
@@ -366,6 +414,8 @@ export class GeminiAIProvider implements AIProvider {
     body: unknown,
     hedgeAfterMs: number | undefined,
     ignoreCooldowns: boolean,
+    timeoutMs?: number,
+    maxModels?: number,
   ): Promise<GenerateResult> {
     const now = Date.now();
     // A spent daily quota is skipped outright, even on a retry round.
@@ -389,6 +439,7 @@ export class GeminiAIProvider implements AIProvider {
       // If every model is cooling down, try them all rather than fail outright.
       order = available.length > 0 ? available : usable;
     }
+    if (maxModels !== undefined) order = order.slice(0, maxModels);
 
     return new Promise<GenerateResult>((resolve, reject) => {
       const attempts = new Map<string, AbortController>();
@@ -413,7 +464,7 @@ export class GeminiAIProvider implements AIProvider {
         const controller = new AbortController();
         attempts.set(model, controller);
 
-        this.callModel(model, body, controller.signal).then(
+        this.callModel(model, body, controller.signal, timeoutMs).then(
           (data) => {
             if (settled) return;
             this.cachedAvailability = true;
@@ -441,7 +492,7 @@ export class GeminiAIProvider implements AIProvider {
               const sooner = err.retryAfterMs !== undefined ? Math.max(5_000, err.retryAfterMs) : DAILY_QUOTA_COOLDOWN_MS;
               this.dailyLimitUntil.set(model, Date.now() + Math.min(DAILY_QUOTA_COOLDOWN_MS, sooner));
             }
-            const coolMs = status === 404 ? 600_000 : status === 429 ? 60_000 : 15_000;
+            const coolMs = status === 404 ? 600_000 : status === 429 ? 60_000 : status === 0 ? COOLDOWN_TIMED_OUT_MS : COOLDOWN_OVERLOADED_MS;
             this.skipUntil.set(model, Date.now() + coolMs);
             log.warn('model failed, trying next', {
               model,
@@ -494,11 +545,11 @@ export class GeminiAIProvider implements AIProvider {
     return firstError instanceof Error ? firstError : new Error('No Gemini models available');
   }
 
-  private async callModel(model: string, body: unknown, signal: AbortSignal): Promise<GeminiResponse> {
+  private async callModel(model: string, body: unknown, signal: AbortSignal, timeoutMs?: number): Promise<GeminiResponse> {
     const controller = new AbortController();
     const onAbort = (): void => controller.abort();
     signal.addEventListener('abort', onAbort, { once: true });
-    const timeout = setTimeout(() => controller.abort(), this.cfg.timeoutMs);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs ?? this.cfg.timeoutMs);
     try {
       const url = `${this.cfg.baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
       const res = await fetch(url, {

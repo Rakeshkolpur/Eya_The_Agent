@@ -139,8 +139,8 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
     expect(bridge.connectedBrowsers()).toEqual(['chrome', 'edge']);
     const c = bridge.handshakeOf('chrome');
     const e = bridge.handshakeOf('edge');
-    expect(c).toMatchObject({ browser: 'chrome', protocolVersion: 2, extensionVersion: '0.4.0' });
-    expect(e).toMatchObject({ browser: 'edge', protocolVersion: 2, extensionVersion: '0.4.0' });
+    expect(c).toMatchObject({ browser: 'chrome', protocolVersion: 2, extensionVersion: '0.9.0' });
+    expect(e).toMatchObject({ browser: 'edge', protocolVersion: 2, extensionVersion: '0.9.0' });
     expect(c?.browserVersion).toMatch(/^\d+\./);
     expect(c?.capabilities).toEqual(expect.arrayContaining(['observe', 'click', 'scroll', 'events', 'close_tab']));
     expect(world.state('chrome')?.connected).toBe(true);
@@ -247,21 +247,26 @@ describe.skipIf(!live || !bothInstalled)('browser sessions: the user\'s own Chro
     expect(manager.pinnedBrowser()).toBe('chrome');
   }, 90_000);
 
-  it('D: a different site is signed in in Edge only — Eya picks Edge for it and Chrome for the other, never the wrong one', async () => {
+  it('D: a site signed in in Edge only — Edge when the user NAMES Edge, Chrome when they do not; never the wrong one', async () => {
     await userNavigate(EDGE_DEBUG, `${localhostBase}/auth/quick-login`, '/portal'); // the user signs in to the localhost site, in Edge
     await waitFor(() => world.tabsOf('edge').some((t) => t.url.includes('/auth/account')), 8000, 'Edge to land on the account page');
     const chromeUrlsBefore = (await userTabUrls(CHROME_DEBUG)).slice().sort();
 
-    const inEdge = note(await manager.openWebsite(`${localhostBase}/auth/statement`));
+    const inEdge = note(await manager.openWebsite(`${localhostBase}/auth/statement`, { browser: 'edge' })); // "open it in Edge"
     expect(inEdge.title).toBe('Statement');
     expect(inEdge.visibleText).toContain('Balance: 1,234');
     expect(inEdge.notes?.join(' ')).toContain("Opened in the user's Edge.");
     expect(manager.pinnedBrowser()).toBe('edge');
     expect((await userTabUrls(CHROME_DEBUG)).slice().sort()).toEqual(chromeUrlsBefore); // Chrome untouched
 
-    const inChrome = note(await manager.openWebsite(`${base}/auth/account`));
+    const inChrome = note(await manager.openWebsite(`${base}/auth/account`)); // nothing named: Chrome
     expect(inChrome.notes?.join(' ')).toContain("Opened in the user's Chrome.");
     expect(inChrome.visibleText).toContain('Welcome back, Asha');
+    expect(manager.pinnedBrowser()).toBe('chrome');
+
+    // The same Edge-only site with no browser named is NOT followed into Edge: it opens in Chrome (where the user is not signed in to it).
+    const unnamed = note(await manager.openWebsite(`${localhostBase}/auth/statement`));
+    expect(unnamed.notes?.join(' ')).toContain("Opened in the user's Chrome.");
     expect(manager.pinnedBrowser()).toBe('chrome');
   }, 120_000);
 

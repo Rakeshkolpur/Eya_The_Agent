@@ -165,7 +165,7 @@ describe('multi-step tasks', () => {
     expect(result.spoken).toBe('Your latest order is case 42, and the hearing moved to the twelfth.');
   });
 
-  it('tells you once, before the reply, that a longer task is under way', async () => {
+  it('tells you before the reply, in a human way, that a longer task is under way', async () => {
     const ai = new ScriptedAI([
       step([call('find_file')]),
       step([call('analyze_document', { path: 'p', question: 'q' })]),
@@ -173,7 +173,11 @@ describe('multi-step tasks', () => {
       say('All done.'),
     ]);
     await run(engineWith(ai), 'do the long thing');
-    expect(tts.spoken).toEqual(['Working on it.', 'All done.']);
+    // One short, human line about what she is doing next (not the machine's "Working on it."), then the answer.
+    expect(tts.spoken).toHaveLength(2);
+    expect(tts.spoken[0]).toMatch(/PC|file|files|document|one moment|give me a second|on it|let me/i);
+    expect(tts.spoken[0]).not.toBe('Working on it.');
+    expect(tts.spoken[1]).toBe('All done.');
   });
 
   it('stays quiet until the answer when one round is enough', async () => {

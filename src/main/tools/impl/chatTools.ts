@@ -9,7 +9,7 @@ import type {
 } from '@main/browser/BrowserAutomationService';
 import { BrowserUnavailableError } from '@main/browser/errors';
 import type { PageSnapshot } from '@main/browser/pageSnapshot';
-import { looksLikeControl, normalizeText, parseChatQuery, phoneEnding, resolveChat } from '@main/chat/contactMatch';
+import { looksLikeControl, normalizeText, parseChatQuery, phoneEnding, resolveChat, soundsLike } from '@main/chat/contactMatch';
 import type { ChatCandidate, ChatMatch } from '@main/chat/contactMatch';
 import type { ChatSession } from '@main/chat/chatSession';
 import { permissionRequest } from '@main/permissions/PermissionManager';
@@ -67,6 +67,42 @@ function phoneEndingNear(snapshot: PageSnapshot, label: string): string | null {
     }
   }
   return null;
+}
+
+/** The names in a list, as one comparable string. */
+const namesKey = (items: readonly PageItem[]): string => items.map((i) => i.name).join('\u0001');
+
+/**
+ * The chat list after a name was typed into the app's search box: read it again and again (each look costs about 10 ms) until it has
+ * changed from what it was and then stopped changing, instead of a fixed half-second pause. A search whose results look just like the
+ * list before it (one letter, say) is taken as done after about half a second of looking.
+ */
+async function listWhenSettled(lister: Partial<BrowserItemLister>, sleep: (ms: number) => Promise<void>, before: string): Promise<PageItem[]> {
+  const list = async (): Promise<PageItem[]> => (await lister.listItems?.()) ?? [];
+  let last = await list();
+  let unchanged = 0; // how many looks in a row showed the same list (one is not enough: a list can pass through an empty moment)
+  for (let polls = 1; polls < 30; polls += 1) {
+    await sleep(100);
+    const next = await list();
+    unchanged = namesKey(next) === namesKey(last) ? unchanged + 1 : 0;
+    last = next;
+    if (unchanged >= 2 && (namesKey(next) !== before || polls >= 5)) break;
+  }
+  return last;
+}
+
+/** The look of a chat app's page: ready (a search box to type a name into), asking for a log-in, or not finished loading. */
+export function chatAppState(snapshot: {
+  readonly inputs: readonly string[];
+  readonly headings?: readonly string[];
+  readonly visibleText?: string;
+  readonly buttons?: readonly string[];
+  readonly challenge?: { readonly kind: string };
+}): 'ready' | 'login' | 'loading' {
+  if (snapshot.inputs.some((i) => SEARCH_FIELD.test(i))) return 'ready';
+  const words = [snapshot.visibleText ?? '', ...(snapshot.headings ?? []), ...(snapshot.buttons ?? [])].join(' ');
+  if (snapshot.challenge?.kind === 'login' || /scan (?:the |this )?qr|log ?in to (?:whatsapp|telegram)|link with phone number|use whatsapp on your phone/i.test(words)) return 'login';
+  return 'loading';
 }
 
 function toCandidates(items: readonly PageItem[]): Array<ChatCandidate & { readonly item: PageItem }> {
@@ -158,10 +194,56 @@ export interface ChatSendGate {
 
 const BACKING_OUT = /^(cancel|close|discard|remove|delete|dismiss|back|x)$/;
 
-/** Is this name anywhere on the page as it was looked at (title, headings, buttons, links, popups, the text)? */
+/** Everything a page shows that could name a file (title, headings, buttons, links, popups, the text), as one comparable string. */
+function pageText(page: PageSnapshot): string {
+  return textOf([page.title, ...page.headings, ...page.links, ...page.buttons, ...page.dialogs, page.visibleText, page.focused]);
+}
+
+/** Is this name anywhere on the page as it was looked at? */
 function mentions(page: PageSnapshot, name: string): boolean {
   const want = normalizeText(name);
-  return want !== '' && textOf([page.title, ...page.headings, ...page.links, ...page.buttons, ...page.dialogs, page.visibleText, page.focused]).includes(want);
+  return want !== '' && pageText(page).includes(want);
+}
+
+/**
+ * The start of a file's name, without its extension: the first two words, each cut to five letters — what a chat app still shows when it
+ * cuts a long name short, even if the cut falls in the middle of a word ("Chaluvagali Raghav…").
+ */
+function leadWords(name: string): string[] {
+  return normalizeText(name.replace(/\.[^./\\]+$/, ''))
+    .split(' ')
+    .filter((w) => w.length >= 3)
+    .slice(0, 2)
+    .map((w) => w.slice(0, 5));
+}
+
+/** What to ask the page's own search for when the whole name may be cut: the name's first word, or its first two when that is short. */
+function leadPhrase(name: string): string {
+  const words = normalizeText(name.replace(/\.[^./\\]+$/, '')).split(' ').filter((w) => w.length >= 3);
+  const first = words[0];
+  return first === undefined ? '' : first.length >= 5 ? first : words.slice(0, 2).join(' ');
+}
+
+/**
+ * Is this file on the page? Its whole name, or — because a chat app cuts a long name short ("Chaluvagali Raghavendra…") and writes the
+ * extension apart or not at all — its first words. Demanding the whole name made a send the user had already agreed to be refused
+ * for ever ("I can no longer see the file…") in real use.
+ */
+function fileShown(page: PageSnapshot, name: string): boolean {
+  if (mentions(page, name)) return true;
+  const lead = leadWords(name);
+  if (lead.length === 0) return false;
+  const text = pageText(page);
+  return lead.every((w) => text.includes(w));
+}
+
+/** The same, but only in the page's popups: is the file's preview still open? */
+function previewShows(page: PageSnapshot, name: string): boolean {
+  const popups = textOf(page.dialogs);
+  const whole = normalizeText(name);
+  if (whole !== '' && popups.includes(whole)) return true;
+  const lead = leadWords(name);
+  return lead.length > 0 && lead.every((w) => popups.includes(w));
 }
 
 const SEND_CONTROL = /^(send|send (?:message|now|it|file|files|photo|photos|video|document|attachment)|submit|post)$/;
@@ -179,7 +261,8 @@ export function createChatSendGate(session: ChatSession, policy: CommunicationPo
     const chat = session.chat();
     const file = session.attachment();
     // The yes was for a file: it only still counts while that file can be seen waiting on the page (a cancelled preview does not count).
-    const waiting = file === null || mentions(page, file);
+    // If the attach step could only tell that a preview had opened (not read the name), an open popup is the same evidence here.
+    const waiting = file === null || fileShown(page, file) || (session.attachedAs() === 'preview_opened' && page.dialogs.length > 0);
     if (chat !== null && waiting && session.isAuthorized(chat.label, file ?? undefined)) return { reason: null, question: '' };
     const what = file === null ? 'this message' : waiting ? `the file "${file}"` : null;
     if (what === null) {
@@ -213,6 +296,26 @@ export function createChatSendGate(session: ChatSession, policy: CommunicationPo
 }
 
 // -------------------------------------------------------------------------------------------------------- the tools
+/**
+ * Where find_chat tells the contact book which chats it saw. It hears only chat NAMES — the rows the app showed in answer to a name
+ * the user asked for, and the chat that was opened — never a preview or a message. Whether anything is kept is the book's business
+ * (nothing is, until the user said yes).
+ */
+export interface ChatNameSink {
+  /** Remembers these names if the user agreed to that; returns how many were new. */
+  learn(appId: string, labels: readonly string[]): number;
+  used(appId: string, label: string): void;
+  /** Whether the user has agreed to Eya remembering chat names. */
+  learning(): boolean;
+  /** Of several chats that all fit what was said, the one the user messages by far the most (null when none stands out, or nothing is kept). */
+  favourite?(appId: string, labels: readonly string[]): string | null;
+  /**
+   * After a send was confirmed: when the user has never been asked whether Eya may remember chat names, makes that the question waiting
+   * for a yes and returns the words to ask it in; otherwise null. (Remembering names starts only with that yes.)
+   */
+  offerConsent?(appId: string, label: string): string | null;
+}
+
 export interface ChatToolDeps {
   readonly service: BrowserAutomationService & Partial<BrowserItemLister> & Partial<BrowserFileAttach>;
   readonly policy: CommunicationPolicy;
@@ -220,6 +323,8 @@ export interface ChatToolDeps {
   readonly folders: KnownFolders;
   readonly files?: FileAccess;
   readonly sleep?: (ms: number) => Promise<void>;
+  /** The contact book, to learn names as chats are looked for and opened. Optional. */
+  readonly names?: ChatNameSink;
 }
 
 export function createChatTools(deps: ChatToolDeps): Tool[] {
@@ -234,13 +339,14 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
   });
 
   // ----------------------------------------------------------------------------------------------------- find_chat
-  async function openFound(label: string, itemName: string, appName: string, how: string, known?: string): Promise<ToolResult> {
+  async function openFound(label: string, itemName: string, appName: string, how: string, known?: string, appId?: string): Promise<ToolResult> {
     const click = await service.clickOnPage(itemName); // opening a chat sends nothing
     if (!click.ok) {
       return { ok: false, summary: 'could not open the chat', error: `I found "${label}" but could not open it${'message' in click ? `: ${click.message}` : ''}.` };
     }
     const ending = phoneEndingNear(click.snapshot, label) ?? known ?? null;
     session.openedChat({ app: appName, label, ...(ending !== null ? { phoneEnding: ending } : {}) });
+    if (appId !== undefined) deps.names?.used(appId, label);
     session.markBaseline(click.snapshot.messageStatus ?? []);
     const confirmed = headerMentions(click.snapshot, label);
     return {
@@ -307,9 +413,17 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
           const rows = toCandidates(await lister.listItems());
           const row = rows.find((r) => normalizeText(r.label) === normalizeText(picked.label));
           if (row === undefined) return { ok: false, summary: 'chat not showing', error: `"${picked.label}" is not in the list that is showing now. Call find_chat with the name again.` };
-          return await openFound(picked.label, row.item.name, app.name, 'the choice the user made', picked.phoneEnding);
+          return await openFound(picked.label, row.item.name, app.name, 'the choice the user made', picked.phoneEnding, app.id);
         }
 
+        // A chat app that is still loading (its list is not there yet), or waiting for a log-in, is not "no such chat": say which, so the
+        // caller can wait instead of giving up.
+        const state = chatAppState(before);
+        if (state !== 'ready') {
+          return state === 'login'
+            ? { ok: true, summary: 'log-in needed', data: { status: 'needs_login', hint: 'The chat app is asking the user to log in (a QR code). They must do that themselves; wait for them.' } }
+            : { ok: true, summary: 'still loading', data: { status: 'loading', hint: 'The chat app has not finished loading its chats. Wait a few seconds and look again.' } };
+        }
         const wanted = query as string;
         const parsed = parseChatQuery(wanted);
         if (parsed.names.length === 0 && parsed.digits.length < 2) {
@@ -317,30 +431,61 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
         }
         // Type it into the app's own search box so the list shows what fits; if there is no box, work from what is showing.
         const searchBox = before.inputs.find((i) => SEARCH_FIELD.test(i));
+        let rows: ReturnType<typeof toCandidates>;
         if (searchBox !== undefined) {
+          const listBefore = namesKey(await lister.listItems());
           await service.fillOnPage(searchBox, parsed.names.length > 0 ? parsed.names.join(' ') : parsed.digits);
-          await sleep(500);
+          rows = toCandidates(await listWhenSettled(lister, sleep, listBefore));
+        } else {
+          rows = toCandidates(await lister.listItems());
         }
-        const rows = toCandidates(await lister.listItems());
 
         if (parsed.names.length === 0) {
           // Digits only: a chat list does not show numbers, so the app's own search did the matching.
           if (rows.length === 0) return { ok: true, summary: 'no chat found', data: { status: 'none', hint: 'No chat matches those digits. Ask the user for the name instead.' } };
           const how = "the app's own search on those digits";
-          if (rows.length === 1 && shouldOpen) return await openFound((rows[0] as (typeof rows)[number]).label, (rows[0] as (typeof rows)[number]).item.name, app.name, how);
+          if (rows.length === 1 && shouldOpen) return await openFound((rows[0] as (typeof rows)[number]).label, (rows[0] as (typeof rows)[number]).item.name, app.name, how, undefined, app.id);
           if (rows.length === 1) return { ok: true, summary: 'one chat matches', data: { status: 'found', chat: (rows[0] as (typeof rows)[number]).label, matchedBy: how } };
           return ambiguousResult(rows.map((r) => ({ candidate: r, strength: 'strong', reason: 'phone number', score: 0 }) as ChatMatch<(typeof rows)[number]>), how);
         }
 
-        const resolution = resolveChat(wanted, rows, { recent: session.recent() });
+        let resolution = resolveChat(wanted, rows, { recent: session.recent() });
+        if (resolution.kind === 'none' && searchBox !== undefined) {
+          // Nothing fits. A search can be answered late (the app asks its server, or it is busy), so look once more before saying so.
+          await sleep(400);
+          rows = toCandidates(await listWhenSettled(lister, sleep, namesKey([])));
+          resolution = resolveChat(wanted, rows, { recent: session.recent() });
+        }
+        const heard = parsed.names.length === 1 ? (parsed.names[0] as string) : '';
+        if (resolution.kind === 'none' && searchBox !== undefined && heard.length >= 3) {
+          // A name the speech recogniser spelled by ear ("aka" for the chat called "Akka"): the app's search cannot find a spelling it does
+          // not have, so look at everything that starts the same way, and take only a name that SOUNDS like what was said.
+          const listBefore = namesKey(await lister.listItems());
+          await service.fillOnPage(searchBox, heard.slice(0, 2));
+          const alike = toCandidates(await listWhenSettled(lister, sleep, listBefore)).filter((r) => soundsLike(heard, r.label));
+          resolution = resolveChat(heard, alike, { recent: session.recent() });
+        }
         if (resolution.kind === 'none') {
           return { ok: true, summary: 'no chat found', data: { status: 'none', hint: 'No chat matches that name. Ask the user for another spelling, or a number to search by. Do not guess.' } };
         }
-        if (resolution.kind === 'ambiguous') return ambiguousResult(resolution.matches, 'name');
+        // The rows that fit what the user asked for are names worth remembering (only list rows with a title line, never other things on
+        // the page); the book keeps them only if the user said yes to that.
+        const fitting = resolution.kind === 'ambiguous' ? resolution.matches.map((x) => x.candidate) : [resolution.match.candidate];
+        deps.names?.learn(app.id, fitting.filter((c) => c.item.primary !== undefined).map((c) => c.label));
+        let usual = false;
+        if (resolution.kind === 'ambiguous') {
+          // Several chats fit. If one of them is plainly the user's usual (opened far more often than the rest), that is the one; they are
+          // still told who it is before anything is sent.
+          const favourite = deps.names?.favourite?.(app.id, resolution.matches.map((x) => x.candidate.label)) ?? null;
+          const chosen = favourite === null ? undefined : resolution.matches.find((x) => normalizeText(x.candidate.label) === normalizeText(favourite));
+          if (chosen === undefined) return ambiguousResult(resolution.matches, 'name');
+          resolution = { kind: 'unique', match: chosen };
+          usual = true;
+        }
         const m = resolution.match;
-        const how = resolution.viaRecent === true ? 'name (the one used earlier in this conversation)' : m.strength === 'fuzzy' ? 'a close spelling of the name' : m.reason;
+        const how = usual ? 'name (the one the user messages most)' : resolution.viaRecent === true ? 'name (the one used earlier in this conversation)' : m.strength === 'fuzzy' ? 'a close spelling of the name' : m.reason;
         if (!shouldOpen) return { ok: true, summary: `found ${m.candidate.label}`, data: { status: 'found', chat: m.candidate.label, matchedBy: how } };
-        const result = await openFound(m.candidate.label, m.candidate.item.name, app.name, how, m.phoneEnding);
+        const result = await openFound(m.candidate.label, m.candidate.item.name, app.name, how, m.phoneEnding, app.id);
         return m.strength === 'fuzzy' && result.ok ? { ...result, data: { ...result.data, note: 'This was a close spelling, not an exact match: say the name you opened when asking to send.' } } : result;
       } catch (err) {
         if (err instanceof BrowserUnavailableError) return unavailable(err);
@@ -351,8 +496,8 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
 
   // --------------------------------------------------------------------------------------------------- attach_file
   async function confirmAttachment(name: string): Promise<{ readonly shown: 'name_visible' | 'preview_opened'; readonly marks: readonly string[] } | null> {
-    for (let attempt = 0; attempt < 6; attempt += 1) {
-      await sleep(attempt === 0 ? 400 : 700);
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      await sleep(attempt === 0 ? 250 : 300); // looking is cheap (about 10 ms), so look often; about the same ceiling as before
       const snap = await service.inspectPage();
       const marks = snap.messageStatus ?? [];
       const want = normalizeText(name);
@@ -436,7 +581,7 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
             data: { status: 'not_confirmed', file: name },
           };
         }
-        session.attached(name);
+        session.attached(name, shown.shown);
         session.markBaseline(shown.marks); // delivery marks that are already there say nothing about this send
         return {
           ok: true,
@@ -493,8 +638,10 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
       try {
         let last: PageSnapshot | null = null;
         let sawEvidence = false;
-        for (let attempt = 0; attempt < 12; attempt += 1) {
-          if (attempt > 0) await sleep(700);
+        // Looking costs about 10 ms, so look often: a message usually shows its first delivery mark within a fraction of a second, and
+        // waiting 700 ms between looks added most of that to every send. (Same ceiling as before: about eight seconds.)
+        for (let attempt = 0; attempt < 32; attempt += 1) {
+          if (attempt > 0) await sleep(250);
           const snap = await service.inspectPage();
           last = snap;
           if (policy.appForUrl(snap.url) === null) return notChatPage(snap.url);
@@ -503,13 +650,30 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
             finished(snap);
             return { ok: false, summary: 'it failed to send', error: `The app shows "${latest}" next to the latest message: it did NOT go. Tell the user it failed.`, data: { status: 'failed', mark: latest } };
           }
-          const stillInPreview = fileName !== undefined && snap.dialogs.some((d) => normalizeText(d).includes(normalizeText(fileName)));
+          const stillInPreview = fileName !== undefined && previewShows(snap, fileName);
           if (stillInPreview) continue; // Send has not gone through yet: the preview is still open
-          const found = await service.findOnPage(needle);
+          let found = await service.findOnPage(needle);
           sawEvidence = found.matches.length > 0 || found.textMatches.length > 0;
+          if (!sawEvidence && fileName !== undefined && leadPhrase(fileName) !== '') {
+            // The sent file's bubble may show a long name cut short: look for the start of it too.
+            found = await service.findOnPage(leadPhrase(fileName));
+            sawEvidence = found.matches.length > 0 || found.textMatches.length > 0;
+          }
           if (sawEvidence && latest !== null && STATUS_SENT.has(latest)) {
+            const chatNow = session.chat();
+            const app = policy.appForUrl(snap.url);
             finished(snap);
-            return { ok: true, summary: 'it was sent', data: { status: 'sent', mark: latest, ...(fileName !== undefined ? { file: fileName } : {}) } };
+            const offer = chatNow !== null && app !== null ? (deps.names?.offerConsent?.(app.id, chatNow.label) ?? null) : null;
+            return {
+              ok: true,
+              summary: 'it was sent',
+              data: {
+                status: 'sent',
+                mark: latest,
+                ...(fileName !== undefined ? { file: fileName } : {}),
+                ...(offer !== null ? { alsoAsk: offer, next: 'Tell the user it was sent. Then ask them exactly what alsoAsk says, and when they answer call quick_command (it reads their answer).' } : {}),
+              },
+            };
           }
         }
         const latest = last === null ? null : newestNew(last);
@@ -537,5 +701,58 @@ export function createChatTools(deps: ChatToolDeps): Tool[] {
     },
   };
 
-  return [findChat, attachFile, verifySent];
+  // ------------------------------------------------------------------------------------------------ learn_chat_names
+  const MAX_LEARN_AT_ONCE = 60;
+  const learnChatNames: Tool = {
+    schema: {
+      name: 'learn_chat_names',
+      status: 'Remembering the chat names…',
+      description:
+        'Remember the NAMES of the chats showing in the open chat app (names only — never a message, preview, number or picture) so chats can be found instantly later. ' +
+        'Use it ONLY when the user asked Eya to remember or learn their contacts or chat names. It works only after the user has agreed to Eya remembering chat names ' +
+        '(they say so to Eya, or turn it on in Settings); no tool can turn that on, so if it says they have not agreed, tell them to say "remember my WhatsApp contacts". ' +
+        'Returns how many names were new — not the names.',
+      args: {},
+    },
+    async execute(): Promise<ToolResult> {
+      const names = deps.names;
+      if (names === undefined || !names.learning()) {
+        return {
+          ok: false,
+          summary: 'not agreed',
+          error: 'The user has not agreed to Eya remembering chat names, so nothing was read. Tell them they can say "remember my WhatsApp contacts" to allow it.',
+        };
+      }
+      const lister = service as Partial<BrowserItemLister>;
+      if (typeof lister.listItems !== 'function') return { ok: false, summary: 'not available', error: 'Reading the chat list is not available in this browser window.' };
+      try {
+        const page = await service.inspectPage(); // refused here (CommunicationAccessError) when the chat app is switched off
+        const app = policy.appForUrl(page.url);
+        if (app === null) return notChatPage(page.url);
+        // An earlier search leaves the list showing only its results: empty the search box so the whole list is what is read. (Best
+        // effort — typing nothing in a search box harms nothing, and if it cannot be done the list is read as it is.)
+        const searchBox = page.inputs.find((i) => SEARCH_FIELD.test(i));
+        if (searchBox !== undefined) {
+          try {
+            await service.fillOnPage(searchBox, '');
+            await sleep(400);
+          } catch {
+            // read what is showing
+          }
+        }
+        // Only list rows with a title line, and only names that read as names; the book checks again and keeps nothing else.
+        const labels = toCandidates(await lister.listItems())
+          .filter((c) => c.item.primary !== undefined)
+          .map((c) => c.label)
+          .slice(0, MAX_LEARN_AT_ONCE);
+        const added = names.learn(app.id, labels);
+        return { ok: true, summary: `learned ${added} chat name${added === 1 ? '' : 's'}`, data: { status: 'learned', app: app.name, appId: app.id, learned: added, seen: labels.length } };
+      } catch (err) {
+        if (err instanceof BrowserUnavailableError) return unavailable(err);
+        return { ok: false, summary: 'could not read', error: `I could not read the chat names: ${err instanceof Error ? err.message : String(err)}` };
+      }
+    },
+  };
+
+  return [findChat, attachFile, verifySent, learnChatNames];
 }

@@ -12,25 +12,33 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "perf:idle": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/idle-footprint.ps1",
+    "fetch-models": "node scripts/fetch-models.mjs",
+    "icon": "node scripts/make-icon.mjs",
+    "pack": "npm run build && npm run fetch-models && npm run icon && electron-builder --dir",
+    "dist": "npm run build && npm run fetch-models && npm run icon && electron-builder --win nsis"
   },
   "dependencies": {
-    "@huggingface/transformers": "^3.8.1",
-    "kokoro-js": "^1.2.1",
+    "node-sqlite3-wasm": "^0.8.60",
     "playwright-core": "^1.63.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "sherpa-onnx-node": "^1.13.8",
     "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@huggingface/transformers": "^3.8.1",
     "@types/node": "^22.10.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^4.3.3",
     "electron": "^33.2.0",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^2.3.0",
+    "kokoro-js": "^1.2.1",
+    "rcedit": "^4.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "typescript": "^5.6.3",
     "vite": "^5.4.11",
     "vitest": "^2.1.5"
@@ -44,5 +52,65 @@
     "onnxruntime-node@1.21.0": true,
     "sharp@0.34.5": true,
     "protobufjs@7.6.6": true
+  },
+  "build": {
+    "appId": "com.rakesh.eya",
+    "productName": "Eya",
+    "copyright": "Eya",
+    "artifactName": "Eya-Setup-${version}.${ext}",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**",
+      "package.json",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "models",
+        "to": "models",
+        "filter": [
+          "kws/**",
+          "onnx-community/**"
+        ]
+      },
+      {
+        "from": "eya-chrome-extension",
+        "to": "eya-chrome-extension",
+        "filter": [
+          "**/*",
+          "!eya-pairing.json"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/sherpa-onnx-node/**",
+      "**/node_modules/sherpa-onnx-win-x64/**"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Eya",
+      "runAfterFinish": true
+    },
+    "afterPack": "scripts/after-pack.cjs"
   }
 }

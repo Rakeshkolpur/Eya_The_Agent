@@ -5,8 +5,11 @@ import type { BrowserWorldTracker } from '@main/chrome/browserWorld';
 import type { BrowserName } from '@main/chrome/protocol';
 import type {
   ActOnPageResult,
+  AdsMode,
+  AdsState,
   AttachFileRequest,
   AttachFileResult,
+  BrowserAdHelper,
   BrowserAutomationService,
   BrowserCapture,
   BrowserFileAttach,
@@ -157,12 +160,12 @@ function needsReload(browsers: readonly BrowserName[]): BrowserUnavailableError 
  * It keeps a live picture of the user's real browsers (from the extension's events) and:
  *   - opens a site by REUSING a tab the user already has on it, else a new tab in the SAME browser, else — if no browser
  *     is open — by starting their NORMAL browser (never a separate profile) and waiting for its extension;
- *   - picks between Chrome and Edge by where the site's session already is, not at random;
+ *   - uses Chrome unless the user names another browser ("in Edge") — then that one, started or woken if need be;
  *   - never silently substitutes a different browser: if the user's one is gone mid-task, it stops and says so;
  *   - notices when the user changed something themselves, and says so instead of carrying on from a stale picture;
  *   - can wait, then carry on by itself, while the user signs in or completes a check.
  */
-export class BrowserSessionManager implements BrowserAutomationService, BrowserTabControl, BrowserCapture, BrowserItemLister, BrowserFileAttach {
+export class BrowserSessionManager implements BrowserAutomationService, BrowserTabControl, BrowserCapture, BrowserItemLister, BrowserAdHelper, BrowserFileAttach {
   private pinned: Pinned = null;
   private readonly services = new Map<BrowserName, UserBrowser>();
   private readonly lastActionAt = new Map<BrowserName, number>();
@@ -196,6 +199,7 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
         new ChromeBrowserService(link, {
           environment: 'your_browser',
           browserName: browser,
+          quickFor: (url) => this.deps.policy?.appForUrl(url) != null,
           unavailableMessage: `Eya has lost her connection to the user's ${NAME[browser]} (it may have been closed). Ask them to check it is open with the Eya Browser Bridge extension on.`,
         });
       this.services.set(browser, s);
@@ -244,15 +248,22 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
   }
 
   // ---------------------------------------------------------------- selection
+  /** The browser Eya uses unless the user names another: Chrome (or the one set with EYA_PREFERRED_BROWSER). */
+  private standardBrowser(): BrowserName {
+    return this.deps.preferred ?? 'chrome';
+  }
+
   private selectFor(url?: string): Selection | null {
     const connected = this.deps.bridge.connectedBrowsers();
     const tabsOnSite = url === undefined ? [] : this.deps.world.tabsOnSite(url).map((t) => ({ browser: t.browser, url: t.url, active: t.active }));
     return selectBrowser({
       connected,
       tabsOnSite,
-      taskBrowser: this.pinnedBrowser(),
+      // A new page the user did not place anywhere goes to the standard browser, not wherever the last page happened to open.
+      taskBrowser: url === undefined ? this.pinnedBrowser() : null,
       activeBrowser: this.deps.world.activeBrowser(),
       preferred: this.deps.preferred ?? null,
+      defaultBrowser: this.standardBrowser(),
       ...(url !== undefined ? { url } : {}),
     });
   }
@@ -286,44 +297,15 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     });
   }
 
-  /**
-   * Where a new site should open. A connected browser (preferring the one that already has the site); failing that, the
-   * user's normal browser is started or woken — and only if its extension still does not answer does this give up, out loud.
-   */
+  /** Which browser to start when none is connected and Chrome is not on this PC: the preferred one if it is there, else Chrome before Edge. */
   private pickBrowser(list: readonly BrowserName[]): BrowserName | undefined {
     return this.deps.preferred != null && list.includes(this.deps.preferred) ? this.deps.preferred : (['chrome', 'edge', 'other'] as const).find((b) => list.includes(b));
   }
 
-  /**
-   * A browser whose extension cannot connect (an old version that needs a reload, or one not paired yet) must not stop the task when
-   * another of the user's OWN browsers is already set up with Eya: the site is opened there, and the result says so and why.
-   * Only the user's normal browsers are ever used for this — never a separate profile. Null when there is no such browser.
-   */
-  private async useHealthyBrowser(url: string, blocked: readonly BrowserName[]): Promise<{ browser: BrowserName; startedBrowser: boolean; via: string } | null> {
-    const info = this.deps.bridge.info();
-    const paired = (['chrome', 'edge', 'other'] as const).filter((b) => !blocked.includes(b) && info.browsers[b]?.paired === true);
-    if (paired.length === 0) return null;
-    const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
-    const target = this.pickBrowser(paired.filter((b) => installed.includes(b) || running.includes(b)));
-    if (target === undefined) return null;
-    if (!(await this.deps.launcher.launch(target, url))) return null;
-    log.info('using the other set-up browser', { browser: target, instead: blocked });
-    if (!(await this.deps.bridge.waitForConnection(target, this.deps.launchWaitMs ?? 25_000))) return null;
-    const outdated = this.deps.bridge.outdated().some((b) => blocked.includes(b));
-    return {
-      browser: target,
-      startedBrowser: !running.includes(target),
-      via:
-        `The Eya extension in the user's ${nameList(blocked)} ${outdated ? 'is the old version and needs a reload' : 'is not connected yet'}, ` +
-        `so this was opened in the user's ${NAME[target]} instead. Say that to the user in one short sentence` +
-        `${outdated ? ` and, if they want ${nameList(blocked)} to work too, tell them to reload the extension there` : ''}.`,
-    };
-  }
-
   /** The user said which browser ("open it in Edge"): that one — started or woken if need be, never quietly swapped for another. */
-  private async resolveNamed(url: string, want: BrowserName): Promise<{ browser: BrowserName; startedBrowser: boolean }> {
+  private async resolveNamed(url: string, want: BrowserName, reason = 'the user named it'): Promise<{ browser: BrowserName; startedBrowser: boolean }> {
     if (this.deps.bridge.isConnected(want)) {
-      log.info('browser chosen', { browser: want, reason: 'the user named it' });
+      log.info('browser chosen', { browser: want, reason });
       return { browser: want, startedBrowser: false };
     }
     if (this.deps.bridge.waitingToPair().includes(want)) throw this.blockedError([want]);
@@ -347,8 +329,15 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     );
   }
 
-  private async resolveForOpen(url: string, want?: BrowserName): Promise<{ browser: BrowserName; startedBrowser: boolean; via?: string }> {
+  private async resolveForOpen(url: string, want?: BrowserName): Promise<{ browser: BrowserName; startedBrowser: boolean }> {
     if (want !== undefined) return this.resolveNamed(url, want);
+    // Nothing was named, so it is the standard browser (Chrome) — started or woken if need be, and never quietly swapped for Edge. Only
+    // on a PC that has no Chrome at all do the older rules (where the site is open, where the user is) decide.
+    const standard = this.standardBrowser();
+    if (!this.deps.bridge.isConnected(standard)) {
+      const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
+      if (installed.includes(standard) || running.includes(standard)) return this.resolveNamed(url, standard, 'the standard browser');
+    }
     const sel = this.selectFor(url);
     if (sel !== null) {
       log.info('browser chosen', { browser: sel.browser, reason: sel.reason });
@@ -356,11 +345,7 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     }
 
     const waiting = this.deps.bridge.waitingToPair();
-    if (waiting.length > 0) {
-      const other = await this.useHealthyBrowser(url, waiting);
-      if (other !== null) return other;
-      throw this.blockedError(waiting);
-    }
+    if (waiting.length > 0) throw this.blockedError(waiting);
 
     const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
 
@@ -369,11 +354,7 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
       const woke = await this.waitForAny(running, this.deps.runningWaitMs ?? 8000);
       if (woke !== null) return { browser: woke, startedBrowser: false };
       const stillWaiting = this.deps.bridge.waitingToPair();
-      if (stillWaiting.length > 0) {
-        const other = await this.useHealthyBrowser(url, stillWaiting);
-        if (other !== null) return other;
-        throw this.blockedError(stillWaiting);
-      }
+      if (stillWaiting.length > 0) throw this.blockedError(stillWaiting);
     }
 
     const target = this.pickBrowser(running.length > 0 ? running : installed);
@@ -446,9 +427,8 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
 
     let browser: BrowserName;
     let startedBrowser = false;
-    let via: string | undefined;
     try {
-      ({ browser, startedBrowser, via } = await this.resolveForOpen(url, options?.browser));
+      ({ browser, startedBrowser } = await this.resolveForOpen(url, options?.browser));
     } catch (err) {
       // Legacy opt-in mode only: the older behaviour of using Eya's own window when the user's browser is not there.
       if (this.deps.mode === 'auto' && options?.browser === undefined && err instanceof BrowserUnavailableError) {
@@ -465,7 +445,6 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     return this.stamp(snapshot, 'your_browser', [
       `Opened in the user's ${NAME[browser]}.`,
       ...(startedBrowser ? [`${NAME[browser]} was not running, so Eya started it (their normal profile) and opened the page there.`] : []),
-      ...(via !== undefined ? [via] : []),
       ...notes,
     ]);
   }
@@ -490,6 +469,18 @@ export class BrowserSessionManager implements BrowserAutomationService, BrowserT
     const items = await lister.listItems();
     if (browser !== undefined) this.touched(browser);
     return items;
+  }
+
+  /** Presses the open page's own Skip / close buttons on adverts. Only in the user's own browser (the Eya extension does the pressing). */
+  async ads(mode: AdsMode, options: { readonly keepPlaying?: boolean; readonly play?: boolean } = {}): Promise<AdsState> {
+    const { svc, browser } = this.forWork();
+    const helper = svc as Partial<BrowserAdHelper>;
+    if (typeof helper.ads !== 'function') {
+      throw new Error("Skipping adverts only works in the user's own browser (Chrome or Edge with the Eya extension), not in this window.");
+    }
+    const state = await helper.ads(mode, options);
+    if (browser !== undefined) this.touched(browser);
+    return state;
   }
 
   /** Hands a file to the open page's own file picker (nothing is sent). Only through the user's own browser, and never into a chat app that is switched off. */

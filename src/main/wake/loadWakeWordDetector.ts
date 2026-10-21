@@ -17,11 +17,10 @@ const MODEL_DIR_NAME = 'sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01';
  * DLL, ...) this returns null and Eya falls back to noticing her name in
  * whatever a normal utterance transcribes to, as she always did.
  *
- * NOTE: this project has no production packaging step yet (it only runs via
- * `npm run dev`), so the model is read straight from the project's own
- * `models/kws` folder via `app.getAppPath()`. Packaging would need to ship
- * that folder, and the `sherpa-onnx-node` / `sherpa-onnx-win-x64` native
- * files, alongside the built app.
+ * The model is read from `models/kws` in the project, or from the install's
+ * `resources/models/kws` when installed (the installer copies it there, and
+ * unpacks the `sherpa-onnx-node` / `sherpa-onnx-win-x64` native files out of
+ * app.asar so the addon can load).
  */
 export function loadWakeWordDetector(): WakeWordDetector | null {
   try {
@@ -29,7 +28,8 @@ export function loadWakeWordDetector(): WakeWordDetector | null {
     // only be touched by code that runs in the main process.
     const require = createRequire(import.meta.url);
     const binding = require('sherpa-onnx-node') as unknown as KeywordSpotterBinding;
-    const dir = join(app.getAppPath(), 'models', 'kws', MODEL_DIR_NAME);
+    // Installed: the install's resources folder (a native library cannot read inside app.asar). From source: the project's own folder.
+    const dir = join(app.isPackaged ? process.resourcesPath : app.getAppPath(), 'models', 'kws', MODEL_DIR_NAME);
     const detector = new WakeWordDetector({
       binding,
       readBpeModel: (path) => readFileSync(path),

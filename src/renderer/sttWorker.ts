@@ -1,5 +1,6 @@
 import { env, pipeline } from '@huggingface/transformers';
 import { chooseBackend } from './sttBackend';
+import { useBundledRuntime } from './ortRuntime';
 import type { SttBackend } from './sttBackend';
 
 // On-device speech recognition. Runs in a worker: transcribing is seconds of
@@ -109,11 +110,15 @@ async function timeRun(model: Transcriber, audio: Float32Array): Promise<number>
 
 async function init(requested: 'auto' | SttBackend): Promise<void> {
   started = performance.now();
-  env.allowLocalModels = false; // never probe the dev server for a local copy
+  // The model comes from files on this PC (eya-models://, served by the main process; the installer carries them), so a first run with no
+  // internet still hears. A file the app does not have answers "not found" and the library downloads it from the hub as before.
+  env.allowLocalModels = true;
+  env.localModelPath = 'eya-models://app/';
   // Multi-threaded WebAssembly needs cross-origin isolation; fall back to one thread.
   threads = scope.crossOriginIsolated ? Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1)) : 1;
   const wasm = env.backends.onnx.wasm;
   if (wasm !== undefined) wasm.numThreads = threads;
+  useBundledRuntime(); // the engine that runs the model is local too, not fetched from a CDN
 
   try {
     cpu = await loadCpu();

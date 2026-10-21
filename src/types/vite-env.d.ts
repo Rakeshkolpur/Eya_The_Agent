@@ -19,5 +19,11 @@ interface Window {
     pushMic(samples16k: Float32Array): void;
     /** Feeds 16kHz audio straight to the wake-word model, bypassing microphone capture. */
     pushWakeAudio(samples16k: Float32Array): void;
+    /** Shows this memory snapshot in the Memory panel instead of the real one, to look at states that are hard to reach (an open offer). */
+    previewMemory(snapshot: unknown): void;
+    /** Puts lines into the chat as if they had been said earlier in a live conversation (for checking that a chat is carried over). */
+    seedThread(lines: ReadonlyArray<{ who: 'user' | 'eya'; text: string }>): void;
+    /** Whether the hands-free chat (heard here, answered by the AI, spoken) is going. */
+    gptTalkActive(): boolean;
   };
 }

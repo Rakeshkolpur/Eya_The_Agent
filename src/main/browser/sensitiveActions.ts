@@ -23,7 +23,7 @@ function normalize(s: string): string {
 }
 
 const PURCHASE =
-  /\b(buy now|place (?:your |my |the )?order|pay now|pay (?:securely|[$₹€£]\s?\d+)|complete (?:your |my |the )?(?:purchase|order|payment)|confirm (?:and pay|order|purchase|payment)|submit (?:your |my |the )?order|proceed to pay(?:ment)?|make (?:a )?payment|donate now)\b/;
+  /\b(buy now|place (?:your |my |the )?order|pay now|pay (?:securely|[$₹€£]\s?\d+)|complete (?:your |my |the )?(?:purchase|order|payment)|confirm (?:and pay|order|purchase|payment)|submit (?:your |my |the )?order|proceed to pay(?:ment)?|make (?:a )?payment|donate now|confirm (?:and )?book(?:ing)?|complete (?:your |my |the )?booking|pay (?:and|&) book|book (?:and|&) pay|confirm (?:your |my |the )?(?:tickets?|seats?|reservation))\b/;
 
 const SEND = /^(send|send (?:message|email|mail|now|reply)|reply all|post|post now|publish|tweet|share now|send it)$/;
 

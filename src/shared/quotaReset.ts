@@ -66,11 +66,13 @@ function dailyBack(info: LimitInfo, now: Date, options: TimeOptions): string {
  * the daily limit at the moment Google gave (in the user's own time), a short wait as named, and — when Google named
  * nothing — both possibilities, honestly.
  */
-export function limitMessage(info: LimitInfo, now: Date, options: TimeOptions = {}): string {
+export function limitMessage(info: LimitInfo, now: Date, options: TimeOptions = {}, suggestBackup = false): string {
   if (info.daily) {
     return (
       `I've used up today's free Gemini limit, so I can't do that until it comes back ${dailyBack(info, now, options)}. ` +
-      'Try again after that, or turn on billing in Google AI Studio and it works straight away.'
+      (suggestBackup
+        ? 'Try again after that, add a free backup AI key under Settings so this does not stop you, or turn on billing in Google AI Studio and it works straight away.'
+        : 'Try again after that, or turn on billing in Google AI Studio and it works straight away.')
     );
   }
   if (info.retryAfterMs !== undefined) {
@@ -80,6 +82,25 @@ export function limitMessage(info: LimitInfo, now: Date, options: TimeOptions = 
     "I've hit Gemini's free usage limit. If it's the short per-minute one, try again in about a minute. " +
     `If it still says this, it's the daily limit, which comes back ${dailyBack({ daily: true }, now, options)}.`
   );
+}
+
+/**
+ * Every online AI Eya has (Gemini and the backup) is out of allowance or rate limited. Says which, when they come back, and that
+ * everything that does not need an AI still works: that is the true state, and it is more useful than "try later".
+ */
+export function allLimitedMessage(names: readonly string[], info: LimitInfo, now: Date, options: TimeOptions = {}): string {
+  const who =
+    names.length === 1 ? `${names[0]} has` : names.length === 2 ? `${names[0]} and ${names[1]} have both` : `${names.join(', ')} have all`;
+  const works =
+    'Everything that does not need an AI still works: opening apps, files, folders and websites, searching, downloads, Word commands like page numbers and the running index, and messaging by name.';
+  if (info.daily) {
+    return (
+      `${who} used up ${names.length === 1 ? 'its' : 'their'} free allowance for today, so I can't do the AI part until it comes back ${dailyBack(info, now, options)}. ${works} ` +
+      'To keep going today, turn on billing in Google AI Studio or add another backup key under Settings.'
+    );
+  }
+  const wait = info.retryAfterMs !== undefined ? shortWait(info.retryAfterMs) : 'about a minute';
+  return `${who} hit a usage limit for a moment. Try again in ${wait}. ${works}`;
 }
 
 /** For Gemini Live (Talk mode), which only says "quota exceeded" without which limit it was or when it ends. */

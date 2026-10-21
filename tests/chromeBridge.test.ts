@@ -16,8 +16,13 @@ import {
 } from '../src/main/chrome/protocol';
 import type { BrowserName } from '../src/main/chrome/protocol';
 
+const FOLDER_KEY = 'c0ffee'.repeat(11); // 66 characters, like the key Eya leaves in the extension's folder
+
 class MemorySecrets implements SecretStore {
   hashes = new Map<BrowserName, string>();
+  bootstrapToken() {
+    return FOLDER_KEY;
+  }
   loadHash(b: BrowserName) {
     return this.hashes.get(b) ?? null;
   }
@@ -312,6 +317,159 @@ describe('pairing, per browser', () => {
     expect(await a.closed).toBe(4003);
     expect(await b.closed).toBe(4003);
     await until(() => bridge.info().browsers['chrome'] === undefined && bridge.info().browsers['edge'] === undefined);
+  });
+});
+
+describe("pairing by itself: the key Eya leaves in the extension's own folder", () => {
+  const keyed = (browser = 'chrome', over: Record<string, unknown> = {}) => hello(browser, { bootstrap: FOLDER_KEY, ...over });
+
+  it('pairs an extension that presents the key — no window, nobody asked — and keeps only the hash of the secret it hands out', async () => {
+    expect(bridge.pairingOpen()).toBe(false);
+    const client = await connect();
+    client.send(keyed());
+    const paired = await client.next();
+    expect(paired['t']).toBe('paired');
+    const secret = paired['secret'] as string;
+    expect(secret).toMatch(/^[0-9a-f]{64}$/);
+    expect(secret).not.toBe(FOLDER_KEY);
+    expect(bridge.isConnected('chrome')).toBe(true);
+    expect(secrets.loadHash('chrome')).toBe(createHash('sha256').update(secret).digest('hex'));
+
+    // and from then on it is the ordinary secret, with no key and no window
+    client.ws.terminate();
+    await client.closed;
+    await until(() => !bridge.isConnected('chrome'));
+    const again = await connect();
+    again.send(hello('chrome', { secret }));
+    expect((await again.next())['t']).toBe('ready');
+  });
+
+  it('a wrong key is turned away exactly like no key, and is counted as waiting', async () => {
+    const wrong = await connect();
+    wrong.send(keyed('chrome', { bootstrap: 'bad'.repeat(22) }));
+    expect((await wrong.next())['reason']).toBe('not_pairing');
+    expect(bridge.isConnected('chrome')).toBe(false);
+    expect(secrets.loadHash('chrome')).toBeNull();
+    expect(bridge.info().waitingToPair).toEqual(['chrome']);
+  });
+
+  it('a key of the wrong length, or an empty one, never matches', async () => {
+    for (const bootstrap of ['', 'x', FOLDER_KEY.slice(0, -1), FOLDER_KEY + 'x']) {
+      const c = await connect();
+      c.send(keyed('chrome', { bootstrap }));
+      expect((await c.next())['reason'], JSON.stringify(bootstrap)).toBe('not_pairing');
+    }
+    expect(bridge.isConnected('chrome')).toBe(false);
+  });
+
+  it('does nothing when this Eya has no folder key to compare with (the window is the only way then)', async () => {
+    await bridge.stop();
+    const plain: SecretStore = { loadHash: () => null, saveHash: () => undefined, clear: () => undefined };
+    bridge = new ChromeBridge({ secrets: plain, port: 0, now: () => clock, helloTimeoutMs: 300, pairingWindowMs: 10_000 });
+    expect(await bridge.start()).toBe(true);
+    const c = await connect();
+    c.send(keyed());
+    expect((await c.next())['reason']).toBe('not_pairing');
+  });
+
+  it('re-pairs an extension that lost its secret (reinstalled), and the old secret stops working', async () => {
+    const { client, secret: oldSecret } = await pair('chrome');
+    client.ws.terminate();
+    await client.closed;
+    await until(() => !bridge.isConnected('chrome'));
+    bridge.closePairingWindow();
+
+    const fresh = await connect();
+    fresh.send(keyed()); // the reinstalled extension has no secret, only the folder's key
+    const paired = await fresh.next();
+    expect(paired['t']).toBe('paired');
+    expect(paired['secret']).not.toBe(oldSecret);
+    fresh.ws.terminate();
+    await fresh.closed;
+    await until(() => !bridge.isConnected('chrome'));
+
+    const stale = await connect();
+    stale.send(hello('chrome', { secret: oldSecret }));
+    expect((await stale.next())['reason']).toBe('bad_secret');
+  });
+
+  it('a wrong secret is still refused as such, even with the key beside it — the extension drops it and comes back with the key', async () => {
+    const { client, secret } = await pair('chrome');
+    client.ws.terminate();
+    await client.closed;
+    await until(() => !bridge.isConnected('chrome'));
+    const c = await connect();
+    c.send(keyed('chrome', { secret: '0'.repeat(64) }));
+    expect(await c.next()).toEqual({ t: 'refused', reason: 'bad_secret' });
+    expect(secrets.loadHash('chrome')).toBe(createHash('sha256').update(secret).digest('hex')); // untouched
+  });
+
+  it('Chrome and Edge each pair by themselves, each with its own secret', async () => {
+    const a = await connect();
+    a.send(keyed('chrome'));
+    const b = await connect();
+    b.send(keyed('edge'));
+    const chromeSecret = (await a.next())['secret'];
+    const edgeSecret = (await b.next())['secret'];
+    expect(chromeSecret).not.toBe(edgeSecret);
+    expect(bridge.connectedBrowsers()).toEqual(['chrome', 'edge']);
+  });
+
+  it('a second profile of a browser that is already connected cannot take its pairing away — it waits until the first is gone', async () => {
+    const first = await connect();
+    first.send(keyed());
+    expect((await first.next())['t']).toBe('paired');
+    const hashBefore = secrets.loadHash('chrome');
+
+    const second = await connect();
+    second.send(keyed());
+    expect((await second.next())['reason']).toBe('not_pairing');
+    expect(bridge.isConnected('chrome')).toBe(true);
+    expect(secrets.loadHash('chrome')).toBe(hashBefore);
+
+    first.ws.terminate();
+    await first.closed;
+    await until(() => !bridge.isConnected('chrome'));
+    const retry = await connect();
+    retry.send(keyed());
+    expect((await retry.next())['t']).toBe('paired');
+  });
+
+  it('is not tied to the window: an open window and a key together still pair once and normally', async () => {
+    bridge.openPairingWindow();
+    const c = await connect();
+    c.send(keyed());
+    expect((await c.next())['t']).toBe('paired');
+    expect(bridge.isConnected('chrome')).toBe(true);
+  });
+
+  it('a hello with something other than text as the key is not a valid message at all, and a long one is cut', () => {
+    expect(parseExtensionMessage(JSON.stringify({ t: 'hello', ext: 'x', browser: 'chrome', bootstrap: 5 }))).toBeNull();
+    const ok = parseExtensionMessage(JSON.stringify({ t: 'hello', ext: 'x', browser: 'chrome', bootstrap: 'k'.repeat(500) }));
+    expect(ok?.t === 'hello' && ok.bootstrap?.length).toBe(200);
+  });
+});
+
+describe('the folder key in the secret file', () => {
+  it('is made once, is the same on every call and after a restart, and survives pairings and "forget everything"', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'eya-secrets-'));
+    try {
+      const path = join(dir, 'chrome-bridge.json');
+      const first = new FileSecretStore(path).bootstrapToken();
+      expect(first).toMatch(/^[0-9a-f]{64}$/);
+      const store = new FileSecretStore(path); // a restart
+      expect(store.bootstrapToken()).toBe(first);
+      store.saveHash('chrome', 'aa'.repeat(32));
+      expect(store.bootstrapToken()).toBe(first);
+      store.clear('chrome');
+      expect(store.bootstrapToken()).toBe(first);
+      store.clear(); // every pairing is forgotten; the copy in the extension's folder must still match
+      expect(store.loadHash('chrome')).toBeNull();
+      expect(store.bootstrapToken()).toBe(first);
+      expect(new FileSecretStore(join(dir, 'other.json')).bootstrapToken()).not.toBe(first);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

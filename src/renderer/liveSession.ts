@@ -1,4 +1,4 @@
-import { buildAudio, buildSetup, buildToolResponse, parseServerMessage } from './liveProtocol';
+import { buildAudio, buildImage, buildSetup, buildText, buildToolResponse, parseServerMessage } from './liveProtocol';
 import type { LiveEvent, LiveSetupOptions, LiveToolResult } from './liveProtocol';
 
 /** The slice of WebSocket this needs, so tests can supply a fake. */
@@ -20,6 +20,10 @@ export interface LiveSessionLike {
   onEvent(listener: (event: LiveEvent) => void): () => void;
   onClose(listener: (info: LiveCloseInfo) => void): () => void;
   sendAudio(pcm: Uint8Array): void;
+  /** A picture of the user's screen (JPEG, base64), while they are sharing it. Optional: a session that cannot see just does not have it. */
+  sendImage?(jpegBase64: string): void;
+  /** A line of text from Eya herself, which the model answers in its own voice. Optional, like sendImage. */
+  sendText?(text: string): void;
   sendToolResults(results: readonly LiveToolResult[]): void;
   close(): void;
 }
@@ -133,12 +137,22 @@ export class LiveSession implements LiveSessionLike {
     if (this.ready && this.socket !== null) this.socket.send(buildAudio(pcm));
   }
 
+  sendImage(jpegBase64: string): void {
+    if (this.ready && this.socket !== null) this.socket.send(buildImage(jpegBase64));
+  }
+
+  sendText(text: string): void {
+    if (this.ready && this.socket !== null) this.socket.send(buildText(text));
+  }
+
   sendToolResults(results: readonly LiveToolResult[]): void {
     if (this.ready && this.socket !== null && results.length > 0) this.socket.send(buildToolResponse(results));
   }
 
   close(): void {
     this.closedByUs = true;
+    // From here nothing more may be sent: a real socket throws if it is written to while closing.
+    this.ready = false;
     this.socket?.close();
   }
 

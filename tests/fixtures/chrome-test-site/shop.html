@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Test Shop</title>
+<style>body { font-family: sans-serif; margin: 20px; } button, input, select { font-size: 15px; padding: 6px; margin: 4px 0; } .row { margin: 8px 0; }</style>
+</head>
+<body>
+<h1 id="h">Test Shop</h1>
+
+<!-- 1. search and results -->
+<div id="search">
+  <label>Search <input id="q" type="text" aria-label="Search"></label>
+  <button id="go" type="button">Search</button>
+</div>
+<div id="results" style="display:none">
+  <div class="row"><b>Red cotton shirt (M)</b> ₹1,099 <button type="button" class="add" data-name="Red cotton shirt (M)" data-price="1099">Add to cart</button></div>
+  <div class="row"><b>Red polyester shirt (M)</b> ₹799 <button type="button" class="add" data-name="Red polyester shirt (M)" data-price="799">Add to cart</button></div>
+  <div class="row"><b>Blue cotton shirt (M)</b> ₹999 <button type="button" class="add" data-name="Blue cotton shirt (M)" data-price="999">Add to cart</button></div>
+</div>
+
+<!-- 2. the cart -->
+<div id="cart" style="display:none">
+  <p id="cartline"></p>
+  <button id="checkout" type="button">Checkout</button>
+</div>
+
+<!-- 3. checkout -->
+<div id="co" style="display:none">
+  <h2>Order summary</h2>
+  <p id="item"></p>
+  <p>Delivery charges ₹49</p>
+  <p id="total"></p>
+  <p>Deliver to: 12-3 Road No 4, Hyderabad 500034</p>
+  <p id="paymethod">Payment method: Cash on delivery</p>
+  <button id="usecard" type="button">Pay by card instead</button>
+  <div id="cardbox" style="display:none">
+    <label>Card number <input id="card" type="text" autocomplete="cc-number" aria-label="Card number"></label>
+    <label>CVV <input id="cvv" type="text" autocomplete="cc-csc" aria-label="CVV"></label>
+  </div>
+  <button id="usecod" type="button">Use cash on delivery</button>
+  <button id="place" type="button">Place order</button>
+</div>
+
+<!-- 4. done -->
+<div id="done" style="display:none"><h2>Order placed</h2><p id="orderid"></p></div>
+
+<script>
+  let picked = null;
+  const show = (id) => { for (const d of ['search', 'results', 'cart', 'co', 'done']) document.getElementById(d).style.display = d === id || (id === 'results' && d === 'search') ? 'block' : 'none'; };
+  window.__placed = 0;
+  document.getElementById('go').addEventListener('click', () => show('results'));
+  for (const b of document.querySelectorAll('.add')) b.addEventListener('click', () => {
+    picked = { name: b.dataset.name, price: Number(b.dataset.price) };
+    document.getElementById('cartline').textContent = 'In your cart: ' + picked.name + ' ₹' + picked.price.toLocaleString('en-IN');
+    show('cart');
+  });
+  document.getElementById('checkout').addEventListener('click', () => {
+    document.getElementById('item').textContent = picked.name + ' x 1   ₹' + picked.price.toLocaleString('en-IN');
+    document.getElementById('total').textContent = 'Total payable ₹' + (picked.price + 49).toLocaleString('en-IN');
+    show('co');
+  });
+  document.getElementById('usecard').addEventListener('click', () => {
+    document.getElementById('cardbox').style.display = 'block';
+    document.getElementById('paymethod').textContent = 'Payment method: Card';
+  });
+  document.getElementById('usecod').addEventListener('click', () => {
+    document.getElementById('cardbox').style.display = 'none';
+    document.getElementById('paymethod').textContent = 'Payment method: Cash on delivery';
+  });
+  document.getElementById('place').addEventListener('click', () => {
+    window.__placed += 1;
+    document.getElementById('orderid').textContent = 'Order ID OD' + (10000 + window.__placed) + ' for ' + picked.name;
+    show('done');
+  });
+</script>
+</body>
+</html>

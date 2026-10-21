@@ -31,10 +31,12 @@ const LEADING_ARTICLE = /^(?:the|my|a|an)\s+/;
  * Reduce it to the bare command so simple requests stay on the instant local
  * path instead of costing a round trip to the language model.
  */
-export function normalizeCommand(raw: string): string {
+export function normalizeCommand(raw: string, options: { readonly keepDots?: boolean } = {}): string {
+  // keepDots leaves a dot inside a word alone ("github.com", "report.pdf"); a full stop at the end of a word is still punctuation.
+  const punctuation = options.keepDots === true ? /(?:\.(?=\s|$)|[,!?;:"])+/g : /[.,!?;:"]+/g;
   let text = raw
     .toLowerCase()
-    .replace(/[.,!?;:"]+/g, ' ')
+    .replace(punctuation, ' ')
     .replace(/\s+/g, ' ')
     .trim();
   for (let i = 0; i < 6; i += 1) {
@@ -46,6 +48,32 @@ export function normalizeCommand(raw: string): string {
   return text.trim();
 }
 
+const LEADING_FILLER_ANY_CASE: readonly RegExp[] = LEADING_FILLER.map((re) => new RegExp(re.source, 'i'));
+
+/**
+ * Drops the polite lead-in ("Hey Eya, could you please ...") from a request WITHOUT changing the rest of it: unlike
+ * normalizeCommand this keeps capital letters and punctuation, which matters when the rest is a message to be sent word for word.
+ */
+export function stripPoliteness(raw: string): string {
+  // Punctuation turned into spaces of the same length, so a position in this copy is the same position in the original.
+  const aligned = raw.replace(/[.,!?;:"]/g, ' ');
+  let at = 0;
+  for (let i = 0; i < 6; i += 1) {
+    at += aligned.length - at - aligned.slice(at).trimStart().length;
+    let moved = false;
+    for (const re of LEADING_FILLER_ANY_CASE) {
+      const m = re.exec(aligned.slice(at));
+      if (m !== null && m[0].length > 0) {
+        at += m[0].length;
+        moved = true;
+        break;
+      }
+    }
+    if (!moved) break;
+  }
+  return raw.slice(at).trim();
+}
+
 /**
  * Local fast-path intent router. Returns undefined for anything ambiguous so
  * the AgentEngine can fall through to the language model.
@@ -54,6 +82,13 @@ export function normalizeCommand(raw: string): string {
  * verb and a concrete object (application, folder, file).
  */
 export class IntentRouter {
+  /**
+   * `installed` is the remembered list of the apps on this PC (see AppCatalog): with it, "open Spotify" or "open Word" goes straight
+   * to the app instead of through the model. It only ever answers for an exact name, and only for opening: closing stays limited to
+   * the apps listed above.
+   */
+  constructor(private readonly installed?: { lookup(spoken: string): string | null }) {}
+
   match(rawText: string): IntentMatch | undefined {
     const text = normalizeCommand(rawText);
     if (text.length === 0) return undefined;
@@ -78,7 +113,11 @@ export class IntentRouter {
     }
     if (remainder.length === 0) return undefined;
     const app = resolveApp(remainder);
-    if (app === undefined) return undefined;
-    return { tool, args: { name: app.canonical }, confidence, canonicalName: app.canonical };
+    if (app !== undefined) return { tool, args: { name: app.canonical }, confidence, canonicalName: app.canonical };
+    if (tool === 'open_application') {
+      const installed = this.installed?.lookup(remainder) ?? null;
+      if (installed !== null) return { tool, args: { name: installed }, confidence, canonicalName: installed };
+    }
+    return undefined;
   }
 }

@@ -223,40 +223,72 @@ describe('modes', () => {
 });
 
 describe('opening a site: always the user\'s own browser', () => {
-  it('Test A/B/D: with Chrome and Edge both open it goes to the one that already has the site (and its session), not to the other', async () => {
+  it('with Chrome and Edge both open it goes to Chrome — even though Edge is the one that already has the site', async () => {
     const r = rig({ connected: ['chrome', 'edge'] });
     r.setTabs('chrome', [{ tabId: 1, url: 'https://news.example/' }, { tabId: 2, url: 'https://weather.example/' }]);
     r.setTabs('edge', [{ tabId: 1, url: 'https://other.example/' }, { tabId: 2, url: 'https://mysite.example/dashboard' }, { tabId: 3, url: 'https://x.example/' }]);
     const s = await r.manager.openWebsite('https://mysite.example/');
-    expect(r.calls).toEqual(['edge:open:https://mysite.example/']);
+    expect(r.calls).toEqual(['chrome:open:https://mysite.example/']);
     expect(s.environment).toBe('your_browser');
-    expect(s.notes).toContain("Opened in the user's Edge.");
-    expect(r.manager.pinnedBrowser()).toBe('edge');
+    expect(s.notes).toContain("Opened in the user's Chrome.");
+    expect(r.manager.pinnedBrowser()).toBe('chrome');
     expect(r.launched).toEqual([]);
     expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false);
   });
 
-  it('Test C: the browser is open but the site is not: a new tab in the SAME browser (the one in use), nothing else started', async () => {
+  it('the user is in Edge and the site is open nowhere: still Chrome — Edge only when it is named', async () => {
     const r = rig({ connected: ['chrome', 'edge'] });
     r.setTabs('chrome', [{ tabId: 1, url: 'https://news.example/' }]);
     r.setTabs('edge', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
     await r.manager.openWebsite('https://brandnew.example/');
-    expect(r.calls).toEqual(['edge:open:https://brandnew.example/']); // Edge is the one the user is in
+    expect(r.calls).toEqual(['chrome:open:https://brandnew.example/']);
     expect(r.launched).toEqual([]);
   });
 
-  it('keeps a task in the browser it began in, then picks afresh for the next site', async () => {
+  it('keeps a task in the browser it began in; the next site nobody placed goes to Chrome again', async () => {
     const r = rig({ connected: ['chrome', 'edge'] });
-    r.setTabs('chrome', [{ tabId: 1, url: 'https://a.example/' }]);
-    r.setTabs('edge', [{ tabId: 1, url: 'https://b.example/' }]);
-    await r.manager.openWebsite('https://a.example/');
+    await r.manager.openWebsite('https://a.example/', { browser: 'edge' });
     await r.manager.inspectPage();
     await r.manager.clickOnPage('Go');
-    expect(r.calls).toEqual(['chrome:open:https://a.example/', 'chrome:inspect', 'chrome:click:Go']);
+    expect(r.calls).toEqual(['edge:open:https://a.example/', 'edge:inspect', 'edge:click:Go']);
     r.calls.length = 0;
     await r.manager.openWebsite('https://b.example/');
-    expect(r.calls).toEqual(['edge:open:https://b.example/']);
-    expect(r.manager.pinnedBrowser()).toBe('edge');
+    expect(r.calls).toEqual(['chrome:open:https://b.example/']);
+    expect(r.manager.pinnedBrowser()).toBe('chrome');
+  });
+
+  it("Chrome is open but its extension is asleep and Edge is connected: Chrome is woken and used — never Edge behind the user's back", async () => {
+    const r = rig({ connected: ['edge'], running: ['chrome', 'edge'], installed: ['chrome', 'edge'] });
+    r.bridge.connectsOnWait.add('chrome');
+    await r.manager.openWebsite('https://a.example/');
+    expect(r.calls).toEqual(['chrome:open:https://a.example/']);
+    expect(r.launched).toEqual([]);
+  });
+
+  it('Chrome is closed and Edge is connected: Chrome is started with the page (their normal profile), not Edge', async () => {
+    const r = rig({ connected: ['edge'], running: ['edge'], installed: ['chrome', 'edge'], startedBrowserConnects: true });
+    const s = await r.manager.openWebsite('https://a.example/');
+    expect(r.launched).toEqual([['chrome', 'https://a.example/']]);
+    expect(r.calls).toEqual(['chrome:open:https://a.example/']);
+    expect((s.notes ?? []).join(' ')).toMatch(/Chrome was not running, so Eya started it/);
+  });
+
+  it('a user who names Edge gets Edge — connected, or started if it is closed', async () => {
+    const connected = rig({ connected: ['chrome', 'edge'] });
+    await connected.manager.openWebsite('https://a.example/', { browser: 'edge' });
+    expect(connected.calls).toEqual(['edge:open:https://a.example/']);
+    const closed = rig({ connected: ['chrome'], installed: ['chrome', 'edge'], startedBrowserConnects: true });
+    await closed.manager.openWebsite('https://a.example/', { browser: 'edge' });
+    expect(closed.launched).toEqual([['edge', 'https://a.example/']]);
+    expect(closed.calls).toEqual(['edge:open:https://a.example/']);
+  });
+
+  it('on a PC without Chrome, the older rules apply: where the site is open, then where the user is', async () => {
+    const r = rig({ connected: ['edge'], installed: ['edge'] });
+    r.setTabs('edge', [{ tabId: 1, url: 'https://x.example/', active: true }], true);
+    await r.manager.openWebsite('https://a.example/');
+    expect(r.calls).toEqual(['edge:open:https://a.example/']);
+    expect(r.launched).toEqual([]);
   });
 
   it('no browser connected, but an extension is running and waiting to be paired: stops and says so — opens nothing anywhere', async () => {
@@ -297,12 +329,12 @@ describe('opening a site: always the user\'s own browser', () => {
   });
 
   it('a running browser whose extension never answers: opens the page in it (new tab) and then says exactly what is wrong — never another browser', async () => {
-    const r = rig({ running: ['edge'], installed: ['chrome', 'edge'] });
+    const r = rig({ running: ['chrome'], installed: ['chrome', 'edge'] });
     const err = await caught(r.manager.openWebsite('https://a.example/'));
     expect(err.detail.why).toBe('no_extension');
     expect(err.message).toMatch(/Eya Browser Bridge extension/);
     expect(err.message).toMatch(/Developer mode/);
-    expect(r.launched).toEqual([['edge', 'https://a.example/']]); // the page itself still opened, in THEIR browser
+    expect(r.launched).toEqual([['chrome', 'https://a.example/']]); // the page itself still opened, in THEIR browser
     expect(r.calls.some((c) => c.startsWith('isolated') || c.startsWith('lookup'))).toBe(false);
   });
 
@@ -367,9 +399,16 @@ describe('losing the browser mid-task', () => {
 });
 
 describe('working without having opened anything first', () => {
-  it('looks at what the user is looking at: the browser in use', async () => {
+  it('works in Chrome, not in whichever browser the user happens to be looking at', async () => {
     const r = rig({ connected: ['chrome', 'edge'] });
     r.setTabs('chrome', [{ tabId: 1, url: 'https://a.example/' }]);
+    r.setTabs('edge', [{ tabId: 1, url: 'https://b.example/', active: true }], true);
+    await r.manager.inspectPage();
+    expect(r.calls).toEqual(['chrome:inspect']);
+  });
+
+  it('with only Edge connected it works in Edge', async () => {
+    const r = rig({ connected: ['edge'] });
     r.setTabs('edge', [{ tabId: 1, url: 'https://b.example/', active: true }], true);
     await r.manager.inspectPage();
     expect(r.calls).toEqual(['edge:inspect']);
@@ -571,45 +610,35 @@ describe('an extension that needs a reload (installed, on, but the old version)'
     expect(err.detail.why).toBe('needs_pairing');
   });
 
-  it('another of the user\'s own browsers that is already set up carries on: Edge is outdated, Chrome is paired and closed -> Chrome is started and used, and the result says so', async () => {
+  it('an outdated or unpaired Edge does not matter when nobody asked for Edge: Chrome is started and used', async () => {
     const r = rig({ knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], running: ['edge'], installed: ['chrome', 'edge'], startedBrowserConnects: true });
     const snapshot = await r.manager.openWebsite('https://tshc.gov.in/');
     expect(r.launched).toEqual([['chrome', 'https://tshc.gov.in/']]);
-    expect(r.calls).toContain('chrome:open:https://tshc.gov.in/');
-    expect(r.calls.some((c) => c.startsWith('edge:'))).toBe(false);
-    expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false);
-    const notes = (snapshot.notes ?? []).join(' ');
-    expect(notes).toMatch(/Edge is the old version and needs a reload/);
-    expect(notes).toMatch(/opened in the user's Chrome instead/);
+    expect(r.calls).toEqual(['chrome:open:https://tshc.gov.in/']);
     expect(snapshot.environment).toBe('your_browser');
     expect(r.manager.pinnedBrowser()).toBe('chrome');
+    expect((snapshot.notes ?? []).join(' ')).not.toMatch(/instead/);
   });
 
-  it('the same for an Edge that merely is not paired yet: a paired Chrome is used, and the note says "not connected yet"', async () => {
-    const r = rig({ knocking: ['edge'], paired: ['chrome'], installed: ['chrome', 'edge'], running: ['edge'], startedBrowserConnects: true });
-    const snapshot = await r.manager.openWebsite('https://x.example/');
-    expect((snapshot.notes ?? []).join(' ')).toMatch(/Edge is not connected yet/);
-    expect(r.launched.map((l) => l[0])).toEqual(['chrome']);
-  });
-
-  it('if the other browser does not come up either, it stops with the precise reload message — still no separate window', async () => {
-    const r = rig({ knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], installed: ['chrome', 'edge'], running: ['edge'], startedBrowserConnects: false });
-    const err = await caught(r.manager.openWebsite('https://x.example/'));
+  it('Chrome is the one that is outdated or unpaired: it stops and says exactly that — it does NOT quietly use a working Edge', async () => {
+    const outdated = rig({ knocking: ['chrome'], outdated: ['chrome'], connected: ['edge'], paired: ['edge'], installed: ['chrome', 'edge'], running: ['chrome', 'edge'] });
+    const err = await caught(outdated.manager.openWebsite('https://x.example/'));
     expect(err.detail.why).toBe('needs_reload');
-    expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false);
+    expect(outdated.launched).toEqual([]);
+    expect(outdated.calls).toEqual([]); // nothing opened in Edge, nothing in a separate window
+
+    const unpaired = rig({ knocking: ['chrome'], connected: ['edge'], paired: ['edge'], installed: ['chrome', 'edge'], running: ['chrome', 'edge'] });
+    expect((await caught(unpaired.manager.openWebsite('https://x.example/'))).detail.why).toBe('needs_pairing');
+    expect(unpaired.calls).toEqual([]);
   });
 
-  it('never switches to a browser that is not installed, or that is not paired', async () => {
-    const notInstalled = rig({ knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], installed: ['edge'], running: ['edge'], startedBrowserConnects: true });
-    expect((await caught(notInstalled.manager.openWebsite('https://x.example/'))).detail.why).toBe('needs_reload');
-    expect(notInstalled.launched).toEqual([]);
-
-    const notPaired = rig({ knocking: ['edge'], outdated: ['edge'], installed: ['chrome', 'edge'], running: ['edge'], startedBrowserConnects: true });
-    expect((await caught(notPaired.manager.openWebsite('https://x.example/'))).detail.why).toBe('needs_reload');
-    expect(notPaired.launched).toEqual([]);
+  it('...but if the user named Edge, a Chrome that needs a reload is not in the way', async () => {
+    const r = rig({ knocking: ['chrome'], outdated: ['chrome'], connected: ['edge'], paired: ['edge'], installed: ['chrome', 'edge'], running: ['chrome', 'edge'] });
+    await r.manager.openWebsite('https://x.example/', { browser: 'edge' });
+    expect(r.calls).toEqual(['edge:open:https://x.example/']);
   });
 
-  it('a connected browser is always used as before — the fallback only exists for when none is', async () => {
+  it('a connected Chrome is used as before', async () => {
     const r = rig({ connected: ['chrome'], knocking: ['edge'], outdated: ['edge'], paired: ['chrome'], installed: ['chrome', 'edge'] });
     r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/' }]);
     const snapshot = await r.manager.openWebsite('https://x.example/');
@@ -940,11 +969,20 @@ describe('opening a site in the browser the user NAMED', () => {
     expect(r.calls.some((c) => c.startsWith('isolated'))).toBe(false);
   });
 
-  it('without a named browser, nothing changes: the one that already has the site', async () => {
+  it('without a named browser it is Chrome, even when Edge is the one that already has the site', async () => {
     const r = rig({ connected: ['chrome', 'edge'] });
     r.setTabs('chrome', [{ tabId: 1, url: 'https://news.example/' }]);
     r.setTabs('edge', [{ tabId: 1, url: 'https://mysite.example/dashboard' }]);
     await r.manager.openWebsite('https://mysite.example/');
-    expect(r.calls).toEqual(['edge:open:https://mysite.example/']);
+    expect(r.calls).toEqual(['chrome:open:https://mysite.example/']);
+  });
+
+  it('naming Chrome is the same as naming nothing, and EYA_PREFERRED_BROWSER=edge makes Edge the standard instead', async () => {
+    const named = rig({ connected: ['chrome', 'edge'] });
+    await named.manager.openWebsite('https://a.example/', { browser: 'chrome' });
+    expect(named.calls).toEqual(['chrome:open:https://a.example/']);
+    const edgeStandard = rig({ connected: ['chrome', 'edge'], preferred: 'edge' });
+    await edgeStandard.manager.openWebsite('https://a.example/');
+    expect(edgeStandard.calls).toEqual(['edge:open:https://a.example/']);
   });
 });

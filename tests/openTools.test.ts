@@ -151,11 +151,35 @@ describe('open_folder', () => {
 });
 
 describe('open_url', () => {
-  it('opens an https page in the default browser', async () => {
+  it('opens an https page in Chrome when no browser is named — not in whatever Windows has as its default', async () => {
     const result = await run('open_url', { url: 'https://www.google.com/search?q=FileQuik' });
     expect(result.ok).toBe(true);
-    expect(openedUrls).toEqual(['https://www.google.com/search?q=FileQuik']);
+    expect(browserLaunches).toEqual([{ browser: 'chrome', url: 'https://www.google.com/search?q=FileQuik' }]);
+    expect(openedUrls).toEqual([]);
+    expect(result.data?.['browser']).toBe('chrome');
+  });
+
+  it('opens in the browser the user named, instead of Chrome', async () => {
+    const edge = await run('open_url', { url: 'https://example.com/', browser: 'edge' });
+    expect(edge.data?.['browser']).toBe('edge');
+    expect(browserLaunches).toEqual([{ browser: 'edge', url: 'https://example.com/' }]);
+    expect(openedUrls).toEqual([]);
+  });
+
+  it("uses Windows' own default browser only when the user asks for that", async () => {
+    const result = await run('open_url', { url: 'https://example.com/', browser: 'default' });
+    expect(openedUrls).toEqual(['https://example.com/']);
+    expect(browserLaunches).toEqual([]);
     expect(result.data?.['browser']).toBe('default');
+    expect(result.data).not.toHaveProperty('note');
+  });
+
+  it('on a PC without Chrome, falls back to the default browser and says so', async () => {
+    browserWorks = false;
+    const result = await run('open_url', { url: 'https://example.com/' });
+    expect(result.ok).toBe(true);
+    expect(openedUrls).toEqual(['https://example.com/']);
+    expect(result.data?.['note']).toMatch(/chrome is not installed/);
   });
 
   it('refuses anything that is not an ordinary web address', async () => {
@@ -192,7 +216,7 @@ describe('open_url', () => {
     expect(result.data?.['note']).toMatch(/firefox is not installed/);
   });
 
-  it('adds no note when the default browser was asked for', async () => {
+  it('adds no note when the browser was found', async () => {
     const result = await run('open_url', { url: 'https://example.com/' });
     expect(result.data).not.toHaveProperty('note');
   });

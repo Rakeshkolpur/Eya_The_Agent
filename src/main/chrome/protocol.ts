@@ -64,6 +64,11 @@ export interface WireHello {
   readonly activeWindowId?: number;
   readonly activeTabId?: number;
   readonly secret?: string;
+  /**
+   * The key Eya leaves in the extension's own folder (`eya-pairing.json`). An extension that has no pairing secret of its own yet
+   * presents it instead, which is how a freshly loaded extension pairs without the user asking for anything.
+   */
+  readonly bootstrap?: string;
 }
 
 /** Extension → desktop. */
@@ -129,6 +134,7 @@ export function parseExtensionMessage(raw: string): ExtensionMessage | null {
     case 'hello': {
       if (typeof m['ext'] !== 'string' || typeof m['browser'] !== 'string') return null;
       if (m['secret'] !== undefined && typeof m['secret'] !== 'string') return null;
+      if (m['bootstrap'] !== undefined && typeof m['bootstrap'] !== 'string') return null;
       const activeWindowId = num(m['activeWindowId']);
       const activeTabId = num(m['activeTabId']);
       return {
@@ -145,6 +151,7 @@ export function parseExtensionMessage(raw: string): ExtensionMessage | null {
         ...(activeWindowId !== undefined ? { activeWindowId } : {}),
         ...(activeTabId !== undefined ? { activeTabId } : {}),
         ...(typeof m['secret'] === 'string' ? { secret: m['secret'] } : {}),
+        ...(typeof m['bootstrap'] === 'string' ? { bootstrap: m['bootstrap'].slice(0, 200) } : {}),
       };
     }
     case 'res':

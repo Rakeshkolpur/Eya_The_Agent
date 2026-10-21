@@ -27,8 +27,18 @@ export interface AICompletion {
   readonly toolCalls: readonly AIToolCall[];
 }
 
+export interface CompleteOptions {
+  /**
+   * Another provider is ready to take this request: give up quickly rather than walking every model and retrying. Set by the chain so
+   * that a limited or overloaded primary costs seconds, not the whole retry ladder.
+   */
+  readonly failFast?: boolean;
+}
+
 export interface AIProvider {
   readonly name: string;
-  complete(messages: readonly AIChatMessage[], tools: readonly AIToolSpec[]): Promise<AICompletion>;
+  complete(messages: readonly AIChatMessage[], tools: readonly AIToolSpec[], options?: CompleteOptions): Promise<AICompletion>;
+  /** The model that answered last (or would answer next), for showing the user which AI they are talking to. */
+  currentModel?(): string | undefined;
   isReady(): boolean;
 }

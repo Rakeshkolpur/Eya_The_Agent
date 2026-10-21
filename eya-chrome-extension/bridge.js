@@ -12,6 +12,31 @@
  * extension keeps Eya up to date with live events.
  */
 export const BRIDGE_URL = 'ws://127.0.0.1:47821/eya-bridge';
+/**
+ * The same address as a plain web request, used to LOOK for Eya before connecting. A connection that fails is written to the browser's
+ * "Errors" list for this extension every time ("WebSocket connection … failed: net::ERR_CONNECTION_REFUSED") — and the extension tries
+ * whenever the browser wakes it, so with Eya not running that list grew all day. A web request that finds nobody is not recorded as an
+ * error (measured in a real Chrome), so the extension asks quietly first and opens the connection only when Eya answers.
+ */
+export const PROBE_URL = BRIDGE_URL.replace(/^ws:/, 'http:');
+const PROBE_TIMEOUT_MS = 2000;
+/**
+ * The key Eya leaves in this extension's own folder. With no pairing secret of its own yet (a fresh load, a reinstall, a secret Eya no
+ * longer knows), the extension presents it in its handshake and Eya pairs it by itself — nobody has to ask Eya to "connect my browser".
+ * Only this extension can read its own folder's files from here; the file is not listed as a web-accessible resource, so no page can.
+ */
+const BOOTSTRAP_FILE = 'eya-pairing.json';
+
+async function readFolderKey() {
+  try {
+    const response = await fetch(chrome.runtime.getURL(BOOTSTRAP_FILE), { cache: 'no-store' });
+    if (!response.ok) return undefined;
+    const { token } = await response.json();
+    return typeof token === 'string' && token.length >= 32 && token.length <= 200 ? token : undefined;
+  } catch {
+    return undefined; // an older Eya, or a folder she cannot write to: the pairing window is the way then
+  }
+}
 /** Bumped together with the desktop side whenever the messages change incompatibly. */
 export const PROTOCOL_VERSION = 2;
 const PING_MS = 20000;
@@ -30,6 +55,7 @@ export class Bridge {
     this.backoffMs = 1500;
     this.retryTimer = null;
     this.pingTimer = null;
+    this.probing = false;
     this.status = 'connecting';
   }
 
@@ -39,10 +65,31 @@ export class Bridge {
     this.onStatus(status, detail);
   }
 
-  /** Safe to call as often as you like (every wake-up of the service worker does). */
+  /** Whether anything answers at Eya's address. Never throws, and never leaves an error in the browser's list when nobody does. */
+  async eyaIsThere() {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+    try {
+      await fetch(PROBE_URL, { mode: 'no-cors', cache: 'no-store', signal: controller.signal });
+      return true; // any answer at all (Eya's bridge answers a plain request with "upgrade required")
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Safe to call as often as you like (every wake-up of the service worker does). Connects only when Eya is there to answer. */
   ensureConnected() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
-    this.connect();
+    if (this.probing) return;
+    this.probing = true;
+    void this.eyaIsThere().then((there) => {
+      this.probing = false;
+      if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) return;
+      if (there) this.connect();
+      else this.scheduleRetry();
+    });
   }
 
   connect() {
@@ -59,13 +106,14 @@ export class Bridge {
 
     ws.onopen = async () => {
       const { eyaSecret } = await chrome.storage.local.get('eyaSecret');
+      const folderKey = eyaSecret ? undefined : await readFolderKey();
       let snapshot = { tabs: [], windows: [] };
       try {
         snapshot = await this.getSnapshot();
       } catch {
         // the handshake still goes ahead; the first events will fill the picture in
       }
-      console.info(`[eya-bridge] connected to Eya, saying hello (${eyaSecret ? 'with' : 'without'} a stored pairing)`);
+      console.info(`[eya-bridge] connected to Eya, saying hello (${eyaSecret ? 'with' : folderKey ? 'with the folder key, no' : 'without'} a stored pairing)`);
       this.send({
         t: 'hello',
         ext: chrome.runtime.id,
@@ -75,7 +123,7 @@ export class Bridge {
         browserVersion: this.browserVersion,
         capabilities: this.capabilities,
         ...snapshot,
-        ...(eyaSecret ? { secret: eyaSecret } : {}),
+        ...(eyaSecret ? { secret: eyaSecret } : folderKey ? { bootstrap: folderKey } : {}),
       });
     };
 

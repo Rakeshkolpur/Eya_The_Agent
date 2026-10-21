@@ -3,8 +3,11 @@ import { basename } from 'node:path';
 import { rootLogger } from '@main/logging/logger';
 import type {
   ActOnPageResult,
+  AdsMode,
+  AdsState,
   AttachFileRequest,
   AttachFileResult,
+  BrowserAdHelper,
   BrowserAutomationService,
   BrowserCapture,
   BrowserFileAttach,
@@ -107,6 +110,11 @@ export interface PageAgentServiceOptions {
   readonly unavailableMessage?: string;
   /** Which browser's extension this talks to, stamped on the tabs it lists. */
   readonly browserName?: BrowserName;
+  /**
+   * Whether this address is a single-page app such as a chat, where an action is followed by a short settle and no wait for a download
+   * (a chat page never goes quiet, and nothing in it downloads). The extension does this when it is told `quick`; an older one ignores it.
+   */
+  readonly quickFor?: (url: string) => boolean;
 }
 
 // A page can be sent only so much in one message; base64 makes a part a third bigger again.
@@ -116,10 +124,11 @@ const ITEM_ROLES: ReadonlySet<string> = new Set(['link', 'button', 'menuitem', '
 const DEFAULT_UNAVAILABLE =
   'Eya has lost her connection to your browser. Make sure the browser is open with the Eya Browser Bridge extension turned on (or ask Eya to "connect my browser").';
 
-export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl, BrowserCapture, BrowserItemLister, BrowserFileAttach {
+export class ChromeBrowserService implements BrowserAutomationService, BrowserTabControl, BrowserCapture, BrowserItemLister, BrowserFileAttach, BrowserAdHelper {
   private readonly environment: BrowserEnvironment;
   private readonly unavailableMessage: string;
   private readonly browserName: BrowserName | undefined;
+  private readonly quickFor: (url: string) => boolean;
   /** The site menu bar the model was last shown, so an identical one is not listed again on the next page. */
   private lastNavigation = new Set<string>();
 
@@ -130,6 +139,7 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
     this.environment = options.environment ?? 'your_browser';
     this.unavailableMessage = options.unavailableMessage ?? DEFAULT_UNAVAILABLE;
     this.browserName = options.browserName;
+    this.quickFor = options.quickFor ?? (() => false);
   }
 
   private async call<T = unknown>(op: string, args: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
@@ -198,7 +208,7 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
   }
 
   async openWebsite(url: string): Promise<PageSnapshot> {
-    const reply = parseReply(await this.call('open_url', { url }, 60_000));
+    const reply = parseReply(await this.call('open_url', { url, ...(this.quickFor(url) ? { quick: true } : {}) }, 60_000));
     const notes: string[] = [];
     if (reply.reuse === 'focused') notes.push('You already had a tab open on this site, so Eya switched to it instead of opening another (it was left as it was).');
     if (reply.reuse === 'navigated') notes.push('Eya reused the tab she opened earlier for this site.');
@@ -242,7 +252,8 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
       const why = gate?.({ name: el.name, role: el.role }) ?? null;
       if (why !== null) return { ok: false, reason: 'needs_confirmation', why, target: el.name, snapshot: this.snapshot(state) };
 
-      const reply = parseReply(await this.call('click', { ...(tabId !== null ? { tabId } : {}), id: el.id, name: el.name }, 90_000));
+      const quick = this.quickFor(state.url) ? { quick: true } : {};
+      const reply = parseReply(await this.call('click', { ...(tabId !== null ? { tabId } : {}), id: el.id, name: el.name, ...quick }, 90_000));
       if (reply.performed.ok) return this.okResult(state, reply);
       // The page moved under us between looking and clicking: look again once and re-choose.
       if (reply.performed.reason === 'stale_element' && attempt === 0) {
@@ -261,22 +272,55 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
 
       const el = findFillTarget(state, label);
       if (el === null) return { ok: false, reason: 'not_found', snapshot: this.snapshot(state) };
-      if (el.sensitive === true) {
+      // A one-time code the user said out loud may be typed into a one-time-code field; a password or card number never is.
+      const codeOk = options.allowCode === true && el.oneTimeCode === true;
+      if (el.sensitive === true && !codeOk) {
         return {
           ok: false,
           reason: 'needs_user',
-          message: 'That is a password, card or one-time-code field. Eya never types those — please enter it yourself.',
+          message:
+            el.oneTimeCode === true
+              ? 'That is a verification-code field. Ask the user to say the code out loud (or type it themselves). Eya never types a password or a card number.'
+              : 'That is a password or card field. Eya never types those — please enter it yourself.',
           snapshot: this.snapshot(state),
         };
       }
 
+      const quick = this.quickFor(state.url) ? { quick: true } : {};
       const reply = parseReply(
-        await this.call('fill', { ...(tabId !== null ? { tabId } : {}), id: el.id, name: el.name, value, submit: options.submit === true }, 90_000),
+        await this.call('fill', { ...(tabId !== null ? { tabId } : {}), id: el.id, name: el.name, value, submit: options.submit === true, ...(codeOk ? { allowCode: true } : {}), ...quick }, 90_000),
       );
-      if (reply.performed.ok) return this.okResult(state, reply);
+      if (reply.performed.ok) {
+        const done = this.okResult(state, reply);
+        return codeOk && el.sensitive === true && done.ok ? { ...done, codeEntered: true } : done;
+      }
+      // An extension from before 0.8.0 refuses every code field, whatever was said: say what to do about that, not "the user has to".
+      if (codeOk && reply.performed.reason === 'sensitive_field') {
+        return {
+          ok: false,
+          reason: 'needs_user',
+          message: 'The Eya browser extension is out of date, so it cannot type a code yet. Reload it once in chrome://extensions (or edge://extensions) to get version 0.8.0; until then the user has to type the code themselves.',
+          snapshot: this.snapshot(reply.state),
+        };
+      }
       if (reply.performed.reason === 'stale_element' && attempt === 0) continue;
       return this.failureResult(reply);
     }
+  }
+
+  /** Presses the page's own Skip / close buttons on adverts, once or keeping watch (the extension 0.7.0 does the pressing). */
+  async ads(mode: AdsMode, options: { readonly keepPlaying?: boolean; readonly play?: boolean } = {}): Promise<AdsState> {
+    let reply: { readonly state?: AdsState };
+    try {
+      reply = await this.call<{ readonly state?: AdsState }>('ads', { mode, ...(options.keepPlaying === true ? { keepPlaying: true } : {}), ...(options.play === true ? { play: true } : {}) }, 20_000);
+    } catch (err) {
+      if (err instanceof BridgeError && /unknown request/i.test(err.message)) {
+        throw new Error('The Eya browser extension is out of date, so it cannot skip adverts yet. Reload it once in chrome://extensions (or edge://extensions) to get version 0.7.0.');
+      }
+      throw err;
+    }
+    if (reply.state === undefined || reply.state === null) throw new Error('This page did not answer (it may be a browser page the extension is not allowed to read).');
+    return reply.state;
   }
 
   /** What can be clicked on the page right now, for Eya's own code to choose from (a chat list, say). Not shown to the model. */
@@ -312,7 +356,8 @@ export class ChromeBrowserService implements BrowserAutomationService, BrowserTa
         const part = await step({ phase: 'chunk', data: bytes.toString('base64') });
         if (!part.performed.ok) return { ok: false, reason: 'failed', message: part.performed.detail ?? 'The page stopped taking the file part-way.' };
       }
-      const done = await step({ phase: 'commit', prefer: request.prefer ?? 'auto' });
+      // Handing a file to a chat app's picker is a chat page's own business: a short settle, no waiting to see whether a download started.
+      const done = await step({ phase: 'commit', prefer: request.prefer ?? 'auto', quick: true });
       const snapshot = this.snapshot(done.state);
       if (done.performed.ok) return { ok: true, snapshot };
       const reason = done.performed.reason === 'no_file_input' || done.performed.reason === 'type_not_accepted' ? done.performed.reason : 'failed';

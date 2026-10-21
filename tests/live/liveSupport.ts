@@ -46,7 +46,8 @@ export async function waitFor(cond: () => boolean | Promise<boolean>, ms: number
 export function prepareExtensionCopy(port: number): { dir: string; cleanup: () => void } {
   const source = join(process.cwd(), 'eya-chrome-extension');
   const dir = mkdtempSync(join(tmpdir(), 'eya-ext-copy-'));
-  cpSync(source, dir, { recursive: true });
+  // Never copy the real Eya's pairing key into a test folder: a test that wants one places its own (autopair.live.test.ts).
+  cpSync(source, dir, { recursive: true, filter: (from) => !from.endsWith('eya-pairing.json') });
   const bridgeFile = join(dir, 'bridge.js');
   const text = readFileSync(bridgeFile, 'utf8');
   if (!text.includes('ws://127.0.0.1:47821/')) throw new Error('bridge.js no longer contains the expected address');
@@ -140,6 +141,17 @@ export async function startTestBrowser(opts: StartOptions): Promise<TestBrowser>
     } catch {
       // already gone
     }
+    // A browser can hand its work to a child and let the process this test holds exit, so the tree kill above finds nothing and the
+    // children (and their lock on the profile folder) live on. Anything still running from THIS test's own profile folder goes too.
+    try {
+      execFileSync(
+        'powershell',
+        ['-NoProfile', '-NonInteractive', '-Command', "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:EYA_TEST_PROFILE) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
+        { stdio: 'ignore', env: { ...process.env, EYA_TEST_PROFILE: profile }, timeout: 20_000 },
+      );
+    } catch {
+      // nothing left, or PowerShell not available: the tree kill above is what there is
+    }
   };
   if (opts.kind === 'chrome') await loadUnpackedOverCdp(opts.debugPort, opts.extensionDir);
   return {
@@ -150,8 +162,9 @@ export async function startTestBrowser(opts: StartOptions): Promise<TestBrowser>
     proc,
     kill,
     cleanup: () => {
-      rmSync(profile, { recursive: true, force: true });
-      rmSync(downloads, { recursive: true, force: true });
+      // The browser's last processes can take a moment to let go of the folder.
+      rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+      rmSync(downloads, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
     },
   };
 }
@@ -206,6 +219,13 @@ export async function userNavigate(port: number, url: string, inTab?: string): P
 export async function userEval(port: number, inTab: string | undefined, expression: string): Promise<unknown> {
   const t = await pageTarget(port, inTab);
   const r = await sessionCall<{ result?: { value?: unknown } }>(t.webSocketDebuggerUrl, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+  return r.result?.value;
+}
+
+/** Like userEval, but counts as the person having clicked in the page (so the browser lets a video start with sound). */
+export async function userEvalWithGesture(port: number, inTab: string | undefined, expression: string): Promise<unknown> {
+  const t = await pageTarget(port, inTab);
+  const r = await sessionCall<{ result?: { value?: unknown } }>(t.webSocketDebuggerUrl, 'Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true, userGesture: true });
   return r.result?.value;
 }
 

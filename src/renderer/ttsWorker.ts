@@ -1,5 +1,6 @@
 import { env } from '@huggingface/transformers';
 import { KokoroTTS } from 'kokoro-js';
+import { useBundledRuntime } from './ortRuntime';
 
 // Runs Kokoro off the UI thread. Generating a sentence takes seconds of pure
 // CPU; on the page's own thread that froze the whole app (and delayed every
@@ -33,6 +34,7 @@ async function init(): Promise<void> {
     : 1;
   const wasm = env.backends.onnx.wasm;
   if (wasm !== undefined) wasm.numThreads = threads;
+  useBundledRuntime();
   try {
     engine = await KokoroTTS.from_pretrained(MODEL, { dtype: 'q8', device: 'wasm' });
     scope.postMessage({ type: 'ready', threads, loadMs: Math.round(performance.now() - started) });

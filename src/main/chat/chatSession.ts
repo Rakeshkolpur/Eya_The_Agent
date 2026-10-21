@@ -28,7 +28,7 @@ export class ChatSession {
   private opened: (OpenChat & { at: number }) | null = null;
   private choices: readonly Choice[] = [];
   private recentChats: string[] = [];
-  private file: { name: string; at: number } | null = null;
+  private file: { name: string; at: number; shown?: 'name_visible' | 'preview_opened' } | null = null;
   private marks: { list: readonly string[]; at: number } | null = null;
   private sent: { name: string; at: number } | null = null;
   private authorization: (SendAuthorization & { at: number }) | null = null;
@@ -80,12 +80,18 @@ export class ChatSession {
   }
 
   // --------------------------------------------------------------- the attachment
-  attached(name: string): void {
-    this.file = { name, at: this.now() };
+  /** `shown`: how the page showed the attachment when it was checked — its name, or just a preview that opened. */
+  attached(name: string, shown?: 'name_visible' | 'preview_opened'): void {
+    this.file = { name, at: this.now(), ...(shown !== undefined ? { shown } : {}) };
   }
 
   attachment(): string | null {
     return this.file !== null && this.fresh(this.file.at) ? this.file.name : null;
+  }
+
+  /** How the page showed the attachment when it was checked, if it is still the one being sent. */
+  attachedAs(): 'name_visible' | 'preview_opened' | null {
+    return this.file !== null && this.fresh(this.file.at) ? (this.file.shown ?? null) : null;
   }
 
   // ------------------------------------------- the delivery marks before a send

@@ -3,6 +3,9 @@ import type { BrowserName } from '@main/chrome/protocol';
 /**
  * Which of the user's connected browsers a piece of work belongs in. Pure, so the whole policy is testable:
  *
+ *   0. the default browser (Chrome) when it is connected — the user names another one if they want it — except that a task
+ *      already underway stays in the browser it is in;
+ * and only when that is not connected:
  *   1. a browser that already has this site open (that is where the user's session for it lives) —
  *      the one holding the exact address first, then the one the user is in front of;
  *   2. otherwise the browser the current task is already being done in;
@@ -28,11 +31,16 @@ export interface SelectionInput {
   /** The browser the user used most recently. */
   readonly activeBrowser?: BrowserName | null;
   readonly preferred?: BrowserName | null;
+  /**
+   * The browser Eya uses when the user has not named one (Chrome). When it is connected it beats "where the site is open" and "where the
+   * user happens to be" — those are only the rules for a PC where it is not — but a task already underway in another browser stays there.
+   */
+  readonly defaultBrowser?: BrowserName | null;
   /** The address being opened, if any. */
   readonly url?: string;
 }
 
-export type SelectionReason = 'matching_tab' | 'task' | 'active' | 'preferred' | 'only_one' | 'available';
+export type SelectionReason = 'matching_tab' | 'task' | 'active' | 'preferred' | 'default' | 'only_one' | 'available';
 
 export interface Selection {
   readonly browser: BrowserName;
@@ -60,6 +68,11 @@ export function selectBrowser(input: SelectionInput): Selection | null {
     return { browser: only, reason: input.tabsOnSite.some((t) => t.browser === only) ? 'matching_tab' : 'only_one' };
   }
   const usable = (b: BrowserName | null | undefined): b is BrowserName => b !== null && b !== undefined && connected.includes(b);
+
+  if (usable(input.defaultBrowser)) {
+    if (usable(input.taskBrowser)) return { browser: input.taskBrowser, reason: 'task' };
+    return { browser: input.defaultBrowser, reason: 'default' };
+  }
 
   const matching = input.tabsOnSite.filter((t) => connected.includes(t.browser));
   if (matching.length > 0) {

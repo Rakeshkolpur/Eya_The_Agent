@@ -72,7 +72,11 @@ export type SensitiveAction =
   | 'screen_click'
   | 'screen_sensitive_click'
   | 'send_file_to_chat'
-  | 'browser_sensitive_click';
+  | 'browser_sensitive_click'
+  | 'delete_routine'
+  | 'start_screen_share'
+  | 'stop_screen_share'
+  | 'download_file';
 
 const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   open_application: 'safe',
@@ -156,6 +160,13 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   send_file_to_chat: 'confirm',
   // A click that would buy, send, delete or change an account setting for real, in the user's own signed-in browser.
   browser_sensitive_click: 'confirm',
+  // Deleting a saved routine cannot be undone, so only a clear yes from the user (never the model's own say-so) removes it.
+  delete_routine: 'confirm',
+  // Sharing the screen shows Eya anything on it, so it needs the user's clear yes; stopping it is always allowed.
+  start_screen_share: 'confirm',
+  stop_screen_share: 'safe',
+  // Saves a file from the internet onto the PC: only on the user's clear yes, never programs or scripts, and marked as downloaded.
+  download_file: 'confirm',
 };
 
 export interface PermissionRequest {

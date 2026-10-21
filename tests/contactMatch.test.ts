@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { looksLikeControl, normalizeText, parseChatQuery, phoneEnding, resolveChat } from '../src/main/chat/contactMatch';
+import { looksLikeControl, normalizeText, parseChatQuery, phoneEnding, resolveChat, soundKey, soundsLike } from '../src/main/chat/contactMatch';
 import type { ChatCandidate } from '../src/main/chat/contactMatch';
 
 const row = (label: string, detail?: string): ChatCandidate => ({ label, ...(detail !== undefined ? { detail } : {}) });
@@ -153,6 +153,30 @@ describe('which chat does the user mean — by phone number', () => {
     const r = resolveChat('Priya', BOOK);
     if (r.kind !== 'unique') throw new Error('expected unique');
     expect(r.match.phoneEnding).toBe('432');
+  });
+});
+
+describe('names spelled by ear', () => {
+  it('doubled letters, c/q/k and a silent h do not make a different name', () => {
+    expect(soundKey('akka')).toBe(soundKey('aka'));
+    expect(soundKey('akka')).toBe(soundKey('acca'));
+    expect(soundKey('Rahul')).toBe(soundKey('Raul'));
+    expect(soundKey('Sophia')).toBe(soundKey('Sofia'));
+    expect(soundKey('akka')).not.toBe(soundKey('akash'));
+  });
+
+  it('a sound-alike is a close spelling, the weakest kind of match: a better match always wins over it', () => {
+    const rows = [{ label: 'Akka' }, { label: 'Akash' }];
+    // "aka" is the start of "Akash" (a partial match) and only sounds like "Akka": the partial one is the better fit, so it is not chosen blindly
+    expect(resolveChat('aka', rows)).toMatchObject({ kind: 'unique', match: { candidate: { label: 'Akash' } } });
+    // with no better fit, the sound-alike is used
+    expect(resolveChat('aka', [{ label: 'Akka' }, { label: 'Ravi' }])).toMatchObject({ kind: 'unique', match: { candidate: { label: 'Akka' }, strength: 'fuzzy' } });
+  });
+
+  it('short words do not collide, and a name only has to have one word that sounds like it', () => {
+    expect(soundsLike('ab', 'Abb')).toBe(false); // under three sounds
+    expect(soundsLike('aka', 'Lakshmi Akka')).toBe(true);
+    expect(soundsLike('aka', 'Ravi Kumar')).toBe(false);
   });
 });
 

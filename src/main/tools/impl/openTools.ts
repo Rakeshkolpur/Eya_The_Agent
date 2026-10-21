@@ -108,7 +108,7 @@ export function createOpenTools(folders: KnownFolders, deps: OpenDeps): Tool[] {
       name: 'open_url',
       status: 'Opening the page…',
       description:
-        "Open a web page in the user's own regular browser, just to show it to them — a one-off, not something you'll " +
+        "Open a web page in the user's own regular browser (Chrome unless they name another), just to show it to them — a one-off, not something you'll " +
         'navigate further. To search Google in the browser, open https://www.google.com/search?q=<url-encoded query>. ' +
         'Only http and https addresses are allowed. If you need to click around on the page afterward (navigate within ' +
         'a site, read what\'s on it, fill a form), use open_website instead, not this.',
@@ -117,7 +117,9 @@ export function createOpenTools(folders: KnownFolders, deps: OpenDeps): Tool[] {
         browser: {
           type: 'string',
           enum: ['default', 'chrome', 'edge', 'firefox'],
-          description: 'Which browser. Default uses the user\'s default browser.',
+          description:
+            'Leave it out to use Chrome. Set it only when the user names a browser ("in Edge", "on Firefox"): "edge", "firefox", or "default" for ' +
+            "Windows' own default browser.",
         },
       },
     },
@@ -128,7 +130,8 @@ export function createOpenTools(folders: KnownFolders, deps: OpenDeps): Tool[] {
       if (url === null) {
         return { ok: false, summary: 'bad url', error: 'I can only open normal http or https web addresses.' };
       }
-      const browser = stringArg(args, 'browser') ?? 'default';
+      // Chrome unless the user named another browser; only a PC without Chrome falls back to Windows' default (and the result says so).
+      const browser = stringArg(args, 'browser') ?? 'chrome';
       let usedDefault = browser === 'default';
       if (browser === 'chrome' || browser === 'edge' || browser === 'firefox') {
         usedDefault = !(await deps.launchBrowser(browser, url.href));

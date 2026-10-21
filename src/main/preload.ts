@@ -3,7 +3,14 @@ import { IpcChannels } from '../shared/ipcContract';
 import type {
   AudioRequest,
   CommunicationAccessState,
+  ActivitySnapshot,
   EyaBridge,
+  MemorySnapshot,
+  ScreenFrame,
+  ScreenShareStatus,
+  SettingsSnapshot,
+  WindowModeState,
+  WritingState,
   StatusMessage,
   TTSChunkMessage,
   TTSPrefetchMessage,
@@ -26,17 +33,6 @@ const bridge: EyaBridge = {
     ipcRenderer.on(IpcChannels.setOrbState, listener);
     return () => ipcRenderer.off(IpcChannels.setOrbState, listener);
   },
-  onToggleInput: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on(IpcChannels.toggleInput, listener);
-    return () => ipcRenderer.off(IpcChannels.toggleInput, listener);
-  },
-  setExpanded: (expanded) => ipcRenderer.send(IpcChannels.setExpanded, expanded),
-  onShowPanel: (cb) => {
-    const listener = () => cb();
-    ipcRenderer.on(IpcChannels.showPanel, listener);
-    return () => ipcRenderer.off(IpcChannels.showPanel, listener);
-  },
   onStatus: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, s: StatusMessage) => cb(s);
     ipcRenderer.on(IpcChannels.status, listener);
@@ -52,7 +48,7 @@ const bridge: EyaBridge = {
     ipcRenderer.on(IpcChannels.ttsPrefetch, listener);
     return () => ipcRenderer.off(IpcChannels.ttsPrefetch, listener);
   },
-  getLiveConfig: (voice) => ipcRenderer.invoke(IpcChannels.liveConfig, voice),
+  getLiveConfig: (voice, recent) => ipcRenderer.invoke(IpcChannels.liveConfig, voice, recent),
   runLiveTool: (request) => ipcRenderer.invoke(IpcChannels.liveToolCall, request),
   wakeAvailable: () => ipcRenderer.invoke(IpcChannels.wakeAvailable),
   sendWakeAudio: (samples16k) => ipcRenderer.send(IpcChannels.wakeAudioChunk, samples16k),
@@ -87,6 +83,102 @@ const bridge: EyaBridge = {
     ipcRenderer.on(IpcChannels.communicationAccessChanged, listener);
     return () => ipcRenderer.off(IpcChannels.communicationAccessChanged, listener);
   },
+  getMemory: () => ipcRenderer.invoke(IpcChannels.memoryGet),
+  actOnMemory: (action) => ipcRenderer.invoke(IpcChannels.memoryAct, action),
+  onMemoryChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: MemorySnapshot) => cb(s);
+    ipcRenderer.on(IpcChannels.memoryChanged, listener);
+    return () => ipcRenderer.off(IpcChannels.memoryChanged, listener);
+  },
+  onMemorySuggestion: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, text: string) => cb(text);
+    ipcRenderer.on(IpcChannels.memorySuggestion, listener);
+    return () => ipcRenderer.off(IpcChannels.memorySuggestion, listener);
+  },
+  setWindowMode: (mode) => ipcRenderer.send(IpcChannels.windowSetMode, mode),
+  getWindowMode: () => ipcRenderer.invoke(IpcChannels.windowGetMode),
+  onWindowMode: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: WindowModeState) => cb(s);
+    ipcRenderer.on(IpcChannels.windowMode, listener);
+    return () => ipcRenderer.off(IpcChannels.windowMode, listener);
+  },
+  dragWindow: (phase) => ipcRenderer.send(IpcChannels.windowDrag, phase),
+  showBubbleMenu: () => ipcRenderer.send(IpcChannels.windowMenu),
+  getSettings: () => ipcRenderer.invoke(IpcChannels.settingsGet),
+  setSettings: (patch) => ipcRenderer.invoke(IpcChannels.settingsSet, patch),
+  onSettingsChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: SettingsSnapshot) => cb(s);
+    ipcRenderer.on(IpcChannels.settingsChanged, listener);
+    return () => ipcRenderer.off(IpcChannels.settingsChanged, listener);
+  },
+  getActivity: () => ipcRenderer.invoke(IpcChannels.activityGet),
+  actOnActivity: (action) => ipcRenderer.invoke(IpcChannels.activityAct, action),
+  onActivityChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: ActivitySnapshot) => cb(s);
+    ipcRenderer.on(IpcChannels.activityChanged, listener);
+    return () => ipcRenderer.off(IpcChannels.activityChanged, listener);
+  },
+  quitApp: () => ipcRenderer.send(IpcChannels.appQuit),
+  relaunchApp: () => ipcRenderer.send(IpcChannels.appRelaunch),
+  getGeminiKey: () => ipcRenderer.invoke(IpcChannels.geminiKeyGet),
+  setGeminiKey: (key) => ipcRenderer.invoke(IpcChannels.geminiKeySet, key),
+  clearGeminiKey: () => ipcRenderer.invoke(IpcChannels.geminiKeyClear),
+  getBackupAi: () => ipcRenderer.invoke(IpcChannels.backupAiGet),
+  setBackupAi: (input) => ipcRenderer.invoke(IpcChannels.backupAiSet, input),
+  clearBackupAi: (id) => ipcRenderer.invoke(IpcChannels.backupAiClear, id),
+  testBackupAi: (id) => ipcRenderer.invoke(IpcChannels.backupAiTest, id),
+  getAiUsage: () => ipcRenderer.invoke(IpcChannels.aiUsageGet),
+  setBackupAiModel: (model, id) => ipcRenderer.invoke(IpcChannels.backupAiSetModel, model, id),
+  getAiRoute: () => ipcRenderer.invoke(IpcChannels.aiRouteGet),
+  getTasks: () => ipcRenderer.invoke(IpcChannels.tasksGet),
+  actOnTasks: (action) => ipcRenderer.invoke(IpcChannels.tasksAct, action),
+  onTasksChanged: (listener) => {
+    const handler = (_evt: unknown, snapshot: Parameters<typeof listener>[0]): void => listener(snapshot);
+    ipcRenderer.on(IpcChannels.tasksChanged, handler);
+    return () => ipcRenderer.off(IpcChannels.tasksChanged, handler);
+  },
+  onTasksSay: (listener) => {
+    const handler = (_evt: unknown, say: Parameters<typeof listener>[0]): void => listener(say);
+    ipcRenderer.on(IpcChannels.tasksSay, handler);
+    return () => ipcRenderer.off(IpcChannels.tasksSay, handler);
+  },
+  onAiRoute: (listener) => {
+    const handler = (_evt: unknown, route: Parameters<typeof listener>[0]): void => listener(route);
+    ipcRenderer.on(IpcChannels.aiRoute, handler);
+    return () => ipcRenderer.off(IpcChannels.aiRoute, handler);
+  },
+  getWriting: () => ipcRenderer.invoke(IpcChannels.writingGet),
+  setWriting: (patch) => ipcRenderer.invoke(IpcChannels.writingSet, patch),
+  actOnWriting: (action) => ipcRenderer.invoke(IpcChannels.writingAct, action),
+  checkWriting: () => ipcRenderer.invoke(IpcChannels.writingCheck),
+  onWritingChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: WritingState) => cb(s);
+    ipcRenderer.on(IpcChannels.writingChanged, listener);
+    return () => ipcRenderer.off(IpcChannels.writingChanged, listener);
+  },
+  startScreenShare: () => ipcRenderer.invoke(IpcChannels.screenShareStart),
+  stopScreenShare: () => ipcRenderer.invoke(IpcChannels.screenShareStop),
+  getScreenShare: () => ipcRenderer.invoke(IpcChannels.screenShareGet),
+  touchScreenShare: () => ipcRenderer.send(IpcChannels.screenShareTouch),
+  askAboutScreen: (request) => ipcRenderer.invoke(IpcChannels.screenShareAsk, request),
+  captureScreen: () => ipcRenderer.invoke(IpcChannels.screenShareCapture),
+  onScreenShareStatus: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: ScreenShareStatus) => cb(s);
+    ipcRenderer.on(IpcChannels.screenShareStatus, listener);
+    return () => ipcRenderer.off(IpcChannels.screenShareStatus, listener);
+  },
+  onScreenFrame: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, f: ScreenFrame) => cb(f);
+    ipcRenderer.on(IpcChannels.screenShareFrame, listener);
+    return () => ipcRenderer.off(IpcChannels.screenShareFrame, listener);
+  },
+  listFiles: (view) => ipcRenderer.invoke(IpcChannels.filesList, view),
+  browseFolder: (path) => ipcRenderer.invoke(IpcChannels.filesBrowse, path),
+  searchFiles: (query) => ipcRenderer.invoke(IpcChannels.filesSearch, query),
+  openFileItem: (path) => ipcRenderer.invoke(IpcChannels.filesOpen, path),
+  revealFileItem: (path) => ipcRenderer.invoke(IpcChannels.filesReveal, path),
+  askAboutFile: (path, question) => ipcRenderer.invoke(IpcChannels.filesAsk, path, question),
+  fileThumbnails: (paths) => ipcRenderer.invoke(IpcChannels.filesThumbs, paths),
 };
 
 contextBridge.exposeInMainWorld('eya', bridge);

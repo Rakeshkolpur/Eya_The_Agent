@@ -132,8 +132,10 @@ export interface OpenApplicationDeps {
   isInstalled(app: KnownApp): Promise<boolean>;
   start(args: readonly string[]): StartResult;
   waitForProcess(exe: string, timeoutMs: number): Promise<boolean>;
-  /** Beyond the short well-known list: whatever Windows' own Start Menu search would find. */
-  listStartApps(): Promise<StartMenuApp[]>;
+  /** Beyond the short well-known list: whatever Windows' own Start Menu search would find. May be a remembered list (see AppCatalog). */
+  listStartApps(): Promise<readonly StartMenuApp[]>;
+  /** A fresh read from Windows, asked for once when the list above has no match, in case the app was only just installed. */
+  listStartAppsFresh?(): Promise<readonly StartMenuApp[]>;
   launchStartApp(appId: string): StartResult;
   listRunningProcessNames(): Promise<string[]>;
   /** Polls for a process that wasn't in `beforeNames`; null on timeout. For an app discovered dynamically, its eventual exe name isn't known in advance. */
@@ -174,8 +176,8 @@ const schema: ToolSchema = {
     `(${knownAppNames().join(', ')}) launch directly; any other name is looked up the way Windows' own Start Menu ` +
     `search would (installed Win32 and Microsoft Store/UWP apps alike), and the real app is launched if found. Only ` +
     `if nothing is genuinely installed does this fall back to a known official web app (e.g. WhatsApp, Telegram, ` +
-    'Discord, Spotify) in a browser — reusing a browser that already looks in active use rather than switching to a ' +
-    "different one. If neither an installed app nor a known web app exists, this says so plainly rather than guessing.",
+    'Discord, Spotify) in Chrome (the user\'s normal browser; another one only on a PC without Chrome). If neither an installed ' +
+    'app nor a known web app exists, this says so plainly rather than guessing.',
   args: {
     name: { type: 'string', required: true, description: 'Application name as the user said it.' },
   },
@@ -183,13 +185,21 @@ const schema: ToolSchema = {
 
 /** Beyond the short well-known list: Start Menu discovery, then a known web app, in that order. */
 async function resolveBeyondKnownApps(nameArg: string, deps: OpenApplicationDeps): Promise<ToolResult> {
-  let discovered: StartMenuApp[];
+  let discovered: readonly StartMenuApp[];
   try {
     discovered = await deps.listStartApps();
   } catch {
     discovered = []; // discovery unavailable — fall through to a known web app, same as "not found"
   }
-  const found = findStartApp(nameArg, discovered);
+  let found = findStartApp(nameArg, discovered);
+  if (found === null && deps.listStartAppsFresh !== undefined) {
+    // The remembered list may predate an install: look once more at what Windows has now before saying it isn't there.
+    try {
+      found = findStartApp(nameArg, await deps.listStartAppsFresh());
+    } catch {
+      // keep "not found"
+    }
+  }
   if (found !== null) {
     const before = await deps.listRunningProcessNames();
     const spawn = deps.launchStartApp(found.appId);
@@ -217,8 +227,12 @@ async function resolveBeyondKnownApps(nameArg: string, deps: OpenApplicationDeps
       data: { app: nameArg, reason: 'not_found' },
     };
   }
+  // Chrome, as everywhere else; only a PC without Chrome uses whichever browser is in use, then Windows' default.
+  if (await deps.launchBrowser('chrome', web.url)) {
+    return { ok: true, summary: `opened ${web.name} in chrome`, data: { app: web.name, usedWeb: true, browser: 'chrome' } };
+  }
   const runningBrowser = pickRunningBrowser(await deps.listRunningProcessNames());
-  if (runningBrowser !== null && (await deps.launchBrowser(runningBrowser, web.url))) {
+  if (runningBrowser !== null && runningBrowser !== 'chrome' && (await deps.launchBrowser(runningBrowser, web.url))) {
     return { ok: true, summary: `opened ${web.name} in ${runningBrowser}`, data: { app: web.name, usedWeb: true, browser: runningBrowser } };
   }
   try {

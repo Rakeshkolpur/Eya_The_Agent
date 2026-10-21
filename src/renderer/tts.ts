@@ -1,5 +1,6 @@
 import type { TTSSpeakMessage } from '../shared/ipcContract';
 import { DEFAULT_VOICE } from '../shared/constants';
+import { DEFAULT_OPENAI_VOICE } from '../shared/openaiVoice';
 import { loadAudio, saveAudio } from './phraseStore';
 import type { StoredAudio } from './phraseStore';
 import { concatBytes } from './pcm';
@@ -27,13 +28,22 @@ const LOCAL_STORE_ONLY_PATIENCE_MS = 200;
 let stopRequested = false;
 let muted = false;
 let currentVoice: string = DEFAULT_VOICE;
+/** Whose cloud voice speaks: Gemini's, or OpenAI's while Eya is set to use ChatGPT (then no other cloud voice ever stands in for it). */
+type CloudEngine = 'gemini' | 'openai';
+let cloudEngine: CloudEngine = 'gemini';
+let openaiVoice: string = DEFAULT_OPENAI_VOICE;
 let activePlayback: Sound | null = null;
 let activePhrase: PhraseStream | null = null;
 let cloudCooldownUntil = 0;
 let speakerFn: SpeakFn | null = null;
 
 // Saved audio is keyed by everything that changes how it sounds.
-const cloudKey = (voice: string, text: string): string => `gemini|v1|${voice}|${text}`;
+const cloudKey = (engine: CloudEngine, voice: string, text: string): string => `${engine}|v1|${voice}|${text}`;
+
+/** The engine and voice that speak right now. */
+function activeVoice(): { readonly engine: CloudEngine; readonly voice: string } {
+  return cloudEngine === 'openai' ? { engine: 'openai', voice: openaiVoice } : { engine: 'gemini', voice: currentVoice };
+}
 // Same key as phrases saved by the earlier local voice, so those stay valid.
 const localKey = (text: string): string => `af_heart|q8|v1|${text}`;
 
@@ -77,9 +87,10 @@ const cloudStreams = new Map<string, CloudListener>();
 async function startCloud(
   text: string,
   voice: string,
+  engine: CloudEngine,
   onChunk: (pcm: Uint8Array) => void,
 ): Promise<CloudHandle | null> {
-  const started = await window.eya.startTTSStream({ text, voice });
+  const started = await window.eya.startTTSStream({ text, voice, engine });
   if (!started.ok) {
     console.info(`[eya] cloud voice unavailable: ${started.error}`);
     return null;
@@ -151,8 +162,8 @@ const phraseStreams = new Map<string, PhraseStream>();
 const acquiring = new Map<string, Promise<PhraseStream | null>>();
 
 /** The saved phrase, one already in flight, or a new cloud request. */
-function acquirePhrase(text: string, voice: string): Promise<PhraseStream | null> {
-  const key = cloudKey(voice, text);
+function acquirePhrase(text: string, voice: string, engine: CloudEngine): Promise<PhraseStream | null> {
+  const key = cloudKey(engine, voice, text);
   const existing = phraseStreams.get(key);
   if (existing !== undefined) return Promise.resolve(existing);
   const pending = acquiring.get(key);
@@ -169,7 +180,7 @@ function acquirePhrase(text: string, voice: string): Promise<PhraseStream | null
     if (Date.now() < cloudCooldownUntil) return null;
 
     const stream = new PhraseStream();
-    const handle = await startCloud(text, voice, (pcm) => stream.push(pcm));
+    const handle = await startCloud(text, voice, engine, (pcm) => stream.push(pcm));
     if (handle === null) {
       cloudCooldownUntil = Date.now() + CLOUD_COOLDOWN_MS;
       return null;
@@ -191,8 +202,8 @@ function acquirePhrase(text: string, voice: string): Promise<PhraseStream | null
 }
 
 /** Plays a phrase from the cloud (or the saved copy), starting on the first chunk. */
-async function speakCloud(text: string, voice: string, requestedAt: number): Promise<'played' | 'failed'> {
-  const phrase = await acquirePhrase(text, voice);
+async function speakCloud(text: string, voice: string, engine: CloudEngine, requestedAt: number): Promise<'played' | 'failed'> {
+  const phrase = await acquirePhrase(text, voice, engine);
   if (phrase === null) return 'failed';
 
   const player = createPcmPlayback();
@@ -318,7 +329,17 @@ function ensureLocalWorker(): void {
   worker.postMessage(init);
 }
 
+/** Off on a light-performance laptop: the offline voice (a speech model of its own) is never loaded there, the system voice is used instead. */
+let offlineVoiceAllowed = true;
+export function setOfflineVoiceAllowed(allowed: boolean): void {
+  offlineVoiceAllowed = allowed;
+}
+
 async function speakLocal(text: string, system: SpeakFn): Promise<void> {
+  if (!offlineVoiceAllowed) {
+    await system(text);
+    return;
+  }
   ensureLocalWorker();
   const known = localCache.has(text);
   if (text.length > LOCAL_MAX_CHARS && !known) {
@@ -359,7 +380,10 @@ export function initRendererTTS(
   window.eya.onTTSStreamEnd((msg) => cloudStreams.get(msg.streamId)?.end(msg.ok));
   window.eya.onTTSStop(() => stopAllSound());
   window.eya.onTTSPrefetch(({ text }) => {
-    if (!muted) void acquirePhrase(text, currentVoice);
+    if (!muted) {
+      const { engine, voice } = activeVoice();
+      void acquirePhrase(text, voice, engine);
+    }
   });
   window.eya.onTTSSpeak(async (msg) => {
     if (muted) {
@@ -392,6 +416,27 @@ export function setTTSVoice(voice: string): void {
   currentVoice = voice;
 }
 
+/**
+ * Which cloud voice speaks. OpenAI's is used while Eya is set to use ChatGPT, and only that one: if it cannot play (no key, no credit, no
+ * connection), the voice on this PC speaks, not Gemini's. A change of engine or voice cools nothing down: it is a different voice.
+ */
+export function setTTSEngine(engine: CloudEngine, openaiVoiceName?: string): void {
+  const changed = engine !== cloudEngine || (openaiVoiceName !== undefined && openaiVoiceName !== openaiVoice);
+  cloudEngine = engine;
+  if (openaiVoiceName !== undefined) openaiVoice = openaiVoiceName;
+  if (changed) cloudCooldownUntil = 0;
+}
+
+/** Plays a sample in one cloud voice (to hear it before choosing it). True when it played; false when that voice could not be played. */
+export async function previewCloudVoice(engine: CloudEngine, voice: string, text: string): Promise<boolean> {
+  if (muted) return false;
+  stopAllSound();
+  stopRequested = false;
+  cloudCooldownUntil = 0;
+  const outcome = await speakCloud(text, voice, engine, performance.now());
+  return outcome === 'played';
+}
+
 /** Plays a sample line in the current voice, e.g. after the user picks one. */
 export function speakPreview(text: string): Promise<void> {
   if (muted || speakerFn === null) return Promise.resolve();
@@ -409,11 +454,11 @@ function createSpeaker(): SpeakFn {
   const system = createSystemSpeaker();
   return async (text: string) => {
     if (stopRequested || muted) return;
-    const voice = currentVoice;
+    const { engine, voice } = activeVoice();
     const requestedAt = performance.now();
 
     if (Date.now() >= cloudCooldownUntil) {
-      const outcome = await speakCloud(text, voice, requestedAt);
+      const outcome = await speakCloud(text, voice, engine, requestedAt);
       if (outcome === 'played' || stopRequested || muted) return;
       cloudCooldownUntil = Date.now() + CLOUD_COOLDOWN_MS;
       console.info(`[eya] voice: cloud gave no audio in time; using the offline voice for "${text}"`);

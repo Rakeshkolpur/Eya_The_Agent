@@ -1,14 +1,6 @@
 export const APP_NAME = 'Eya';
 export const APP_ID = 'com.rakesh.eya';
 
-export const ORB_WINDOW = {
-  width: 96,
-  height: 96,
-  panelExpandedHeight: 520, // room for the Communication Access panel when it is open
-  panelExpandedWidth: 380,
-  bottomMargin: 24,
-} as const;
-
 export const GLOBAL_SHORTCUT_TOGGLE = 'Control+Space';
 
 export const GREETING = "Hi, I'm Eya. How can I help?";

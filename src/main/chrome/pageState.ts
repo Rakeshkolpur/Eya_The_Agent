@@ -39,6 +39,8 @@ export interface PageElement {
   readonly disabled?: boolean;
   /** A password / card / one-time-code field: Eya neither reads nor types into it. */
   readonly sensitive?: boolean;
+  /** A sensitive field that is a one-time verification code (not a password or a card number): typed only when the user said the code. */
+  readonly oneTimeCode?: boolean;
   readonly region?: string;
   /** For a list row (a chat, a search result): its first line, which is what a person calls it. `name` is the row's whole text. */
   readonly primary?: string;
@@ -93,6 +95,7 @@ function normalizeElement(raw: unknown): PageElement | null {
     ...(typeof r['expanded'] === 'boolean' ? { expanded: r['expanded'] } : {}),
     ...(r['disabled'] === true ? { disabled: true } : {}),
     ...(r['sensitive'] === true ? { sensitive: true } : {}),
+    ...(r['sensitive'] === true && r['oneTimeCode'] === true ? { oneTimeCode: true } : {}),
     ...(typeof r['region'] === 'string' ? { region: r['region'].slice(0, 12) } : {}),
     ...(typeof r['primary'] === 'string' && r['primary'] !== '' ? { primary: r['primary'].slice(0, 80) } : {}),
     inViewport: r['inViewport'] === true,
@@ -123,7 +126,7 @@ export function normalizePageState(raw: unknown): PageState {
     .filter((e): e is PageElement => e !== null);
   const scroll = (typeof r['scroll'] === 'object' && r['scroll'] !== null ? r['scroll'] : {}) as Record<string, unknown>;
   const ch = typeof r['challenge'] === 'object' && r['challenge'] !== null ? (r['challenge'] as Record<string, unknown>) : null;
-  const kind = ch !== null ? (['captcha', 'bot_check', 'mfa', 'login'] as const).find((k) => k === ch['kind']) : undefined;
+  const kind = ch !== null ? (['captcha', 'bot_check', 'mfa', 'login', 'payment'] as const).find((k) => k === ch['kind']) : undefined;
   return {
     url: redactUrl(str(r['url'], 600)),
     title: str(r['title'], 200),

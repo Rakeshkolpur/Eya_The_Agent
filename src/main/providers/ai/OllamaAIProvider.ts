@@ -61,6 +61,10 @@ export class OllamaAIProvider implements AIProvider {
     return this.cachedAvailability === true;
   }
 
+  currentModel(): string | undefined {
+    return this.cfg.model;
+  }
+
   async checkAvailability(): Promise<boolean> {
     const controller = new AbortController();
     const to = setTimeout(() => controller.abort(), 2000);

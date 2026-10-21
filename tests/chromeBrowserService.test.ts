@@ -151,14 +151,21 @@ describe('clicking: look, choose what is really there, act, look again', () => {
     expect(bridge.count('click')).toBe(0);
   });
 
-  it('stops at a CAPTCHA, a bot check or a verification-code prompt without clicking anything', async () => {
-    for (const kind of ['captcha', 'bot_check', 'mfa']) {
+  it('stops at a CAPTCHA or a bot check without clicking anything', async () => {
+    for (const kind of ['captcha', 'bot_check']) {
       bridge.calls = [];
       bridge.on('observe', { tabId: 7, state: rawState({ challenge: { kind, hint: 'h' } }, [{ role: 'button', name: 'Continue' }]) });
       const result = await svc.clickOnPage('Continue');
       expect(result, kind).toMatchObject({ ok: false, reason: 'needs_user' });
       expect(bridge.count('click'), kind).toBe(0);
     }
+  });
+
+  it('a verification-code page does not block clicking: the Verify button can be pressed after the code is typed', async () => {
+    bridge.on('observe', { tabId: 7, state: rawState({ challenge: { kind: 'mfa', hint: 'h' } }, [{ role: 'button', name: 'Verify' }]) });
+    bridge.on('click', okReply(rawState()));
+    expect((await svc.clickOnPage('Verify')).ok).toBe(true);
+    expect(bridge.count('click')).toBe(1);
   });
 
   it('a plain sign-in page does not block clicking (the user may be mid-task)', async () => {
@@ -231,6 +238,38 @@ describe('clicking: look, choose what is really there, act, look again', () => {
   });
 });
 
+describe('a chat page is acted on quickly (the extension must not wait for a download or for a page that never goes quiet)', () => {
+  const chat = (url: string) => rawState({ url }, [{ role: 'input', name: 'Search or start a new chat', type: 'text' }, { role: 'button', name: 'Send' }]);
+  const isChat = (url: string) => url.startsWith('https://web.whatsapp.test/');
+
+  it('tells the extension `quick` for click, fill and open on a chat address, and for nothing else', async () => {
+    const quick = new ChromeBrowserService(bridge, { quickFor: isChat });
+    bridge.on('observe', { tabId: 7, state: chat('https://web.whatsapp.test/') });
+    bridge.on('fill', okReply(chat('https://web.whatsapp.test/')));
+    bridge.on('click', okReply(chat('https://web.whatsapp.test/')));
+    bridge.on('open_url', okReply(chat('https://web.whatsapp.test/'), { reuse: 'focused' }));
+    await quick.fillOnPage('search', 'akka');
+    await quick.clickOnPage('send');
+    await quick.openWebsite('https://web.whatsapp.test/');
+    expect(bridge.calls.filter((c) => c.op !== 'observe').map((c) => [c.op, c.args['quick']])).toEqual([['fill', true], ['click', true], ['open_url', true]]);
+
+    bridge.calls = [];
+    bridge.on('observe', { tabId: 7, state: chat('https://site.example/') });
+    bridge.on('fill', okReply(chat('https://site.example/')));
+    bridge.on('open_url', okReply(chat('https://site.example/'), { reuse: null }));
+    await quick.fillOnPage('search', 'cats');
+    await quick.openWebsite('https://site.example/');
+    expect(bridge.calls.some((c) => 'quick' in c.args)).toBe(false); // an ordinary page behaves exactly as before
+  });
+
+  it('never sends it unless it was told how (an Eya without that knowledge acts as it always did)', async () => {
+    bridge.on('observe', { tabId: 7, state: chat('https://web.whatsapp.test/') });
+    bridge.on('fill', okReply(chat('https://web.whatsapp.test/')));
+    await svc.fillOnPage('search', 'akka');
+    expect(bridge.calls.some((c) => 'quick' in c.args)).toBe(false);
+  });
+});
+
 describe('filling', () => {
   const form = rawState({}, [
     { role: 'input', name: 'Case number', type: 'text' },
@@ -252,6 +291,52 @@ describe('filling', () => {
     expect(result).toMatchObject({ ok: false, reason: 'needs_user' });
     expect(bridge.count('fill')).toBe(0);
     expect(JSON.stringify(bridge.calls)).not.toContain('hunter2');
+  });
+
+  describe('a verification code the user said out loud', () => {
+    const otpPage = rawState({ challenge: { kind: 'mfa', hint: 'h' } }, [
+      { role: 'input', name: 'Enter OTP', type: 'text', sensitive: true, oneTimeCode: true },
+      { role: 'input', name: 'Account password', type: 'password', sensitive: true },
+      { role: 'button', name: 'Verify' },
+    ]);
+
+    it('is typed into the code field when it is allowed (it was said), even though the page is asking for a code', async () => {
+      bridge.on('observe', { tabId: 7, state: otpPage });
+      bridge.on('fill', okReply(rawState()));
+      const result = await svc.fillOnPage('Enter OTP', '482913', { allowCode: true });
+      expect(result).toMatchObject({ ok: true, codeEntered: true });
+      expect(bridge.calls[1]!.args).toMatchObject({ id: 'e1.0', value: '482913', allowCode: true });
+    });
+
+    it('is refused when it was not said (nothing is sent), with a message that asks the user to say it', async () => {
+      bridge.on('observe', { tabId: 7, state: otpPage });
+      const result = await svc.fillOnPage('Enter OTP', '482913');
+      expect(result).toMatchObject({ ok: false, reason: 'needs_user' });
+      if (!result.ok && result.reason === 'needs_user') expect(result.message).toMatch(/say the code out loud/);
+      expect(bridge.count('fill')).toBe(0);
+    });
+
+    it('never opens a password field, whatever is allowed', async () => {
+      bridge.on('observe', { tabId: 7, state: otpPage });
+      const result = await svc.fillOnPage('Account password', 'hunter2', { allowCode: true });
+      expect(result).toMatchObject({ ok: false, reason: 'needs_user' });
+      expect(bridge.count('fill')).toBe(0);
+      expect(JSON.stringify(bridge.calls)).not.toContain('hunter2');
+    });
+
+    it('an extension older than 0.8.0 refuses the field: the user is told to reload it, not just that they must type it', async () => {
+      bridge.on('observe', { tabId: 7, state: otpPage });
+      bridge.on('fill', { performed: { ok: false, reason: 'sensitive_field', detail: 'old wording' }, tabId: 7, state: otpPage, settled: true });
+      const result = await svc.fillOnPage('Enter OTP', '482913', { allowCode: true });
+      expect(result).toMatchObject({ ok: false, reason: 'needs_user' });
+      if (!result.ok && result.reason === 'needs_user') expect(result.message).toMatch(/out of date.*0\.8\.0/);
+    });
+
+    it('a CAPTCHA still blocks everything, code or not', async () => {
+      bridge.on('observe', { tabId: 7, state: rawState({ challenge: { kind: 'captcha', hint: 'h' } }, [{ role: 'input', name: 'Enter OTP', sensitive: true, oneTimeCode: true }]) });
+      expect(await svc.fillOnPage('Enter OTP', '482913', { allowCode: true })).toMatchObject({ ok: false, reason: 'needs_user' });
+      expect(bridge.count('fill')).toBe(0);
+    });
   });
 
   it('lists the real choices when a drop-down has no such option', async () => {

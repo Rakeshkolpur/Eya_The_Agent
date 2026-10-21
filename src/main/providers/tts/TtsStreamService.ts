@@ -4,6 +4,7 @@ import { IpcChannels } from '@shared/ipcContract';
 import type { TTSStreamRequest, TTSStreamStartResult } from '@shared/ipcContract';
 import { rootLogger } from '@main/logging/logger';
 import type { GeminiTTS } from './GeminiTTS';
+import type { OpenAITTS } from './OpenAITTS';
 
 const log = rootLogger.child('tts.stream');
 
@@ -19,6 +20,7 @@ export class TtsStreamService {
   constructor(
     private readonly tts: GeminiTTS,
     private readonly getSender: () => WebContents | null,
+    private readonly openai?: OpenAITTS,
   ) {}
 
   register(): void {
@@ -33,7 +35,13 @@ export class TtsStreamService {
       return { ok: false, error: 'invalid request' };
     }
     if (!/^[A-Za-z]{2,24}$/.test(req.voice)) return { ok: false, error: 'invalid voice' };
-    if (!this.tts.hasKey()) return { ok: false, error: 'no Gemini key' };
+    // Whose voice it is. OpenAI's is asked for only when the person set Eya to use ChatGPT, and then nothing else's voice stands in for it.
+    const engine = req.engine === 'openai' ? 'openai' : 'gemini';
+    if (engine === 'openai') {
+      if (this.openai === undefined || !this.openai.hasKey()) return { ok: false, error: 'no OpenAI key' };
+    } else if (!this.tts.hasKey()) {
+      return { ok: false, error: 'no Gemini key' };
+    }
 
     this.counter += 1;
     const streamId = `s_${Date.now()}_${this.counter}`;
@@ -45,7 +53,8 @@ export class TtsStreamService {
       if (sender !== null && !sender.isDestroyed()) sender.send(channel, payload);
     };
 
-    void this.tts
+    const source = engine === 'openai' ? (this.openai as OpenAITTS) : this.tts;
+    void source
       .stream(
         req.text,
         req.voice,

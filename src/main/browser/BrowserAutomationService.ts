@@ -14,10 +14,12 @@ export type ClickGate = (target: ClickTarget) => string | null;
 export interface FillOptions {
   /** Press Enter after typing (for search boxes that have no button). */
   readonly submit?: boolean;
+  /** The value is a one-time verification code the user said out loud: it may be typed into a one-time-code field (never a password or card). */
+  readonly allowCode?: boolean;
 }
 
 export type ActOnPageResult =
-  | { readonly ok: true; readonly snapshot: PageSnapshot; readonly effects?: ActionEffects }
+  | { readonly ok: true; readonly snapshot: PageSnapshot; readonly effects?: ActionEffects; /** A one-time verification code the user said was typed into a code field. */ readonly codeEntered?: boolean }
   | { readonly ok: false; readonly reason: 'not_found'; readonly snapshot: PageSnapshot }
   /** The control is something the user must approve first (a purchase, a send, a delete…). Nothing was clicked. */
   | { readonly ok: false; readonly reason: 'needs_confirmation'; readonly why: string; readonly target: string; readonly snapshot: PageSnapshot }
@@ -113,6 +115,29 @@ export interface BrowserTabControl {
    * tool only passes after the user has said yes.
    */
   closeTab(tabId: number, options?: { readonly browser?: 'chrome' | 'edge' | 'other'; readonly allowUserTab?: boolean }): Promise<{ readonly closed: boolean; readonly remainingTabs: number }>;
+}
+
+/** What the adverts on the open page are doing (YouTube's skippable adverts and its overlay adverts). */
+export interface AdsState {
+  readonly onYouTube: boolean;
+  readonly title: string;
+  /** An advert is playing right now. */
+  readonly adShowing: boolean;
+  /** An advert is playing that offers no Skip button (yet): Eya waits through it. */
+  readonly waitingForAd: boolean;
+  /** How many Skip buttons have been pressed, and overlay adverts closed, since the helper was started on this page. */
+  readonly skipped: number;
+  readonly closed: number;
+  /** The helper keeps checking by itself (until the page goes away or it is stopped). */
+  readonly watching: boolean;
+  readonly video: { readonly paused: boolean; readonly ended: boolean; readonly seconds: number; readonly length: number | null } | null;
+}
+
+export type AdsMode = 'once' | 'watch' | 'stop';
+
+/** Pressing a page's own Skip / close buttons on adverts (only in the user's own browser, with the Eya extension 0.7.0 or later). */
+export interface BrowserAdHelper {
+  ads(mode: AdsMode, options?: { readonly keepPlaying?: boolean; readonly play?: boolean }): Promise<AdsState>;
 }
 
 /** One thing on the page that can be clicked, as seen by Eya's own code (never handed to the model as a list). */

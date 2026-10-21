@@ -71,13 +71,17 @@ export async function observeTab(tabId) {
   return { ...state, url: redactedUrl(state.url) || state.url };
 }
 
-/** Wait until the tab has finished loading AND its page has stopped changing. */
-export async function settleTab(tabId, sinceMs) {
-  await sleep(180); // a click that navigates flips the tab to "loading" a moment later
-  if (sawLoading(tabId, sinceMs)) await waitTabComplete(tabId, 12000);
+// A chat app is a single page that never really goes quiet (presence, timestamps, typing marks), so "wait until nothing has changed for
+// 450 ms, up to 2.5 s" always ran to its ceiling there. Quick mode waits for a short calm instead and never longer than half a second.
+const QUICK_SETTLE = { minMs: 80, quietMs: 150, timeoutMs: 500, busyExtraMs: 0 };
+
+/** Wait until the tab has finished loading AND its page has stopped changing (`quick`: only a short calm, for a single-page app). */
+export async function settleTab(tabId, sinceMs, quick = false) {
+  if (!quick) await sleep(180); // a click that navigates flips the tab to "loading" a moment later
+  if (sawLoading(tabId, sinceMs)) await waitTabComplete(tabId, quick ? 5000 : 12000);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      return await inject(tabId, 'waitQuiet', {});
+      return await inject(tabId, 'waitQuiet', quick ? QUICK_SETTLE : {});
     } catch (err) {
       // The page was replaced under us (a navigation finished): wait for the new one and ask again.
       if (attempt === 1) return { settled: false, error: String(err?.message ?? err) };
@@ -90,8 +94,14 @@ export async function settleTab(tabId, sinceMs) {
 /**
  * Do something in a tab, then report the world afterwards.
  * `perform(tabId)` returns the page agent's own result ({ ok, reason, ... }).
+ *
+ * `options.quick`: the page is a single-page app (a chat), so settle briefly and do not wait for a download.
+ * `options.downloads === false`: this action cannot start a download (typing in a box, scrolling), so do not wait to see whether one
+ * did — that wait is up to 2.2 s, and used to be paid after every single click and fill.
  */
-export async function runAction(requestedTabId, perform) {
+export async function runAction(requestedTabId, perform, options = {}) {
+  const quick = options.quick === true;
+  const watchDownloads = !quick && options.downloads !== false;
   const tabId = await resolveTabId(requestedTabId);
   const startedAt = Date.now();
 
@@ -109,7 +119,7 @@ export async function runAction(requestedTabId, perform) {
     return { performed, tabId, state: await observeTab(tabId), settled: true };
   }
 
-  const settle = await settleTab(tabId, startedAt);
+  const settle = await settleTab(tabId, startedAt, quick);
 
   // Did it open a new tab (target=_blank, window.open)? Follow it, like a person would.
   let activeTabId = tabId;
@@ -130,7 +140,7 @@ export async function runAction(requestedTabId, perform) {
     break;
   }
 
-  const download = await awaitDownload(startedAt);
+  const download = watchDownloads ? await awaitDownload(startedAt) : null;
   const state = await observeTab(activeTabId);
   return {
     performed,
@@ -161,7 +171,8 @@ export async function attachFile(args) {
     return { performed: await inject(tabId, 'attachChunk', { id: args.id, data: args.data }), tabId };
   }
   if (args.phase === 'commit') {
-    return runAction(tabId, (id) => inject(id, 'attachCommit', { id: args.id, prefer: args.prefer }));
+    // Putting a file on a picker starts no download; `quick` (a chat page) also settles briefly.
+    return runAction(tabId, (id) => inject(id, 'attachCommit', { id: args.id, prefer: args.prefer }), { quick: args.quick === true, downloads: false });
   }
   throw new Error('Unknown file transfer step.');
 }

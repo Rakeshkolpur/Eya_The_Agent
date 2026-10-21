@@ -51,6 +51,10 @@
 <div id="fileholder"></div>
 
 <script>
+  // chat.html?cut=1 writes a long file name cut short and without its extension, as the real WhatsApp preview does.
+  const CUT = /[?&]cut=1/.test(location.search);
+  const shown = (n) => { if (!CUT) return n; const base = n.replace(/\.[^.]+$/, ''); return base.length > 18 ? base.slice(0, 18).trim() + '…' : base; };
+
   // The people the mock account knows. Numbers are deliberately similar, so that matching can be tested for ambiguity.
   const CHATS = [
     { id: 1, name: 'Rahul Sharma', phone: '+91 98765 00432', last: 'See you tomorrow' },
@@ -91,7 +95,7 @@
       const b = document.createElement('div');
       b.className = 'bubble' + (m.from === 'them' ? ' in' : '');
       const text = document.createElement('span');
-      text.textContent = m.file ? 'File: ' + m.file + (m.text ? ' — ' + m.text : '') : m.text;
+      text.textContent = m.file ? 'File: ' + shown(m.file) + (m.text ? ' — ' + m.text : '') : m.text;
       b.appendChild(text);
       if (m.from === 'me') {
         const tick = document.createElement('span');
@@ -146,7 +150,8 @@
       doc.addEventListener('change', () => {
         const f = doc.files && doc.files[0];
         if (!f) return;
-        $('preview-file').textContent = f.name;
+        $('preview-file').textContent = shown(f.name);
+        window.__previewFile = f.name;
         $('preview').hidden = false;
         $('attach-menu').hidden = true;
         window.__picked = { name: f.name, size: f.size, type: f.type };
@@ -157,7 +162,7 @@
   $('pick-doc').addEventListener('click', () => { const d = $('doc-input'); if (d) d.click(); });
 
   $('preview-send').addEventListener('click', () => {
-    const name = $('preview-file').textContent;
+    const name = window.__previewFile || $('preview-file').textContent;
     const caption = $('caption').value.trim();
     $('preview').hidden = true;
     $('caption').value = '';

@@ -1,21 +1,30 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { app } from 'electron';
 import { rootLogger } from '@main/logging/logger';
 
 const log = rootLogger.child('env');
 
 /**
- * Minimal .env loader. No deps. Loads KEY=value lines from .env at project
- * root (or app root in packaged builds). Existing process.env values win.
+ * Where a .env file may live. From source: the project folder. Installed: beside Eya.exe or in Eya's own data folder, and never the
+ * folder the program happened to be started from (that is arbitrary: a shortcut, a terminal, someone else's project).
+ */
+export function dotEnvCandidates(packaged: boolean, where: { cwd: string; appPath: string; exeDir: string; userData: string }): string[] {
+  return packaged ? [join(where.exeDir, '.env'), join(where.userData, '.env')] : [join(where.cwd, '.env'), join(where.appPath, '.env')];
+}
+
+/**
+ * Minimal .env loader. No deps. Loads KEY=value lines from a .env file (see dotEnvCandidates). Existing process.env values win.
  *
  * Never logs values. Only announces which keys were populated.
  */
 export function loadDotEnv(): void {
-  const candidates = [
-    join(process.cwd(), '.env'),
-    join(app.getAppPath(), '.env'),
-  ];
+  const candidates = dotEnvCandidates(app.isPackaged, {
+    cwd: process.cwd(),
+    appPath: app.getAppPath(),
+    exeDir: dirname(process.execPath),
+    userData: app.getPath('userData'),
+  });
 
   const seen = new Set<string>();
   for (const path of candidates) {

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Test Cinema Booking</title>
+<style>body { font-family: sans-serif; margin: 20px; } button { font-size: 15px; padding: 6px 10px; margin: 3px; }</style>
+</head>
+<body>
+<h1>Test Cinema</h1>
+<h2 id="show">Dune Part Three</h2>
+<p>Screen 3 · Sat 25 Oct, 7:30 PM</p>
+<div id="seatmap">
+  <button type="button" class="seat">F6</button>
+  <button type="button" class="seat">F7</button>
+  <button type="button" class="seat">F8</button>
+  <button type="button" class="seat">F9</button>
+</div>
+<p id="picked">Seats selected: none</p>
+<p id="tickets">0 Tickets</p>
+<p id="fee">Convenience fee ₹60</p>
+<p id="total">Total ₹60</p>
+<button id="confirm" type="button">Confirm booking</button>
+<p id="result"></p>
+<script>
+  const chosen = [];
+  window.__bookings = 0;
+  for (const b of document.querySelectorAll('.seat')) b.addEventListener('click', () => {
+    const s = b.textContent;
+    const i = chosen.indexOf(s);
+    if (i >= 0) chosen.splice(i, 1); else chosen.push(s);
+    document.getElementById('picked').textContent = 'Seats selected: ' + (chosen.length ? chosen.join(', ') : 'none');
+    document.getElementById('tickets').textContent = chosen.length + ' Tickets';
+    document.getElementById('total').textContent = 'Total ₹' + (chosen.length * 250 + 60).toLocaleString('en-IN');
+  });
+  document.getElementById('confirm').addEventListener('click', () => {
+    window.__bookings += 1;
+    document.getElementById('result').textContent = 'Booking confirmed: BK' + (700 + window.__bookings) + ' for seats ' + chosen.join(', ');
+  });
+</script>
+</body>
+</html>

@@ -1,6 +1,8 @@
 import { parseWebUrl } from './openTools';
 import type { ActOnPageResult, BrowserAutomationService, BrowserTabControl, ClickGate } from '@main/browser/BrowserAutomationService';
 import { challengeMessage, isBlockingChallenge } from '@main/browser/challenges';
+import { codeWasSaid, currentUserWords } from '@main/security/userWords';
+import { checkoutFacts } from '@main/browser/checkoutFacts';
 import { BrowserUnavailableError, CommunicationAccessError } from '@main/browser/errors';
 import { LoopGuard, pageFingerprint } from '@main/browser/loopGuard';
 import type { ActionEffects, DownloadInfo } from '@main/browser/pageEffects';
@@ -44,6 +46,8 @@ export interface BrowserToolOptions {
   readonly verifyDownload?: (path: string) => Promise<boolean>;
   /** Present with Communication Access: a send in a chat app says who it goes to, and asks, before it happens. */
   readonly chatGate?: ChatSendGate;
+  /** Called when a one-time verification code the user said was typed into a code field (whatever was waiting for that code can go on). */
+  readonly onCodeEntered?: () => void;
 }
 
 function stringArg(args: ToolArgs, key: string): string | undefined {
@@ -227,8 +231,8 @@ export function createBrowserTools(
         "and fill_on_page. If you don't already know a site's exact official URL (e.g. for \"the High Court of " +
         'Telangana\" or \"my bank\"), use web_search first to find and confirm it, then call this with that exact ' +
         'URL — never invent one, and never treat opening a site as the same thing as searching for it. This always ' +
-        "happens in the user's OWN browser (Chrome or Edge), reusing a tab they already have open on that site if there is " +
-        "one, else a new tab in the same browser — so their sign-ins are already there. If their browser is not connected " +
+        "happens in the user's OWN browser — Chrome, unless they name Edge — reusing a tab they already have open on that site there if there is " +
+        "one, else a new tab — so their sign-ins are already there. If their browser is not connected " +
         'the result says why and what to do (usually: call connect_chrome); in that case do NOT retry with isolated. ' +
         "isolated: true opens Eya's own separate window instead, which starts signed out of everything — only ever set it " +
         'after the user has said that is fine.',
@@ -238,7 +242,9 @@ export function createBrowserTools(
         browser: {
           type: 'string',
           enum: ['chrome', 'edge'],
-          description: 'Open it in this browser. Set it whenever the user names one ("in Edge", "on Chrome") — that is where they are signed in. Leave it out otherwise.',
+          description:
+            'Leave it out and Eya uses Chrome. Set it whenever the user names a browser ("in Edge", "on Chrome") — and on every page of the same request, so a ' +
+            'task stays in the browser they asked for.',
         },
       },
     },
@@ -404,8 +410,13 @@ export function createBrowserTools(
           error:
             `That would be ${result.why}: "${result.target}". Nothing was clicked. Ask the user plainly whether to go ahead, ` +
             'and only if they clearly say yes, call click_on_page again with confirm: true.',
-          // The permission request goes last: its own `action` and `target` (what would be clicked) must win.
-          data: { ...currentPageData(action, text, idle, result.snapshot), ...permissionRequest('browser_sensitive_click', result.target, `This would be ${result.why}.`) },
+          // The permission request goes last: its own `action` and `target` (what would be clicked) must win. For a purchase or a booking the
+          // amounts and details the page shows go along, so the question to the user quotes the page and not a guess.
+          data: {
+            ...currentPageData(action, text, idle, result.snapshot),
+            ...(/purchase|payment|submitting/.test(result.why) ? ((facts) => (facts !== null ? { checkout: facts } : {}))(checkoutFacts(result.snapshot)) : {}),
+            ...permissionRequest('browser_sensitive_click', result.target, `This would be ${result.why}.`),
+          },
         };
       case 'needs_user':
         return applyChallenge(
@@ -512,8 +523,9 @@ export function createBrowserTools(
         '"Email", "Search", "Year"). Use this instead of guessing how a form works. To then submit, use click_on_page with ' +
         'the visible text of the submit/search button, or set submit: true to press Enter for a search box that has no ' +
         "button. If the field can't be found, the result shows what fields actually ARE on the page. To tick a checkbox use " +
-        'click_on_page. Passwords, card numbers and one-time codes are never typed by Eya — the result will say the user ' +
-        'has to do it.',
+        'click_on_page. A one-time VERIFICATION CODE (SMS / authenticator) the user has just said out loud IS typed: ask them to tell ' +
+        'you the code, then pass exactly what they said as the value; it only works for a code field and only for a code they said. ' +
+        'Passwords and card numbers are never typed by Eya — the result will say the user has to do it.',
       args: {
         label: { type: 'string', required: true, description: "The field's visible label or placeholder." },
         value: { type: 'string', required: true, description: 'What to type into it (or the option to choose, for a drop-down).' },
@@ -558,15 +570,24 @@ export function createBrowserTools(
       const record = () => {
         if (fingerprint !== null) guard.record(fingerprint, 'fill', key);
       };
+      // A one-time code is typed only if the person said it: the value must be words from their own mouth in this very request.
+      const allowCode = codeWasSaid(value, currentUserWords());
       let result: ActOnPageResult;
       try {
-        result = await service.fillOnPage(label, value, { submit });
+        result = await service.fillOnPage(label, value, { submit, ...(allowCode ? { allowCode: true } : {}) });
       } catch (err) {
         record();
         return failure('fill failed', 'I could not fill that in', err);
       }
       if (result.ok || result.reason !== 'needs_user') record();
       if (!result.ok) return declined(result, 'fill', label, 'fill');
+      if (result.codeEntered === true) {
+        try {
+          options.onCodeEntered?.();
+        } catch {
+          // whatever was waiting will notice by itself
+        }
+      }
       if (submit && options.chatGate?.forSubmit(before, label)?.reason === null) options.chatGate.consumed();
       return succeeded('fill', label, `filled "${label}"${submit ? ' and pressed Enter' : ''}`, before, result);
     },
@@ -799,7 +820,7 @@ export function createBrowserTools(
             'Use this right after telling the user that a page needs THEM — signing in, a CAPTCHA, a verification code. It waits (up to ~30 ' +
             'seconds per call) for the page to change, and then returns the page as it now is, so you can carry on with their ORIGINAL request ' +
             'without them having to repeat it. If it returns changed: true, look at the page and continue the task. If it returns ' +
-            'stillWaiting: true, they have not finished yet: call it again once or twice, then say you will carry on when they tell you.',
+            'stillWaiting: true, they have not finished yet: call it again once or twice, then tell them in one short sentence that you will carry on by yourself the moment they finish (Eya keeps watching the page and keeps the task, so they do not have to say anything).',
           args: { seconds: { type: 'number', description: 'How long to wait this time, up to 30. Default 25.' } },
         },
         async execute(args): Promise<ToolResult> {

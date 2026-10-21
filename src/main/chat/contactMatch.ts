@@ -107,6 +107,28 @@ function levenshtein(a: string, b: string, limit: number): number {
 
 type TokenHit = 'equal' | 'prefix' | 'inside' | 'close';
 
+/**
+ * A word as it sounds, roughly: doubled letters once ("akka" = "aka"), c and q as k ("acca", "aqa"), "ph" as f, no h, w as v, z as s.
+ * A speech recogniser spells a name it does not know by ear, so "akka", "aka" and "acka" are the same name to it and to the user. Used
+ * only as the last, weakest way two spellings can match (never to prefer one chat over another that matches better).
+ */
+export function soundKey(word: string): string {
+  return normalizeText(word)
+    .replace(/\s+/g, '')
+    .replace(/ph/g, 'f')
+    .replace(/[cq]/g, 'k')
+    .replace(/w/g, 'v')
+    .replace(/z/g, 's')
+    .replace(/h/g, '')
+    .replace(/(.)\1+/g, '$1');
+}
+
+/** Whether a chat name has a word that sounds like `spoken` (see soundKey). At least three sounds, so short words do not collide. */
+export function soundsLike(spoken: string, name: string): boolean {
+  const key = soundKey(spoken);
+  return key.length >= 3 && normalizeText(name).split(' ').some((w) => soundKey(w) === key);
+}
+
 /** `initial`: the user gave several words, so a single letter is an initial ("Rahul V"), not a guess. */
 function tokenHit(q: string, c: string, initial: boolean): TokenHit | null {
   if (q === c) return 'equal';
@@ -114,6 +136,7 @@ function tokenHit(q: string, c: string, initial: boolean): TokenHit | null {
   if (q.length >= 3 && c.includes(q)) return 'inside';
   const limit = q.length >= 9 ? 2 : q.length >= 5 ? 1 : 0;
   if (limit > 0 && levenshtein(q, c, limit) <= limit) return 'close';
+  if (q.length >= 3 && soundKey(q) === soundKey(c) && soundKey(q).length >= 3) return 'close';
   return null;
 }
 

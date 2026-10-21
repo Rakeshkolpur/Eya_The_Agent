@@ -58,6 +58,21 @@ export async function eyaPageAgent(command, params) {
     return SENSITIVE_NAME.test(name || '');
   }
 
+  // A one-time verification code field (an SMS or authenticator code), as against a password, a card number or a PIN. Eya types into one
+  // only when the person said the code out loud (the desktop side checks that and says so with `allowCode`).
+  const ONE_TIME_NAME = /one[- ]time|\botp\b|verification code|verify code|authenticator|2fa|two[- ]factor|6[- ]digit|sms code|confirmation code|login code|code sent/i;
+  const CARD_CONTEXT = /card|cvv|cvc|cc-|expir|credit|debit|\bpin\b/i;
+  function isOneTimeCodeField(el, name) {
+    if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') return false;
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (type === 'password') return false;
+    const ac = (el.getAttribute('autocomplete') || '').toLowerCase();
+    if (/(^|\s)(cc-|current-password|new-password)/.test(ac)) return false;
+    if (CARD_CONTEXT.test(name || '')) return false;
+    if (/(^|\s)one-time-code/.test(ac)) return true;
+    return ONE_TIME_NAME.test(name || '');
+  }
+
   function isVisible(el) {
     if (!isElement(el)) return false;
     if (el.closest('[inert]') !== null) return false;
@@ -289,13 +304,25 @@ export async function eyaPageAgent(command, params) {
       return { kind: 'bot_check', hint: 'This site is checking that a real person is visiting (a bot check).' };
     }
 
+    // A page asking for card or UPI details: the payment step, which is the person's (checked before the code test, because a card's
+    // "security code" is not a verification code).
+    const payField = Array.from(document.querySelectorAll('input')).find((i) => {
+      if (!isVisible(i)) return false;
+      const ac = (i.getAttribute('autocomplete') || '').toLowerCase();
+      if (/(^|\s)cc-(number|csc|exp)/.test(ac)) return true;
+      return /card number|\bcvv\b|\bcvc\b|expiry date|\bupi id\b|\bvpa\b/i.test(accName(i));
+    });
+    // A field that is plainly a one-time code beats a card field on the same page; "security code" counts as a code only when the page has
+    // no card fields (on a card form it is the CVV).
     const otp = Array.from(document.querySelectorAll('input')).find((i) => {
       if (!isVisible(i)) return false;
       const ac = (i.getAttribute('autocomplete') || '').toLowerCase();
       if (ac.includes('one-time-code')) return true;
-      return shortPage && /verification code|one[- ]time|\botp\b|authenticator|security code|6-digit|2-step|two-factor/i.test(accName(i));
+      const words = payField ? /verification code|one[- ]time|\botp\b|authenticator|6-digit|2-step|two-factor/i : /verification code|one[- ]time|\botp\b|authenticator|security code|6-digit|2-step|two-factor/i;
+      return shortPage && words.test(accName(i));
     });
     if (otp) return { kind: 'mfa', hint: 'This page is asking for a verification (one-time) code.' };
+    if (payField) return { kind: 'payment', hint: 'This page is asking for card or payment details.' };
 
     const pw = Array.from(document.querySelectorAll('input[type="password"]')).find((i) => isVisible(i));
     if (pw) return { kind: 'login', hint: 'This page is asking you to sign in.' };
@@ -424,8 +451,10 @@ export async function eyaPageAgent(command, params) {
       if (role === 'input') {
         const type = el.tagName === 'TEXTAREA' ? 'textarea' : (el.getAttribute('type') || (el.isContentEditable ? 'editable' : 'text')).toLowerCase();
         rec.type = type;
-        if (sensitive) rec.sensitive = true;
-        else {
+        if (sensitive) {
+          rec.sensitive = true;
+          if (isOneTimeCodeField(el, name)) rec.oneTimeCode = true;
+        } else {
           const v = el.value !== undefined ? el.value : el.isContentEditable ? el.innerText : '';
           if (v) rec.value = clip(v, 80);
         }
@@ -655,8 +684,8 @@ export async function eyaPageAgent(command, params) {
     if (found.error) return found.error;
     const { el } = found;
     const name = clip(accName(el), MAX_NAME);
-    if (isSensitiveField(el, name)) {
-      return { ok: false, reason: 'sensitive_field', detail: 'That is a password, card or one-time-code field. Eya never types those — the user has to.' };
+    if (isSensitiveField(el, name) && !(p.allowCode === true && isOneTimeCodeField(el, name))) {
+      return { ok: false, reason: 'sensitive_field', detail: 'That is a password, card or one-time-code field. Eya types a one-time code only when the user says it out loud; a password or card number is always the user\'s to type.' };
     }
     if (isDisabled(el) || el.readOnly === true) return { ok: false, reason: 'disabled', detail: 'That field cannot be edited right now.' };
     const value = String(p.value ?? '');
@@ -943,8 +972,111 @@ export async function eyaPageAgent(command, params) {
     return { ok: true, name: file.name, size: file.size, accept: clip(target.getAttribute('accept') || '', 60), inputs: inputs.length };
   }
 
+  // ---------------------------------------------------------------- adverts
+  // Skippable adverts on YouTube, and the small adverts it lays over a video. Only the page's OWN controls are pressed (the Skip button,
+  // an overlay advert's close button, a survey's dismiss button) exactly as a person would; an advert that cannot be skipped is simply
+  // waited through, and nothing is hidden, sped up or blocked. `watch` keeps doing that every half second until `stop` or the page goes.
+  const ADS_KEY = '__eyaAds';
+  const SKIP_SELECTORS = [
+    '.ytp-skip-ad-button',
+    '.ytp-ad-skip-button',
+    '.ytp-ad-skip-button-modern',
+    '.ytp-ad-skip-button-container button',
+    '.videoAdUiSkipButton',
+  ];
+  const AD_CLOSE_SELECTORS = [
+    '.ytp-ad-overlay-close-button',
+    '.ytp-ad-overlay-close-container',
+    'ytd-button-renderer#dismiss-button button',
+    '#dismiss-button button',
+    '.ytp-ad-survey-questions button[aria-label*="Close" i]',
+  ];
+
+  function adVisible(el) {
+    if (!el || !(el instanceof Element)) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== 'hidden' && cs.display !== 'none' && Number(cs.opacity) !== 0;
+  }
+
+  function pressFirst(selectors) {
+    for (const sel of selectors) {
+      for (const el of document.querySelectorAll(sel)) {
+        if (adVisible(el) && !el.disabled) {
+          el.click();
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function adsSnapshot(st) {
+    const player = document.querySelector('.html5-video-player');
+    const video = document.querySelector('video.html5-main-video') || document.querySelector('video');
+    const showing = !!player && player.classList.contains('ad-showing');
+    return {
+      ok: true,
+      onYouTube: /(^|[.])youtube[.]com$/.test(location.hostname),
+      title: clip(document.title, 120),
+      adShowing: showing,
+      // An advert is on but offers no Skip button (yet): Eya waits.
+      waitingForAd: showing && !st.justSkipped,
+      skipped: st.skipped,
+      closed: st.closed,
+      watching: st.timer !== null,
+      video: video
+        ? { paused: !!video.paused, ended: !!video.ended, seconds: Math.round(video.currentTime || 0), length: Number.isFinite(video.duration) ? Math.round(video.duration) : null }
+        : null,
+    };
+  }
+
+  function adsOp(params) {
+    const mode = params?.mode || 'once';
+    const st = (globalThis[ADS_KEY] ??= { skipped: 0, closed: 0, timer: null, justSkipped: false, keepPlaying: false, lastPressAt: 0 });
+    if (mode === 'stop') {
+      if (st.timer !== null) clearInterval(st.timer);
+      st.timer = null;
+      return adsSnapshot(st);
+    }
+    const tick = () => {
+      st.justSkipped = false;
+      if (pressFirst(SKIP_SELECTORS)) {
+        st.skipped += 1;
+        st.justSkipped = true;
+        st.lastPressAt = Date.now();
+      } else if (pressFirst(AD_CLOSE_SELECTORS)) {
+        st.closed += 1;
+        st.lastPressAt = Date.now();
+      }
+      // The video the person asked for can be left paused right after an advert is skipped: carry on playing it (only when asked to).
+      if (st.keepPlaying && Date.now() - st.lastPressAt < 5000) {
+        const player = document.querySelector('.html5-video-player');
+        const video = document.querySelector('video.html5-main-video');
+        if (video && video.paused && !video.ended && !(player && player.classList.contains('ad-showing'))) video.play().catch(() => undefined);
+      }
+    };
+    if (params?.keepPlaying === true) st.keepPlaying = true;
+    tick();
+    // Start the video if the browser left it paused (it was opened by a program, so it may wait for a click): its own Play button, as a person would.
+    if (params?.play === true) {
+      const player = document.querySelector('.html5-video-player');
+      const video = document.querySelector('video.html5-main-video');
+      if (video && video.paused && !video.ended && !(player && player.classList.contains('ad-showing'))) {
+        const button = document.querySelector('.ytp-play-button');
+        if (button && adVisible(button)) button.click();
+        else video.play().catch(() => undefined);
+      }
+    }
+    if (mode === 'watch' && st.timer === null) st.timer = setInterval(tick, 500);
+    return adsSnapshot(st);
+  }
+
   // ---------------------------------------------------------------- dispatch
   switch (command) {
+    case 'ads':
+      return adsOp(params);
     case 'observe':
       ensureObserver();
       return observe(params);

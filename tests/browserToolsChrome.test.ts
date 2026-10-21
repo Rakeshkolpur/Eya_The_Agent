@@ -160,13 +160,19 @@ describe('challenges: stop and ask, never get past', () => {
     expect(r.data).toMatchObject({ needsUser: true, challengeKind: 'captcha' });
   });
 
-  it('a click that lands on a bot check or verification-code page is reported the same way', async () => {
-    for (const kind of ['bot_check', 'mfa'] as const) {
-      const f = fake({ click: () => ({ ok: true, snapshot: snap({ challenge: { kind, hint: 'h' } }) }) });
-      const r = await tools(f)['click_on_page']!.execute({ text: 'Search' });
-      expect(r.ok, kind).toBe(false);
-      expect(r.data?.['challengeKind'], kind).toBe(kind);
-    }
+  it('a click that lands on a bot check is reported as a wall', async () => {
+    const f = fake({ click: () => ({ ok: true, snapshot: snap({ challenge: { kind: 'bot_check', hint: 'h' } }) }) });
+    const r = await tools(f)['click_on_page']!.execute({ text: 'Search' });
+    expect(r.ok).toBe(false);
+    expect(r.data?.['challengeKind']).toBe('bot_check');
+  });
+
+  it('a page asking for a verification code is not a wall: the step worked, the task waits for the person, and the model is told to ask for the code', async () => {
+    const f = fake({ click: () => ({ ok: true, snapshot: snap({ challenge: { kind: 'mfa', hint: 'h' } }) }) });
+    const r = await tools(f)['click_on_page']!.execute({ text: 'Login' });
+    expect(r.ok).toBe(true);
+    expect(r.data).toMatchObject({ needsUser: true, challengeKind: 'mfa' });
+    expect(String(r.data?.['userAction'])).toMatch(/tell you the code/);
   });
 
   it('a sign-in page is information, not a wall: ok:true, but flagged for the user', async () => {

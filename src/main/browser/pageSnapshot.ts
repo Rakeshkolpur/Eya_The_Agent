@@ -47,7 +47,7 @@ export interface SnapshotTable {
   readonly totalRows: number;
 }
 
-export type ChallengeKind = 'captcha' | 'bot_check' | 'mfa' | 'login';
+export type ChallengeKind = 'captcha' | 'bot_check' | 'mfa' | 'login' | 'payment';
 
 export interface PageChallenge {
   readonly kind: ChallengeKind;

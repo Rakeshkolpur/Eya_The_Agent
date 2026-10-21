@@ -2,7 +2,7 @@ const EXPLAIN = {
   connected: ['connected', 'Eya can see and use this browser.'],
   connecting: ['waiting', 'Looking for Eya on this PC… make sure the Eya app is running.'],
   disconnected: ['off', 'Eya is not reachable right now. Start the Eya app and this will reconnect on its own. (Keep Developer mode on in the extensions page, or the browser turns this extension off when it restarts.)'],
-  waiting_for_pairing: ['waiting', 'Eya is running but has not been told to connect to this browser. Say "connect Chrome" to Eya (or ask her to connect my browser), then this will turn green.'],
+  waiting_for_pairing: ['waiting', 'Eya is running but has not paired with this browser yet. This normally happens by itself within a few seconds of loading the extension; if it does not, reload the extension here, or say "connect my browser" to Eya.'],
 };
 
 function render(info) {
