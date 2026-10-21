@@ -77,7 +77,7 @@ describe('several backup AIs', () => {
   it('a key for a service already added replaces it instead of adding a second', async () => {
     const { svc } = service({ models: ['mistral-small-latest'] });
     await svc.set({ provider: 'mistral', key: MISTRAL_KEY });
-    const r = await svc.set({ provider: 'mistral', key: 'other_test_key_not_real_9876543210_zyx' });
+    const r = await svc.set({ provider: 'mistral', key: 'other_test_key_not_real_zyx_9876543210' });
     expect(r.status.entries).toHaveLength(1);
     expect(r.status.entries[0]?.hint).toBe('…3210');
   });
