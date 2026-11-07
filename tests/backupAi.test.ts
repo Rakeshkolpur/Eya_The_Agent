@@ -394,7 +394,7 @@ describe('what the user is told when everything is limited', () => {
 // ---- Gemini hands over quickly when another AI is ready ------------------------------------------------------------------------------
 
 describe('GeminiAIProvider with failFast', () => {
-  it('tries only the first two models and never waits a retry round', async () => {
+  it('goes past models that fail at once (a quota, "high demand") and never waits a retry round', async () => {
     const seen: string[] = [];
     const original = globalThis.fetch;
     globalThis.fetch = vi.fn(async (url: unknown) => {
@@ -402,11 +402,105 @@ describe('GeminiAIProvider with failFast', () => {
       return json({ error: { message: 'overloaded' } }, 503);
     }) as unknown as typeof fetch;
     try {
-      const p = new GeminiAIProvider({ apiKey: 'k', models: ['m1', 'm2', 'm3', 'm4'], retryDelaysMs: [400, 400] });
+      const p = new GeminiAIProvider({ apiKey: 'k', models: ['m1', 'm2', 'm3', 'm4', 'm5', 'm6'], retryDelaysMs: [400, 400] });
       const started = Date.now();
       await expect(p.complete([{ role: 'user', content: 'x' }], [], { failFast: true })).rejects.toThrow();
-      expect(seen).toHaveLength(2);
+      // (four models, however fast they fail: each costs about a second, and the working one is usually among them)
+      expect(seen).toHaveLength(4);
       expect(Date.now() - started).toBeLessThan(300); // no 400 ms retry round
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('reaches the model that works when the first two were spent or overloaded (it used to hand the request to another service instead)', async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: unknown) => {
+      const model = /models\/([^:]+):/.exec(String(url))?.[1] ?? '';
+      seen.push(model);
+      if (model === 'm1') return json({ error: { message: 'high demand' } }, 503);
+      if (model === 'm2') return json({ error: { message: 'quota', details: [{ violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel' }] }] } }, 429);
+      return json({ candidates: [{ content: { parts: [{ text: 'answered' }] } }] }, 200);
+    }) as unknown as typeof fetch;
+    try {
+      const p = new GeminiAIProvider({ apiKey: 'k', models: ['m1', 'm2', 'm3', 'm4'], retryDelaysMs: [] });
+      expect((await p.complete([{ role: 'user', content: 'x' }], [], { failFast: true })).text).toBe('answered');
+      expect(seen).toEqual(['m1', 'm2', 'm3']);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('but models that are SLOW use up the time: after TWO have had their turn the next AI is asked (no third, no fourth)', async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn((url: unknown, init?: RequestInit) => {
+      seen.push(String(url));
+      return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    }) as unknown as typeof fetch;
+    try {
+      const p = new GeminiAIProvider({ apiKey: 'k', models: ['m1', 'm2', 'm3', 'm4'], retryDelaysMs: [], planningTimeoutMs: 150, failFastRoundMs: 100 });
+      await expect(p.complete([{ role: 'user', content: 'x' }], [], { failFast: true })).rejects.toThrow();
+      expect(seen).toHaveLength(2);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('a first model that HANGS no longer takes the request away from the models that answer in two seconds (a real Flipkart order failed exactly here)', async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn((url: unknown, init?: RequestInit) => {
+      const model = /models\/([^:]+):/.exec(String(url))?.[1] ?? '';
+      seen.push(model);
+      if (model === 'm1') return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+      return Promise.resolve(json({ candidates: [{ content: { parts: [{ text: 'answered by the second' }] } }] }, 200));
+    }) as unknown as typeof fetch;
+    try {
+      // (the round budget is smaller than the first model's whole timeout: that is what used to end the request)
+      const p = new GeminiAIProvider({ apiKey: 'k', models: ['m1', 'm2', 'm3'], retryDelaysMs: [], planningTimeoutMs: 200, failFastRoundMs: 100 });
+      const started = Date.now();
+      expect((await p.complete([{ role: 'user', content: 'x' }], [], { failFast: true })).text).toBe('answered by the second');
+      expect(seen).toEqual(['m1', 'm2']);
+      expect(Date.now() - started).toBeLessThan(900);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('when the day of one model is spent and the others only HUNG, Gemini is not reported as "daily allowance used up" (that rested it for 30 minutes)', async () => {
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn((url: unknown, init?: RequestInit) => {
+      const model = /models\/([^:]+):/.exec(String(url))?.[1] ?? '';
+      if (model === 'm2') return Promise.resolve(json({ error: { message: 'quota', details: [{ violations: [{ quotaId: 'GenerateRequestsPerDayPerProjectPerModel' }] }] } }, 429));
+      return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    }) as unknown as typeof fetch;
+    try {
+      const p = new GeminiAIProvider({ apiKey: 'k', models: ['m1', 'm2', 'm3'], retryDelaysMs: [], planningTimeoutMs: 150, failFastRoundMs: 100, failFastHedgeMs: 30 });
+      const err = await p.complete([{ role: 'user', content: 'x' }], [], { failFast: true }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as { dailyQuota?: boolean }).dailyQuota).not.toBe(true);
+      expect(failureOf(err).kind).toBe('other');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('a model that is only SLOW is raced by the next one after a few seconds, and the faster answer wins', async () => {
+    const seen: string[] = [];
+    const original = globalThis.fetch;
+    globalThis.fetch = vi.fn((url: unknown, init?: RequestInit) => {
+      const model = /models\/([^:]+):/.exec(String(url))?.[1] ?? '';
+      seen.push(model);
+      if (model === 'm1') return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+      return Promise.resolve(json({ candidates: [{ content: { parts: [{ text: 'raced and won' }] } }] }, 200));
+    }) as unknown as typeof fetch;
+    try {
+      const p = new GeminiAIProvider({ apiKey: 'k', models: ['m1', 'm2'], retryDelaysMs: [], planningTimeoutMs: 5000, failFastHedgeMs: 60 });
+      const started = Date.now();
+      expect((await p.complete([{ role: 'user', content: 'x' }], [], { failFast: true })).text).toBe('raced and won');
+      expect(Date.now() - started).toBeLessThan(1000); // long before the first model's 5 s
     } finally {
       globalThis.fetch = original;
     }

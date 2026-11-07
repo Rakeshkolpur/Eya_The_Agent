@@ -1,5 +1,5 @@
 import type { BrowserEnvironment, PageSnapshot, SnapshotTable } from './pageSnapshot';
-import type { ActionEffects, BrowserTabInfo } from './pageEffects';
+import type { ActionEffects, BrowserTabInfo, DownloadInfo } from './pageEffects';
 import type { WebSearchHit } from './webSearchResults';
 
 /** The control a click resolved to, as the user would read it. */
@@ -21,6 +21,8 @@ export interface FillOptions {
 export type ActOnPageResult =
   | { readonly ok: true; readonly snapshot: PageSnapshot; readonly effects?: ActionEffects; /** A one-time verification code the user said was typed into a code field. */ readonly codeEntered?: boolean }
   | { readonly ok: false; readonly reason: 'not_found'; readonly snapshot: PageSnapshot }
+  /** The same button is on the page for several items and the request did not say which. Nothing was clicked. */
+  | { readonly ok: false; readonly reason: 'ambiguous'; readonly name: string; readonly options: readonly string[]; readonly snapshot: PageSnapshot }
   /** The control is something the user must approve first (a purchase, a send, a delete…). Nothing was clicked. */
   | { readonly ok: false; readonly reason: 'needs_confirmation'; readonly why: string; readonly target: string; readonly snapshot: PageSnapshot }
   /** Only the user can do this part (a CAPTCHA, a verification code, a password field). Nothing was done. */
@@ -62,6 +64,11 @@ export interface OpenWebsiteOptions {
   readonly isolated?: boolean;
   /** Open it in this browser (the user named one: "in Edge"), instead of choosing by where their session is. */
   readonly browser?: 'chrome' | 'edge';
+  /**
+   * Load the address again even if a tab is already showing exactly it. For trying a page again after it failed (a 503, a blank page): without it the
+   * tab showing the error was only brought to the front, and the retry saw the same error again.
+   */
+  readonly fresh?: boolean;
 }
 
 export type ScrollDirection = 'up' | 'down' | 'top' | 'bottom';
@@ -148,11 +155,31 @@ export interface PageItem {
   readonly primary?: string;
   readonly role: string;
   readonly region?: string;
+  /** For a tick box: whether it is ticked (a chat picker's rows). */
+  readonly checked?: boolean;
 }
 
 /** Listing what is clickable on the current page, for Eya's own code to choose from (e.g. matching a contact name locally). */
 export interface BrowserItemLister {
   listItems(): Promise<PageItem[]>;
+}
+
+/**
+ * Opening one row of a list (a chat, a search result) by what it IS — its first line — looked up in the page as it is at the moment of the click.
+ * Clicking by the row's whole text (name, last message, time, unread count) needed every word of it to be unchanged between the listing and the
+ * click, and a chat row changes whenever a message arrives or the minute turns: the chat was found and then "could not be opened".
+ */
+export interface BrowserItemClicker {
+  /** `region`: only a row in that part of the page ("dialog": the rows of an open popup, never the list behind it). */
+  clickItem(want: { readonly primary?: string; readonly name?: string; readonly region?: string; readonly role?: string }, gate?: ClickGate): Promise<ActOnPageResult>;
+}
+
+/**
+ * Pressing the Escape key, and no other (it closes the open chat or popup, as a person's keyboard does). Only in the user's own browser, with an
+ * extension that offers it (`press_key`).
+ */
+export interface BrowserKeyPress {
+  pressEscape(): Promise<{ readonly ok: true; readonly snapshot: PageSnapshot } | { readonly ok: false; readonly message: string }>;
 }
 
 export interface AttachFileRequest {
@@ -177,3 +204,61 @@ export type AttachFileResult =
 export interface BrowserFileAttach {
   attachFile(request: AttachFileRequest): Promise<AttachFileResult>;
 }
+
+/** One message of the OPEN chat, as the page shows it. `id` is the page's own message id; `text` is empty for a sticker, a voice note and the like. */
+export interface LiveChatMessage {
+  readonly id: string;
+  /** `out`: sent by the account itself (by the user, or by Eya for them). `in`: received. */
+  readonly dir: 'in' | 'out';
+  readonly kind: 'text' | 'deleted' | 'sticker' | 'audio' | 'video' | 'image' | 'document' | 'other';
+  readonly text: string;
+  /** The time the page printed for it ("10:42, 27/10/2026"), or empty. */
+  readonly at: string;
+}
+
+export type ChatLiveFailure = { readonly ok: false; readonly reason: 'extension_old' | 'unsupported'; readonly message: string };
+
+export type ChatWatchResult =
+  | { readonly ok: true; readonly watching: boolean; readonly tabId: number | null; readonly browser?: 'chrome' | 'edge' | 'other'; readonly hasMain?: boolean; readonly rows?: number; readonly title?: string }
+  | ChatLiveFailure;
+
+export type ChatReadResult =
+  | {
+      readonly ok: true;
+      readonly tabId: number | null;
+      readonly browser?: 'chrome' | 'edge' | 'other';
+      /** A chat is open on the page. */
+      readonly hasMain: boolean;
+      /** The open chat's title as the page shows it (a name, or a number). */
+      readonly title: string;
+      readonly messages: readonly LiveChatMessage[];
+      /** False when the page has message rows this reader does not recognise (so "no messages" cannot be told from "cannot read them"). */
+      readonly reliable: boolean;
+      /** How many message rows the reader recognised and how many it did not: counts only, never a word of the chat (for saying WHY a page was called unreadable). */
+      readonly diagnostics?: { readonly rows: number; readonly otherRows: number; readonly messageLike: number; readonly how?: string; readonly unknownSide?: number; readonly sides?: Readonly<Record<string, number>>; readonly shape?: string };
+    }
+  | ChatLiveFailure;
+
+/**
+ * Live chat: a watcher inside the open chat's page that says THAT something changed (the event itself carries no content), and a read of the open chat's last
+ * messages. Only in the user's own browser, with an extension that has `chat_watch` and `chat_read`; and only while the chat app is allowed.
+ */
+export interface BrowserChatLive {
+  chatWatch(mode: 'start' | 'stop' | 'status', tabId?: number): Promise<ChatWatchResult>;
+  chatRead(max?: number, tabId?: number): Promise<ChatReadResult>;
+  /**
+   * Takes a picture or a document out of the open chat (only a message the OTHER person sent). `look`: a picture's own bytes when the page holds them, or what a document
+   * bubble offers (its name, whether it has a download control) — nothing is pressed. `download`: presses the document's own download control and waits for the browser's
+   * download. Optional: a browser connection without it cannot take files out of a chat.
+   */
+  chatMedia?(messageId: string, step: 'look' | 'download', tabId?: number): Promise<ChatMediaResult>;
+}
+
+export type ChatMediaResult =
+  /** A picture's own bytes, as the page holds them. */
+  | { readonly ok: true; readonly via: 'bytes'; readonly mime: string; readonly data: Uint8Array }
+  /** A document bubble: the file name the page shows (empty when it shows none) and whether it has a download control. */
+  | { readonly ok: true; readonly via: 'document'; readonly name: string; readonly hasControl: boolean; readonly icons?: readonly string[] }
+  /** The download control was pressed: what the browser did (null: nothing started). */
+  | { readonly ok: true; readonly via: 'download'; readonly download: DownloadInfo | null }
+  | { readonly ok: false; readonly reason: 'extension_old' | 'not_found' | 'not_incoming' | 'not_media' | 'not_loaded' | 'too_big' | 'no_control' | 'failed'; readonly message: string };

@@ -45,6 +45,8 @@ export interface SnapshotTable {
   readonly headers: readonly string[];
   readonly rows: readonly (readonly string[])[];
   readonly totalRows: number;
+  /** How many rows of the table hold data (counted by the page script; `rows` is only a sample of the first few, and `totalRows` also counts header rows). */
+  readonly dataRows?: number;
 }
 
 export type ChallengeKind = 'captcha' | 'bot_check' | 'mfa' | 'login' | 'payment';

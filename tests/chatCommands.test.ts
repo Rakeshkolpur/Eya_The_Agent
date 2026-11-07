@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ChatSession } from '../src/main/chat/chatSession';
 import { ContactBook } from '../src/main/chat/ContactBook';
-import { ChatCommands } from '../src/main/local/ChatCommands';
+import { ChatCommands, phoneDigits, splitPhone } from '../src/main/local/ChatCommands';
 import type { FileLocation } from '../src/main/local/ChatCommands';
 import { MIGRATIONS } from '../src/main/memory/schema';
 import { migrate, openDatabase } from '../src/main/memory/sqlite';
@@ -18,6 +18,7 @@ import type { KnownFolders } from '../src/main/security/pathPolicy';
 import type { ToolArgs, ToolResult } from '../src/main/tools/types';
 import { FakeChatApp, FakeDisk } from './chatFixtures';
 import type { Behaviour } from './chatFixtures';
+import type { RefineInput } from '../src/main/local/messageRefine';
 
 const HOME = 'C:\\Users\\Test';
 const folders: KnownFolders = { home: HOME, downloads: `${HOME}\\Downloads`, desktop: `${HOME}\\Desktop`, documents: `${HOME}\\Documents`, pictures: `${HOME}\\Pictures`, videos: `${HOME}\\Videos`, music: `${HOME}\\Music`, temp: HOME };
@@ -43,6 +44,7 @@ interface Rig {
   readonly chat: ChatCommands;
   readonly session: ChatSession;
   readonly invoked: string[];
+  readonly tools: ToolRegistry;
   clock: number;
   settings: CommunicationSettings;
 }
@@ -51,7 +53,7 @@ const PDF = `${HOME}\\Desktop\\report.pdf`;
 const REPORT: FileLocation = { kind: 'one', path: PDF, name: 'report.pdf' };
 
 function rig(
-  opts: { learning?: 'on' | 'off'; behaviour?: Behaviour; settings?: CommunicationSettings; fail?: readonly string[]; noBrowser?: readonly string[]; located?: FileLocation | null; oldExtension?: boolean } = {},
+  opts: { learning?: 'on' | 'off'; behaviour?: Behaviour; settings?: CommunicationSettings; fail?: readonly string[]; noBrowser?: readonly string[]; located?: FileLocation | null; oldExtension?: boolean; installed?: boolean; openLink?: (url: string) => Promise<boolean>; refine?: (input: RefineInput) => Promise<string>; confirmSends?: 'always' | 'unless_verified' } = {},
 ): Rig {
   const app = new FakeChatApp();
   if (opts.behaviour !== undefined) app.behaviour = opts.behaviour;
@@ -84,10 +86,15 @@ function rig(
     session,
     files: { locate: async () => located },
     extensionIsOld: () => opts.oldExtension === true,
+    confirmSends: opts.confirmSends ?? 'always',
+    fileRoute: 'chat',
+    ...(opts.refine !== undefined ? { refine: opts.refine } : {}),
+    ...(opts.installed !== undefined ? { installedApp: (id: string) => id === 'whatsapp' && opts.installed === true } : {}),
+    ...(opts.openLink !== undefined ? { openAppLink: opts.openLink } : {}),
     now: () => state.clock,
     sleep: async () => undefined,
   });
-  return Object.assign(state, { app, book, chat, session, invoked }) as unknown as Rig;
+  return Object.assign(state, { app, book, chat, session, invoked, tools }) as unknown as Rig;
 }
 
 const say = (r: Rig, text: string, live = false) => r.chat.tryHandle(text, live ? { live: true } : {});
@@ -190,6 +197,8 @@ describe('sending a file by name', () => {
       lastFile: () => ({ path: PDF, name: 'report.pdf' }),
       chatAppOpen: () => true,
       sleep: async () => undefined,
+      confirmSends: 'always',
+      fileRoute: 'chat',
     });
     const asked = await withContext.tryHandle('Priya chat is there na? Send for Priya Singh.');
     expect(asked?.spoken).toBe('Found Priya Singh. Send the file "report.pdf"?');
@@ -200,9 +209,9 @@ describe('sending a file by name', () => {
 
   it('"send it" with nothing found yet, or with no chat in sight, is left to the model', async () => {
     const r = rig();
-    const none = new ChatCommands({ tools: { invoke: (name, args) => r.chat['deps'].tools.invoke(name, args) }, contacts: r.book, policy: new CommunicationPolicy(() => ON), session: r.session, lastFile: () => null, chatAppOpen: () => true, sleep: async () => undefined });
+    const none = new ChatCommands({ tools: { invoke: (name, args) => r.chat['deps'].tools.invoke(name, args) }, contacts: r.book, policy: new CommunicationPolicy(() => ON), session: r.session, lastFile: () => null, chatAppOpen: () => true, sleep: async () => undefined, confirmSends: 'always', fileRoute: 'chat' });
     expect(await none.tryHandle('send it to Uber')).toBeNull();
-    const noChat = new ChatCommands({ tools: { invoke: (name, args) => r.chat['deps'].tools.invoke(name, args) }, contacts: r.book, policy: new CommunicationPolicy(() => ON), session: r.session, lastFile: () => ({ path: PDF, name: 'report.pdf' }), chatAppOpen: () => false, sleep: async () => undefined });
+    const noChat = new ChatCommands({ tools: { invoke: (name, args) => r.chat['deps'].tools.invoke(name, args) }, contacts: r.book, policy: new CommunicationPolicy(() => ON), session: r.session, lastFile: () => ({ path: PDF, name: 'report.pdf' }), chatAppOpen: () => false, sleep: async () => undefined, confirmSends: 'always', fileRoute: 'chat' });
     expect(await noChat.tryHandle('send it to my boss')).toBeNull(); // could be an e-mail
     expect(r.invoked).toEqual([]);
   });
@@ -211,7 +220,8 @@ describe('sending a file by name', () => {
     const r = rig({ learning: 'on' });
     r.book.learn('whatsapp', ['Priya Singh']);
     const out = await say(r, 'send the latest pdf to priya');
-    expect(out?.spoken).toBe('Found Priya Singh. Send the file "report.pdf"?');
+    // ("priya" is part of the name, not the name: a likely match is said to be one, and is no longer taken for an identity)
+    expect(out?.spoken).toBe('Found Priya Singh (matched only on "priya", not an exact name). Send the file "report.pdf"?');
   });
 
   it('with Chats off, and never from always-on listening', async () => {
@@ -434,7 +444,10 @@ describe('messaging by name', () => {
     const out = await say(r, 'message Priya Singh saying call me');
     expect(out).toMatchObject({ ok: false });
     expect(out?.spoken).toMatch(/couldn't find the message box, so nothing was typed or sent/);
-    expect(await say(r, 'yes')).toBeNull();
+    // (a bare "yes" is not a question's answer here, and nothing is waiting: it takes the request that did not finish up again — which fails the same way and sends nothing)
+    const again = await say(r, 'yes');
+    expect(again?.spoken).toMatch(/couldn't find the message box, so nothing was typed or sent/);
+    expect(r.app.thread).toEqual([]);
   });
 
   it('is honest when the app does not show it went', async () => {
@@ -559,7 +572,7 @@ describe('asking before it remembers anything', () => {
     const r = rig();
     await say(r, 'message Priya Singh saying hi');
     const sent = await say(r, 'yes');
-    expect(sent?.spoken).toMatch(/^Sent to Priya Singh\. By the way, I can remember the names in your WhatsApp.*Want that\? Say yes or no\.$/);
+    expect(sent?.spoken).toMatch(/^Sent to Priya Singh\. WhatsApp shows it as sent, not yet delivered\. By the way, I can remember the names in your WhatsApp.*Want that\? Say yes or no\.$/);
     expect(r.book.count()).toBe(0);
     const no = await say(r, 'no');
     expect(no?.spoken).toBe("Okay, I won't keep any chat names.");
@@ -568,7 +581,7 @@ describe('asking before it remembers anything', () => {
     // and it does not ask again
     r.app.thread = [];
     await say(r, 'message Priya Singh saying hi again');
-    expect((await say(r, 'yes'))?.spoken).toBe('Sent to Priya Singh.');
+    expect((await say(r, 'yes'))?.spoken).toBe('Sent to Priya Singh. WhatsApp shows it as sent, not yet delivered.');
   });
 
   it('keeps the chat it just used when the answer is yes', async () => {
@@ -781,5 +794,206 @@ describe('a slow connection: the chat app takes its time', () => {
     r.app.loadingFor = 0; // the page has loaded by the time the task is tried again
     const again = await say(r, 'send the latest pdf to Priya Singh on WhatsApp');
     expect(again?.spoken).toBe('Found Priya Singh. Send the file "report.pdf"?');
+  });
+});
+
+describe('the installed WhatsApp app is looked for first', () => {
+  it('reads a phone number from the words, with the country code', () => {
+    expect(phoneDigits('98765 43210')).toBe('919876543210');
+    expect(phoneDigits('+91 98765-43210')).toBe('919876543210');
+    expect(phoneDigits('09876543210')).toBe('919876543210');
+    expect(phoneDigits('+1 (415) 555 0132')).toBe('14155550132');
+    for (const no of ['Priya', 'Priya 98765', '98765', '12345 hello', '']) expect(phoneDigits(no)).toBeNull();
+    expect(splitPhone('98765 43210 I am late')).toEqual({ name: '98765 43210', text: 'I am late' });
+    expect(splitPhone('9876543210 5 minutes late')).toEqual({ name: '9876543210', text: '5 minutes late' });
+    expect(splitPhone('+91 9876543210 hi')).toEqual({ name: '+91 9876543210', text: 'hi' });
+    expect(splitPhone('Priya I am late')).toBeNull();
+    expect(splitPhone('98765 4321 hello')).toBeNull();
+    expect(splitPhone('9876543210')).toBeNull(); // no message
+  });
+
+  it('with the app installed and a number: opens the app on that number with the message ready, touches no browser, and sends nothing', async () => {
+    const links: string[] = [];
+    const r = rig({ installed: true, openLink: async (url) => (links.push(url), true) });
+    const out = await say(r, 'message 98765 43210 I will be late');
+    expect(links).toEqual(['whatsapp://send?phone=919876543210&text=I%20will%20be%20late']);
+    expect(out?.ok).toBe(true);
+    expect(out?.spoken).toMatch(/WhatsApp is installed on this PC, so I opened it with your message ready for \+919876543210/);
+    expect(out?.spoken).toMatch(/press Enter in WhatsApp/);
+    expect(out?.spoken).toMatch(/can't see inside the installed app/);
+    expect(r.invoked).toEqual([]); // no browser step at all
+    expect(r.app.thread).toEqual([]);
+  });
+
+  it('with the app installed and only a name: says once why the web page is used, then does what it always did', async () => {
+    const links: string[] = [];
+    const r = rig({ installed: true, openLink: async (url) => (links.push(url), true) });
+    const first = await say(r, 'message Priya Singh that I will be late');
+    expect(links).toEqual([]);
+    expect(first?.spoken).toMatch(/^WhatsApp is installed on this PC, but I can't type inside the installed app, so I'm using WhatsApp Web\./);
+    expect(first?.spoken).toMatch(/Found Priya Singh/);
+    expect(r.invoked).toContain('find_chat');
+    await say(r, 'no');
+    const second = await say(r, 'message Priya Singh that I will be late');
+    expect(second?.spoken).not.toMatch(/installed on this PC/); // said once
+    expect(second?.spoken).toMatch(/Found Priya Singh/);
+  });
+
+  it('with the app not installed: nothing is said about it and the web page is used, as before', async () => {
+    const r = rig({ installed: false, openLink: async () => true });
+    const out = await say(r, 'message Priya Singh that I will be late');
+    expect(out?.spoken).not.toMatch(/installed/);
+    expect(out?.spoken).toMatch(/Found Priya Singh/);
+  });
+
+  it('if the installed app will not open, the web page does it', async () => {
+    const r = rig({ installed: true, openLink: async () => false });
+    const out = await say(r, 'message 98765 00432 I will be late');
+    expect(out?.spoken).not.toMatch(/opened it with your message/);
+    expect(r.invoked).toContain('find_chat');
+  });
+
+  it('Chats switched off still means nothing is opened', async () => {
+    const links: string[] = [];
+    const r = rig({ installed: true, settings: OFF, openLink: async (url) => (links.push(url), true) });
+    const out = await say(r, 'message 98765 43210 I will be late');
+    expect(links).toEqual([]);
+    expect(out?.spoken).toMatch(/Chats are off for WhatsApp/);
+  });
+});
+
+// ------------------------------------------------------------------------------------------------------------------ a note about what to say is written properly, shown, and sent on a yes
+describe('"msg this person, Rakesh told me he will call u…" (what to tell them, not the message itself)', () => {
+  const SAID = '+91 99887 70432 msg this person, Rakesh told me he will call u night after having dinner, until he said take care, and he asking u, u want anything for diwali';
+  const WRITTEN = "Rakesh told me he'll call you tonight after dinner. He said to take care, and he's asking if you'd like anything for Diwali.";
+  const refiner = (calls: RefineInput[] = []) => async (input: RefineInput): Promise<string> => (calls.push(input), input.change !== undefined ? 'Rakesh will call you tonight after dinner. Take care! He asks if you want anything for Diwali.' : WRITTEN);
+
+  it('is understood as a message to that number (it was not: the AI took it, and asked "Send this message to this chat?" with no message in it)', async () => {
+    const calls: RefineInput[] = [];
+    const r = rig({ refine: refiner(calls) });
+    const out = await say(r, SAID);
+    expect(out).not.toBeNull();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.text).toMatch(/^Rakesh told me he will call u night after having dinner/);
+  });
+
+  it('writes the message, SHOWS it, types it in the box and sends nothing until the person says yes', async () => {
+    const r = rig({ refine: refiner() });
+    const out = await say(r, SAID);
+    expect(out?.spoken).toBe('Found Priya Singh, number ending in 432. I wrote it like this: "' + WRITTEN + '" Send it? Say yes to send, or tell me what to change.');
+    expect(r.app.draft).toBe(WRITTEN);
+    expect(r.app.thread).toEqual([]);
+  });
+
+  it('"ya" is a yes: it is sent, once, and checked — no second question (it asked again and again)', async () => {
+    const r = rig({ refine: refiner() });
+    await say(r, SAID);
+    const sent = await say(r, 'ya');
+    expect(sent?.spoken).toMatch(/^Sent to Priya Singh\./);
+    expect(r.app.thread.map((m) => m.text)).toEqual([WRITTEN]);
+    expect(r.invoked.filter((n) => n === 'click_on_page')).toHaveLength(1);
+  });
+
+  it('"yes send" and "yaa send" are yeses too', async () => {
+    for (const reply of ['yes send', 'yaa send', 'haan', 'ok send it']) {
+      const r = rig({ refine: refiner() });
+      await say(r, SAID);
+      expect((await say(r, reply))?.spoken, reply).toMatch(/^Sent to Priya Singh\./);
+    }
+  });
+
+  it('"why are you asking me again" with a send in it is a yes, not a new request', async () => {
+    const r = rig({ refine: refiner() });
+    await say(r, SAID);
+    const sent = await say(r, 'fuck send why u askign me again gagin');
+    expect(sent?.spoken).toMatch(/^Sent to Priya Singh\./);
+    expect(r.app.thread).toHaveLength(1);
+  });
+
+  it('but "don\'t send, why are you asking" is not', async () => {
+    const r = rig({ refine: refiner() });
+    await say(r, SAID);
+    const out = await say(r, "don't send it, why are you asking me");
+    expect(r.app.thread).toEqual([]);
+    expect(out?.spoken ?? '').not.toMatch(/^Sent/);
+  });
+
+  it('"make it shorter" changes the message (written again, typed again, shown again) and then a yes sends the NEW one', async () => {
+    const calls: RefineInput[] = [];
+    const r = rig({ refine: refiner(calls) });
+    await say(r, SAID);
+    const changed = await say(r, 'make it shorter');
+    expect(calls[1]).toMatchObject({ draft: WRITTEN, change: 'make it shorter' });
+    expect(changed?.spoken).toMatch(/^Changed\. I'll send: "Rakesh will call you tonight after dinner\. Take care! He asks if you want anything for Diwali\." Send it\?/);
+    expect(r.app.draft).toBe('Rakesh will call you tonight after dinner. Take care! He asks if you want anything for Diwali.');
+    expect(r.app.thread).toEqual([]);
+    expect((await say(r, 'yes'))?.spoken).toMatch(/^Sent to Priya Singh\./);
+    expect(r.app.thread.map((m) => m.text)).toEqual(['Rakesh will call you tonight after dinner. Take care! He asks if you want anything for Diwali.']);
+  });
+
+  it('"no" sends nothing', async () => {
+    const r = rig({ refine: refiner() });
+    await say(r, SAID);
+    expect((await say(r, 'no'))?.spoken).toMatch(/^Okay, I won't send it/);
+    expect(r.app.thread).toEqual([]);
+  });
+
+  it('a message that is already a message is typed exactly as said (it is not rewritten), and even then the question shows it', async () => {
+    const calls: RefineInput[] = [];
+    const r = rig({ refine: refiner(calls) });
+    const out = await say(r, 'message Priya Singh that hi');
+    expect(calls).toEqual([]);
+    expect(out?.spoken).toBe('Found Priya Singh. Send "hi"?');
+  });
+
+  it('as the app is set up for use (the person\'s own request to send is the yes once the chat is shown to be theirs), a message they said in full still goes at once — but a message Eya wrote from a note never does: it is shown first', async () => {
+    const plain = rig({ confirmSends: 'unless_verified', refine: refiner() });
+    const said = await say(plain, 'message +91 99887 70432 hi there');
+    expect(said?.spoken).toMatch(/^Sent to Priya Singh\./);
+    expect(plain.app.thread.map((m) => m.text)).toEqual(['hi there']);
+    const note = rig({ confirmSends: 'unless_verified', refine: refiner() });
+    const out = await say(note, SAID);
+    expect(out?.spoken).toMatch(/I wrote it like this: /);
+    expect(note.app.thread).toEqual([]);
+  });
+
+  it('with no way to refine (no dependency) the words are typed as said, as before', async () => {
+    const r = rig();
+    const out = await say(r, SAID);
+    expect(out?.spoken).toMatch(/Send "Rakesh told me he will call u night after having dinner/);
+  });
+});
+
+describe('a send the AI asked about is carried out by the application on a yes (the AI asked it three times)', () => {
+  it('the gate\'s question shows the message, and "ya" presses Send without the AI', async () => {
+    const r = rig();
+    await r.tools.invoke('find_chat', { query: 'Priya Singh' });
+    await r.tools.invoke('fill_on_page', { label: 'Type a message', value: 'Hello, how are you?' });
+    const asked = await r.tools.invoke('click_on_page', { text: 'Send' });
+    expect(asked.ok).toBe(false);
+    expect(asked.error).toMatch(/Send "Hello, how are you\?" to this chat\?/);
+    expect(r.app.thread).toEqual([]);
+    // (the person answers: the question is in the AI's hands, and the application answers it)
+    const sent = await say(r, 'ya');
+    expect(sent?.spoken).toMatch(/^Sent to Priya Singh\./);
+    expect(r.app.thread.map((m) => m.text)).toEqual(['Hello, how are you?']);
+  });
+
+  it('"no" to it sends nothing, and a yes after that is nothing to answer', async () => {
+    const r = rig();
+    await r.tools.invoke('find_chat', { query: 'Priya Singh' });
+    await r.tools.invoke('fill_on_page', { label: 'Type a message', value: 'Hello' });
+    await r.tools.invoke('click_on_page', { text: 'Send' });
+    expect((await say(r, 'no'))?.spoken).toMatch(/^Okay, I won't send it/);
+    expect(await say(r, 'yes')).toBeNull();
+    expect(r.app.thread).toEqual([]);
+  });
+
+  it('a yes with nothing asked about is not a send', async () => {
+    const r = rig();
+    await r.tools.invoke('find_chat', { query: 'Priya Singh' });
+    await r.tools.invoke('fill_on_page', { label: 'Type a message', value: 'Hello' });
+    expect(await say(r, 'yes')).toBeNull(); // (no question was put to the person)
+    expect(r.app.thread).toEqual([]);
   });
 });

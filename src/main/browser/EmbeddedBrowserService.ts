@@ -1,6 +1,9 @@
 import { ChromeBrowserService } from '@main/chrome/ChromeBrowserService';
 import type {
   ActOnPageResult,
+  AdsMode,
+  AdsState,
+  BrowserAdHelper,
   BrowserAutomationService,
   BrowserCapture,
   ClickGate,
@@ -10,22 +13,23 @@ import type {
   ScreenshotImage,
   ScrollDirection,
 } from './BrowserAutomationService';
-import { PlaywrightPageHost } from './PlaywrightPageHost';
-import type { PlaywrightHostOptions } from './PlaywrightPageHost';
+import { EmbeddedPageHost } from './EmbeddedPageHost';
+import type { EmbeddedHostOptions } from './EmbeddedPageHost';
 import type { PageSnapshot } from './pageSnapshot';
 import type { WebSearchHit } from './webSearchResults';
 
 /**
- * Eya's own browser window: a visible, persistent Chrome (Edge as the backup) with a profile of its own — not the
- * user's everyday one, so nothing in it starts signed in. All the real work is the same service and the same page
- * script that drive the user's own browser through the extension; only the transport differs.
+ * Eya Browser: Eya's own browser, drawn inside the Eya window by the Chromium that is already part of Eya (nothing to install, no other browser
+ * needed). It has a profile of its own, so nothing in it starts signed in, and what the user signs in to stays for the next task. All the real
+ * work is the same service and the same page script that drive the user's own browser through the extension; only the transport differs.
  */
-export class PlaywrightBrowserService implements BrowserAutomationService, BrowserCapture {
-  private readonly host: PlaywrightPageHost;
+export class EmbeddedBrowserService implements BrowserAutomationService, BrowserCapture, BrowserAdHelper {
+  /** Its tabs: the Browser page shows them, watches their events and drives its address bar through this. */
+  readonly host: EmbeddedPageHost;
   private readonly inner: ChromeBrowserService;
 
-  constructor(options: PlaywrightHostOptions) {
-    this.host = new PlaywrightPageHost(options);
+  constructor(options: EmbeddedHostOptions) {
+    this.host = new EmbeddedPageHost(options);
     this.inner = new ChromeBrowserService(this.host, { environment: 'eya_browser' });
   }
 
@@ -61,6 +65,9 @@ export class PlaywrightBrowserService implements BrowserAutomationService, Brows
   }
   searchWeb(query: string): Promise<WebSearchHit[]> {
     return this.inner.searchWeb(query);
+  }
+  ads(mode: AdsMode, options?: { readonly keepPlaying?: boolean; readonly play?: boolean }): Promise<AdsState> {
+    return this.inner.ads(mode, options);
   }
   screenshot(): Promise<ScreenshotImage> {
     return this.inner.screenshot();

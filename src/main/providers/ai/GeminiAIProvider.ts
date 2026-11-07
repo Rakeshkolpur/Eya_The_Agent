@@ -1,4 +1,6 @@
 import { rootLogger } from '@main/logging/logger';
+import { recordTokens } from './tokenMeter';
+import { StoppedError, sleepUnlessStopped, wasAborted } from '@main/agent/stopping';
 import type {
   AIChatMessage,
   AICompletion,
@@ -35,6 +37,10 @@ export interface GeminiConfig {
   readonly planningHedgeMs: number;
   /** Waits between rounds when every model failed transiently; one per retry. */
   readonly retryDelaysMs: readonly number[];
+  /** With another AI ready to take over: no further model is started once the round has used this long. */
+  readonly failFastRoundMs: number;
+  /** With another AI ready to take over: a model that has not answered by then is raced by the next one. */
+  readonly failFastHedgeMs: number;
 }
 
 // Measured on this API key (3 runs each, 1.5s "open notepad" clip):
@@ -87,14 +93,23 @@ interface GeminiCandidate {
 interface GeminiResponse {
   readonly candidates?: readonly GeminiCandidate[];
   readonly promptFeedback?: unknown;
-  readonly usageMetadata?: { readonly promptTokenCount?: number; readonly candidatesTokenCount?: number; readonly totalTokenCount?: number };
+  readonly usageMetadata?: { readonly promptTokenCount?: number; readonly candidatesTokenCount?: number; readonly totalTokenCount?: number; readonly cachedContentTokenCount?: number };
   readonly error?: { readonly message?: string; readonly code?: number };
 }
 
-/** When another AI is ready to take over, Gemini gets this long and this many models before it hands the request on. */
+/**
+ * When another AI is ready to take over, each Gemini model gets this long, and Gemini hands the request on once the models tried have used up the round's
+ * time. It used to be "the first two models": when those two were the ones that were slow or spent for the day (a model under high demand, a daily quota),
+ * the two that were working (answering in about two seconds) were never reached, and every step went on to the free models of other services, which are
+ * slow, limited and poor at using tools. A failure that comes back quickly (a quota, a refusal, "high demand") costs about a second and is moved past;
+ * only slow ones use up the time.
+ */
 const FAIL_FAST_TIMEOUT_MS = 10_000;
 const FAIL_FAST_HEDGE_MS = 4000;
-const FAIL_FAST_MODELS = 2;
+const FAIL_FAST_MODELS = 4;
+/** Whatever the round's time, this many different models are asked before Gemini gives a request up. */
+const MIN_MODELS_TRIED = 2;
+const FAIL_FAST_ROUND_MS = 8000;
 
 interface GenerateResult {
   readonly data: GeminiResponse;
@@ -126,7 +141,9 @@ class GeminiHttpError extends Error {
 const DAILY_QUOTA_COOLDOWN_MS = 30 * 60_000;
 
 /** Default for `planningHedgeMs`: past this a planning call is raced by the next model and the first answer wins. */
-const PLANNING_HEDGE_MS = 8000;
+// 0 = do not race a second model when the first is merely slow: one model answers each request (racing made the answers come from a
+// different model, in a different style and sometimes language, from one request to the next). A model that FAILS still hands over to the next.
+const PLANNING_HEDGE_MS = 0;
 /** How long a model that just failed is left alone: an overloaded model is not back in 15 s, and retrying it on every step cost 2–30 s a time. */
 const COOLDOWN_OVERLOADED_MS = 60_000;
 const COOLDOWN_TIMED_OUT_MS = 120_000;
@@ -216,12 +233,14 @@ export class GeminiAIProvider implements AIProvider {
         ...parseModelList(process.env['EYA_GEMINI_TRANSCRIBE_MODEL'], TRANSCRIBE_DEFAULT),
         ...FALLBACK_MODELS,
       ]),
-      baseUrl: DEFAULT_BASE_URL,
+      baseUrl: process.env['EYA_GEMINI_BASE_URL']?.trim() || DEFAULT_BASE_URL,
       timeoutMs: 30_000,
       planningTimeoutMs: 20_000,
       transcribeHedgeMs: 3500,
       planningHedgeMs: PLANNING_HEDGE_MS,
       retryDelaysMs: DEFAULT_RETRY_DELAYS_MS,
+      failFastRoundMs: FAIL_FAST_ROUND_MS,
+      failFastHedgeMs: FAIL_FAST_HEDGE_MS,
       ...overrides,
     };
   }
@@ -314,9 +333,11 @@ export class GeminiAIProvider implements AIProvider {
     const { data, model, ms } = await this.generate(
       this.cfg.models,
       body,
-      fast ? Math.min(FAIL_FAST_HEDGE_MS, this.cfg.planningHedgeMs) : this.cfg.planningHedgeMs,
+      // (in a fail-fast call a model that has not answered in 4 s is raced by the next one: a hung model costs 4 s, not its whole 10)
+      fast ? (this.cfg.planningHedgeMs > 0 ? Math.min(this.cfg.failFastHedgeMs, this.cfg.planningHedgeMs) : this.cfg.failFastHedgeMs) : this.cfg.planningHedgeMs,
       fast ? Math.min(FAIL_FAST_TIMEOUT_MS, this.cfg.planningTimeoutMs) : this.cfg.planningTimeoutMs,
       fast,
+      options?.signal,
     );
     const completion = this.parseCandidate(data);
     this.lastModel = model;
@@ -386,6 +407,7 @@ export class GeminiAIProvider implements AIProvider {
     hedgeAfterMs?: number,
     timeoutMs?: number,
     fast = false,
+    signal?: AbortSignal,
   ): Promise<GenerateResult> {
     if (this.cfg.apiKey.length === 0) {
       throw new Error('Gemini API key missing (set EYA_GEMINI_API_KEY)');
@@ -393,13 +415,16 @@ export class GeminiAIProvider implements AIProvider {
     // "fast": another AI will take over if this one fails, so no waiting rounds and only the first couple of models.
     const delays = fast ? [] : this.cfg.retryDelaysMs;
     for (let attempt = 0; ; attempt += 1) {
+      if (signal?.aborted === true) throw new StoppedError();
       try {
-        return await this.generateRound(models, body, hedgeAfterMs, attempt > 0, timeoutMs, fast ? FAIL_FAST_MODELS : undefined);
+        return await this.generateRound(models, body, hedgeAfterMs, attempt > 0, timeoutMs, fast ? FAIL_FAST_MODELS : undefined, signal, fast ? this.cfg.failFastRoundMs : undefined);
       } catch (err) {
+        // (stopped: not a failure of any model, nothing is rested, nothing is tried again)
+        if (wasAborted(signal)) throw new StoppedError();
         const wait = retryDelayFor(err, attempt, delays);
         if (wait === null) throw err;
         log.info('all models failed for now; trying again shortly', { attempt: attempt + 1, waitMs: wait });
-        await new Promise((resolve) => setTimeout(resolve, wait));
+        await sleepUnlessStopped(wait, signal);
       }
     }
   }
@@ -416,7 +441,10 @@ export class GeminiAIProvider implements AIProvider {
     ignoreCooldowns: boolean,
     timeoutMs?: number,
     maxModels?: number,
+    signal?: AbortSignal,
+    roundBudgetMs?: number,
   ): Promise<GenerateResult> {
+    if (signal?.aborted === true) return Promise.reject(new StoppedError());
     const now = Date.now();
     // A spent daily quota is skipped outright, even on a retry round.
     const usable = models.filter((m) => (this.dailyLimitUntil.get(m) ?? 0) <= now);
@@ -441,23 +469,37 @@ export class GeminiAIProvider implements AIProvider {
     }
     if (maxModels !== undefined) order = order.slice(0, maxModels);
 
+    const roundStarted = Date.now();
     return new Promise<GenerateResult>((resolve, reject) => {
       const attempts = new Map<string, AbortController>();
       let nextIndex = 0;
       let running = 0;
       let settled = false;
       let firstError: unknown;
+      // (the first failure that is NOT a limit on one model: a timeout or "high demand" says what Gemini is doing now; one model's spent day does not)
+      let firstOther: unknown;
       let hedgeTimer: ReturnType<typeof setTimeout> | null = null;
 
+      // Stopped by the person: every request still waiting is cancelled and the wait ends at once.
+      const onStop = (): void => {
+        if (settled) return;
+        finish(null);
+        reject(new StoppedError());
+      };
       const finish = (winner: string | null): void => {
         settled = true;
+        signal?.removeEventListener('abort', onStop);
         if (hedgeTimer !== null) clearTimeout(hedgeTimer);
         for (const [model, controller] of attempts) if (model !== winner) controller.abort();
       };
+      signal?.addEventListener('abort', onStop, { once: true });
 
       const launch = (): boolean => {
         const model = order[nextIndex];
         if (model === undefined) return false;
+        // (the models tried so far have used up the time this round may take: the next AI is waiting)
+        // (but never before a SECOND model has had its turn: one model that hangs for its whole 10 s used to use up the round, so the models that answer in two seconds were never asked, Gemini was rested, and the request went on to services that were out of credit and to the small local AI, which refused)
+        if (nextIndex >= MIN_MODELS_TRIED && roundBudgetMs !== undefined && Date.now() - roundStarted >= roundBudgetMs) return false;
         nextIndex += 1;
         running += 1;
         const started = Date.now();
@@ -479,6 +521,7 @@ export class GeminiAIProvider implements AIProvider {
             // Report the primary model's error, not whichever failed last.
             firstError ??= err;
             const status = err instanceof GeminiHttpError ? err.status : 0;
+            if (status !== 429) firstOther ??= err;
             this.lastFailure.set(model, status);
             if (status === 429 && err instanceof GeminiHttpError) {
               this.limitState.set(model, {
@@ -503,7 +546,7 @@ export class GeminiAIProvider implements AIProvider {
             if (!launch() && running === 0) {
               finish(null);
               this.cachedAvailability = false;
-              reject(this.finalError(models, firstError));
+              reject(this.finalError(models, firstOther ?? firstError));
             }
           },
         );
@@ -511,7 +554,7 @@ export class GeminiAIProvider implements AIProvider {
       };
 
       launch();
-      if (hedgeAfterMs !== undefined) {
+      if (hedgeAfterMs !== undefined && hedgeAfterMs > 0) {
         hedgeTimer = setTimeout(() => {
           if (settled) return;
           log.info('slow model, racing the next', { after: hedgeAfterMs });
@@ -558,7 +601,7 @@ export class GeminiAIProvider implements AIProvider {
           'content-type': 'application/json',
           'x-goog-api-key': this.cfg.apiKey,
         },
-        body: JSON.stringify(body),
+        body: JSON.stringify(withForeignCallSignatures(model, body)),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -578,6 +621,8 @@ export class GeminiAIProvider implements AIProvider {
       if (data.error !== undefined) {
         throw new GeminiHttpError(data.error.code ?? 500, `gemini error: ${data.error.message ?? 'unknown'}`);
       }
+      // (every answer that came back counts, whatever it was for: the chat, a file, a web search; and the total includes the thinking)
+      recordTokens('gemini', { prompt: data.usageMetadata?.promptTokenCount, completion: data.usageMetadata?.candidatesTokenCount, total: data.usageMetadata?.totalTokenCount, cached: data.usageMetadata?.cachedContentTokenCount });
       return data;
     } finally {
       clearTimeout(timeout);
@@ -606,8 +651,48 @@ export class GeminiAIProvider implements AIProvider {
         }
       }
     }
-    return { text: text.trim(), toolCalls };
+    const blocked = toolCalls.length === 0 && text.trim() === '' ? blockReason(data, candidate?.finishReason) : undefined;
+    return { text: text.trim(), toolCalls, ...(blocked !== undefined ? { blocked } : {}) };
   }
+}
+
+/** Why Gemini's own safety system stopped an answer (a blocked prompt, or an answer cut by a safety filter), or undefined when it did not. */
+const SAFETY_FINISH = new Set(['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION', 'IMAGE_SAFETY']);
+export function blockReason(data: { readonly promptFeedback?: unknown }, finishReason: string | undefined): string | undefined {
+  const feedback = data.promptFeedback;
+  if (typeof feedback === 'object' && feedback !== null) {
+    const reason = (feedback as { readonly blockReason?: unknown }).blockReason;
+    if (typeof reason === 'string' && reason !== '' && reason !== 'BLOCK_REASON_UNSPECIFIED') return `the prompt was blocked (${reason})`;
+  }
+  if (finishReason !== undefined && SAFETY_FINISH.has(finishReason)) return `the answer was stopped by a safety filter (${finishReason})`;
+  return undefined;
+}
+
+/**
+ * What Google documents for a function call that did not come from the model being asked: a stand-in signature, which makes it accept the call as it is.
+ * (Gemini 3 models answer HTTP 400 "Function call is missing a thought_signature" to any call in the conversation that carries none.)
+ */
+export const FOREIGN_CALL_SIGNATURE = 'skip_thought_signature_validator';
+
+/**
+ * The conversation as `model` wants it. The chain hands a request from one AI to another from step to step, so the function call of an earlier step
+ * is often one that another AI made and that has no signature: every Gemini 3 model then refused the next step with a 400, and each such step went
+ * on to the slower free models (about 17 seconds a step, and the Gemini answer that would have been better never came). A call the model made itself
+ * keeps its own signature; only the first call of a turn that has none gets the stand-in. Older models do not take one, so they get the body as it is.
+ */
+export function withForeignCallSignatures(model: string, body: unknown): unknown {
+  if (!/^gemini-3/i.test(model) || typeof body !== 'object' || body === null) return body;
+  const contents = (body as { readonly contents?: unknown }).contents;
+  if (!Array.isArray(contents)) return body;
+  let changed = false;
+  const fixed = (contents as readonly GeminiContent[]).map((content) => {
+    if (content.role !== 'model') return content;
+    const first = content.parts.findIndex((p) => p.functionCall !== undefined);
+    if (first < 0 || content.parts.some((p) => p.functionCall !== undefined && typeof p.thoughtSignature === 'string')) return content;
+    changed = true;
+    return { ...content, parts: content.parts.map((p, i) => (i === first ? { ...p, thoughtSignature: FOREIGN_CALL_SIGNATURE } : p)) };
+  });
+  return changed ? { ...(body as Record<string, unknown>), contents: fixed } : body;
 }
 
 /** Gemini needs a JSON object for a function result. */

@@ -4,6 +4,7 @@ import type { AppPage, EyaControl } from '../control';
 import { Icon } from '../ui/icons';
 import { timeAgo } from '../ui/format';
 import { KIND_LABEL, KindIcon } from '../ui/widgets';
+import { TasksCard } from '../ui/TasksCard';
 
 type Filter = 'all' | ActivityKind;
 const FILTERS: readonly Filter[] = ['all', 'action', 'file', 'web', 'chat'];
@@ -18,7 +19,7 @@ export function RecentPage({ c, go }: { c: EyaControl; go: (page: AppPage) => vo
   return (
     <div className="recent">
       <div className="page-head">
-        <h1>Recent</h1>
+        <h1>Tasks</h1>
         <span className="mem-spacer" />
         {all.length > 0 &&
           (sure ? (
@@ -36,6 +37,7 @@ export function RecentPage({ c, go }: { c: EyaControl; go: (page: AppPage) => vo
             </button>
           ))}
       </div>
+      <TasksCard c={c} variant="card" />
       <div className="chips" role="tablist">
         {FILTERS.map((f) => (
           <button key={f} type="button" role="tab" aria-selected={filter === f} className={`chip ${filter === f ? 'on' : ''}`} onClick={() => setFilter(f)}>
@@ -68,7 +70,7 @@ export function RecentPage({ c, go }: { c: EyaControl; go: (page: AppPage) => vo
                     type="button"
                     className="btn small"
                     onClick={() => {
-                      void c.submit(a.request);
+                      void c.submit(a.request, undefined, { agent: true });
                       go('chat');
                     }}
                     title="Do this again"

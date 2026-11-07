@@ -13,6 +13,7 @@ import {
   expandedBounds,
   overlaps,
   snapToEdge,
+  toggledMaximize,
 } from '../src/main/windows/geometry';
 import type { Rect } from '../src/main/windows/geometry';
 
@@ -125,11 +126,11 @@ describe('the quick assistant growing out of the bubble', () => {
 
 describe('the full app window', () => {
   it('is centred and as large as fits', () => {
-    expect(appBounds(SECOND)).toEqual({ x: 1366 + (1920 - 1120) / 2, y: (1040 - 720) / 2, width: 1120, height: 720 });
+    expect(appBounds(SECOND)).toEqual({ x: 1366 + (1920 - 1360) / 2, y: (1040 - 860) / 2, width: 1360, height: 860 });
   });
 
   it('still fits a 1366x768 laptop with room to spare', () => {
-    expect(appBounds(LAPTOP)).toEqual({ x: 123, y: 24, width: 1120, height: 680 });
+    expect(appBounds(LAPTOP)).toEqual({ x: 24, y: 24, width: 1318, height: 680 });
   });
 
   it('shrinks on a small screen but keeps a margin all round', () => {
@@ -163,5 +164,37 @@ describe('clamping, overlap, dragging and the settling animation', () => {
     const half = between(from, to, 0.5);
     expect(half.x).toBeGreaterThan(from.x + (to.x - from.x) / 2); // eased out: past the halfway point already
     expect(half.x).toBeLessThan(to.x);
+  });
+});
+
+describe('the maximize button of the full app', () => {
+  const START = { maximized: false, restore: null };
+  const window1: Rect = { x: 120, y: 60, width: 1360, height: 860 };
+
+  it('fills the whole work area of the screen (all but the taskbar), remembering where the window was', () => {
+    const next = toggledMaximize(START, window1, LAPTOP);
+    expect(next.bounds).toEqual(LAPTOP);
+    expect(next.state).toEqual({ maximized: true, restore: window1 });
+    // a copy, not the screen's own rectangle
+    expect(next.bounds).not.toBe(LAPTOP);
+  });
+
+  it('pressed again, goes back to where it was', () => {
+    const maxed = toggledMaximize(START, window1, LAPTOP);
+    const back = toggledMaximize(maxed.state, maxed.bounds, LAPTOP);
+    expect(back.bounds).toEqual(clampRect(window1, LAPTOP));
+    expect(back.state).toEqual({ maximized: false, restore: null });
+  });
+
+  it('keeps the restored window on the screen if the screen changed meanwhile, and falls back to the usual place when nothing was remembered', () => {
+    const maxed = toggledMaximize(START, { x: 1500, y: 100, width: 1000, height: 700 }, SECOND);
+    const onSmall = toggledMaximize(maxed.state, SECOND, LAPTOP);
+    expect(onSmall.bounds.x + onSmall.bounds.width).toBeLessThanOrEqual(LAPTOP.x + LAPTOP.width);
+    expect(onSmall.bounds.y + onSmall.bounds.height).toBeLessThanOrEqual(LAPTOP.y + LAPTOP.height);
+    expect(toggledMaximize({ maximized: true, restore: null }, LAPTOP, LAPTOP).bounds).toEqual(appBounds(LAPTOP));
+  });
+
+  it('works on the second screen too (its own work area, not the first one)', () => {
+    expect(toggledMaximize(START, { x: 1400, y: 50, width: 1360, height: 860 }, SECOND).bounds).toEqual(SECOND);
   });
 });

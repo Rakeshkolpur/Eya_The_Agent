@@ -40,7 +40,7 @@ export function createYoutubeTools(deps: YoutubeToolDeps): Tool[] {
       status: 'Finding it on YouTube…',
       description:
         'Play a song, film or video on YouTube for the user: it searches YouTube, picks the right result (the official one of the right length, ' +
-        'not a mashup, trailer or clip), opens it in the user\'s own browser, SKIPS the skippable adverts by itself and keeps checking while it plays, ' +
+        'not a mashup, trailer or clip), opens it in the browser the task is using, SKIPS the skippable adverts by itself and keeps checking while it plays, ' +
         'and waits through any advert that cannot be skipped. Use it for "play <song>", "play <film> on YouTube", "put on <video>". ' +
         'Do not ask the user to skip adverts or click anything: this does it. If the user says it is the wrong one, call again with the same query and ' +
         'index 2 (then 3). For a film the user wants to WATCH for free, the full-length official upload is chosen when there is one.',
@@ -57,12 +57,14 @@ export function createYoutubeTools(deps: YoutubeToolDeps): Tool[] {
       const kind: YtKind = (KINDS as readonly string[]).includes(String(args['type'])) ? (args['type'] as YtKind) : kindFromRequest(query);
       const index = typeof args['index'] === 'number' && args['index'] >= 1 ? Math.min(5, Math.floor(args['index'])) : 1;
 
+      const startedAt = Date.now();
       let videos: readonly YtVideo[];
       try {
         videos = await deps.search(query);
       } catch {
         videos = [];
       }
+      const searchMs = Date.now() - startedAt;
       const ranked = rankVideos(videos, query, kind);
       const chosen = ranked[index - 1]?.video;
       if (chosen === undefined && kind === 'movie') {
@@ -89,6 +91,7 @@ export function createYoutubeTools(deps: YoutubeToolDeps): Tool[] {
       }
 
       const url = watchUrl(chosen.id);
+      const openingAt = Date.now();
       const opening = args['browser'] === 'edge' ? { browser: 'edge' as const } : args['browser'] === 'chrome' ? { browser: 'chrome' as const } : undefined;
       try {
         await deps.browser.openWebsite(url, opening);
@@ -96,7 +99,9 @@ export function createYoutubeTools(deps: YoutubeToolDeps): Tool[] {
         return { ok: false, summary: 'could not open YouTube', error: friendly(err) };
       }
 
+      const openMs = Date.now() - openingAt;
       // From here the page's own Skip button is pressed as soon as it appears, and the video is started if the browser left it waiting.
+      const adsAt = Date.now();
       let state: AdsState | null = null;
       let note: string | null = null;
       if (typeof deps.browser.ads === 'function') {
@@ -119,7 +124,8 @@ export function createYoutubeTools(deps: YoutubeToolDeps): Tool[] {
         note = "Skipping adverts only works in the user's own browser with the Eya extension.";
       }
       const playing = state !== null && state.video !== null && !state.video.paused && !state.adShowing;
-      log.info('play_on_youtube', { kind, index, playing, skipped: state?.skipped ?? 0 });
+      // (where the time went: finding the video, opening its page, waiting for it to start)
+      log.info('play_on_youtube', { kind, index, playing, skipped: state?.skipped ?? 0, searchMs, openMs, startMs: Date.now() - adsAt });
       return {
         ok: true,
         summary: playing ? `playing ${chosen.title}` : `opened ${chosen.title}`,
@@ -141,14 +147,14 @@ export function createYoutubeTools(deps: YoutubeToolDeps): Tool[] {
       description:
         'Skip the advert on the YouTube page that is open now (presses its own Skip button and closes its overlay adverts), and keep doing that while the page ' +
         'plays, so the user never has to. Use it when an advert is in the way ("skip the ad", "the ad is playing"), after opening a YouTube video with open_website, ' +
-        'or to switch it off (stop: true). It only presses buttons the page itself offers; an advert with no Skip button is waited through. Works in the user\'s own browser.',
+        'or to switch it off (stop: true). It only presses buttons the page itself offers; an advert with no Skip button is waited through.',
       args: {
         stop: { type: 'boolean', description: 'True to stop watching for adverts on this page.' },
       },
     },
     async execute(args: ToolArgs): Promise<ToolResult> {
       if (typeof deps.browser.ads !== 'function') {
-        return { ok: false, summary: 'not available', error: "I can skip adverts only in your own browser (Chrome or Edge with the Eya extension), not in this window." };
+        return { ok: false, summary: 'not available', error: "I can't skip adverts in this browser window." };
       }
       try {
         if (args['stop'] === true) {

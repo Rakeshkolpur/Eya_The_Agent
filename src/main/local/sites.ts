@@ -84,3 +84,21 @@ export function domainToUrl(text: string): string | null {
   if (!DOMAIN.test(t)) return null;
   return `https://${t}`;
 }
+
+/** Whether an address is on one of the well-known sites above (they are opened at once; any other address is first checked to be alive). */
+export function isKnownSiteAddress(url: string): boolean {
+  let host: string;
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+  } catch {
+    return false;
+  }
+  return SITES.some((s) => {
+    try {
+      const known = new URL(s.url).hostname.toLowerCase().replace(/^www\./, '');
+      return host === known || host.endsWith('.' + known) || known.endsWith('.' + host);
+    } catch {
+      return false;
+    }
+  });
+}

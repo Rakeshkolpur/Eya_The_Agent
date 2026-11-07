@@ -183,6 +183,18 @@ const schema: ToolSchema = {
   },
 };
 
+/**
+ * The running program that is this app, by its name: "WhatsApp" is "WhatsApp.Root.exe", "Spotify" is "Spotify.exe". Null when nothing running carries
+ * the name (or the name is too short to say anything). Starting an app that is ALREADY running only brings its window forward and starts no new
+ * process, so "a new process appeared" cannot be the only proof that it opened (it made "open WhatsApp" fail, after a 6 second wait, with WhatsApp
+ * open on the screen).
+ */
+export function runningImageOf(appName: string, processNames: readonly string[]): string | null {
+  const want = appName.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (want.length < 4) return null;
+  return processNames.find((n) => n.toLowerCase().replace(/\.exe$/, '').replace(/[^a-z0-9]/g, '').includes(want)) ?? null;
+}
+
 /** Beyond the short well-known list: Start Menu discovery, then a known web app, in that order. */
 async function resolveBeyondKnownApps(nameArg: string, deps: OpenApplicationDeps): Promise<ToolResult> {
   let discovered: readonly StartMenuApp[];
@@ -202,12 +214,20 @@ async function resolveBeyondKnownApps(nameArg: string, deps: OpenApplicationDeps
   }
   if (found !== null) {
     const before = await deps.listRunningProcessNames();
+    const alreadyRunning = runningImageOf(found.name, before);
     const spawn = deps.launchStartApp(found.appId);
     if (!spawn.ok) {
       return { ok: false, summary: 'launch failed', error: spawn.error ?? 'unknown spawn error' };
     }
+    // Already open: launching it brought its window forward, and no new process is to be waited for.
+    if (alreadyRunning !== null) {
+      return { ok: true, summary: `${found.name} is running`, data: { app: found.name, exe: alreadyRunning, alreadyRunning: true } };
+    }
     const newProcess = await deps.waitForNewProcess(before, 6000);
     if (newProcess === null) {
+      // It may have started under a name only visible now (a slow app): the running programs are looked at once more before saying it did not open.
+      const nowRunning = runningImageOf(found.name, await deps.listRunningProcessNames());
+      if (nowRunning !== null) return { ok: true, summary: `${found.name} is running`, data: { app: found.name, exe: nowRunning } };
       return {
         ok: false,
         summary: 'launched but not verified',

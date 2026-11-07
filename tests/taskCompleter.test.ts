@@ -323,3 +323,52 @@ describe('TaskCompleter: asking for the same thing again', () => {
     expect(m.c.snapshot().open).toBe(1);
   });
 });
+
+describe('TaskCompleter: a run that the clock keeps cutting short is not started again and again', () => {
+  // (each carrying on is a whole new run of the steps: up to sixteen AI calls; a court-site request was kept for eight of them)
+  const slow = (steps: string[]): AgentResult => retry('it is taking a while', { retryAfterMs: 20_000, steps });
+
+  it('stops when a run got no further than the one before it, and says so', async () => {
+    const m = make();
+    const id = m.c.begin('how many cases are listed on monday', 'text');
+    m.c.settle(id, slow(['opened the court site']));
+    m.script(slow(['opened the court site']));
+    m.advance(25_000);
+    await m.c.tick();
+    expect(m.ran).toHaveLength(1);
+    const task = m.c.snapshot().items[0];
+    expect(task).toMatchObject({ state: 'failed' });
+    expect(task?.note).toContain('not getting me any further');
+    expect(m.notices.at(-1)).toMatchObject({ kind: 'failed' });
+    m.advance(10 * 60_000);
+    await m.c.tick();
+    expect(m.ran).toHaveLength(1); // not tried a third time
+  });
+
+  it('goes on while each run gets somewhere, but never beyond the third run', async () => {
+    const m = make();
+    const id = m.c.begin('how many cases are listed on monday', 'text');
+    m.c.settle(id, slow(['opened the court site']));
+    m.script(slow(['opened the court site', 'opened the cause list']), slow(['opened the court site', 'opened the cause list', 'filled in the date']));
+    for (let i = 0; i < 4; i += 1) {
+      m.advance(10 * 60_000);
+      await m.c.tick();
+    }
+    expect(m.ran).toHaveLength(2); // runs 2 and 3
+    const task = m.c.snapshot().items[0];
+    expect(task).toMatchObject({ state: 'failed', attempts: 3 });
+    expect(task?.note).toContain('tried 3 times');
+  });
+
+  it('is only about the clock: a task waiting for the AI to come back is tried again as before', async () => {
+    const m = make({ maxAttempts: 4 });
+    const id = m.c.begin('book the ticket', 'text');
+    m.c.settle(id, retry('the AI is out of allowance', { retryAfterMs: 1_000 }));
+    m.script(retry('the AI is out of allowance', { retryAfterMs: 1_000 }), retry('the AI is out of allowance', { retryAfterMs: 1_000 }));
+    for (let i = 0; i < 4; i += 1) {
+      m.advance(10 * 60_000);
+      await m.c.tick();
+    }
+    expect(m.ran.length).toBeGreaterThanOrEqual(3);
+  });
+});

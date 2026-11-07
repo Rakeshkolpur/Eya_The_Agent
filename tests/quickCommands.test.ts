@@ -153,7 +153,7 @@ describe('messaging by name in a conversation: the yes has to be the user\'s', (
     const tools = new ToolRegistry();
     for (const t of createChatTools({ service: app, policy, session, folders, files: new FakeDisk(), sleep: async () => undefined })) tools.register(t);
     for (const t of createBrowserTools(app, undefined, { chatGate: createChatSendGate(session, policy) })) tools.register(t);
-    const chat = new ChatCommands({ tools, contacts: book, policy, session, sleep: async () => undefined });
+    const chat = new ChatCommands({ tools, contacts: book, policy, session, sleep: async () => undefined, confirmSends: 'always', fileRoute: 'chat' });
     const quick = new QuickCommands([chat]);
     const call = async (heard: string, turn: number, args: Record<string, unknown> = {}) =>
       parse((await runLiveTool(emptyTools(), { name: 'quick_command', args, heard, turn }, 20_000, undefined, quick)).content);

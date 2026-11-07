@@ -164,6 +164,22 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('send a file in
       expect(await inPage('chat.localhost', 'document.getElementById("chat-title").textContent')).toBe('Priya Singh');
     }, 60_000);
 
+    it('a click on a chat page that LOOKS busy (a "Loading…" line is showing) still returns in about half a second, not three: quick mode must really be quick', async () => {
+      // Found on the real WhatsApp Web: its page nearly always shows something that looks like loading, and every click then waited about 3 seconds before the
+      // answer came back (the message had long gone). The wait for such a page is meant to be at most half a second in a chat app.
+      await inPage('chat.localhost', `(() => { const d = document.createElement('div'); d.id = 'busy-line'; d.textContent = 'Loading…'; document.body.prepend(d); return true; })()`);
+      try {
+        const started = Date.now();
+        const r = await call('click_on_page', { text: 'Priya Singh' });
+        const took = Date.now() - started;
+        expect(r.ok, JSON.stringify(r)).toBe(true);
+        console.info(`a click on a busy-looking chat page took ${took} ms`);
+        expect(took, `the click took ${took} ms`).toBeLessThan(1800);
+      } finally {
+        await inPage('chat.localhost', `document.getElementById('busy-line')?.remove()`);
+      }
+    }, 60_000);
+
     it('attaching asks first, naming the person and the file, and attaches nothing until the user says yes', async () => {
       await call('find_chat', { query: 'Rahul Sharma' });
       const q = await call('attach_file', { path: report() });
@@ -217,7 +233,8 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('send a file in
       const q = await call('click_on_page', { text: 'Send' });
       expect(q.ok).toBe(false);
       expect(q.summary).toBe('needs confirmation');
-      expect(q.data?.['question']).toBe('Found Rahul Sharma, number ending in 432. Send this message to this chat?');
+      // (the question shows the message that was typed: the person says yes to those words)
+      expect(q.data?.['question']).toBe('Found Rahul Sharma, number ending in 432. Send "On my way" to this chat?');
       expect(await inPage('chat.localhost', 'window.__sent.length')).toBe(1); // still just the file
       const yes = await call('click_on_page', { text: 'Send', confirm: true });
       expect(yes.ok).toBe(true);
@@ -310,8 +327,67 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('send a file in
       await call('fill_on_page', { label: 'Write a message...', value: 'ride was great' });
       const q = await call('click_on_page', { text: 'Send message' });
       expect(q.ok).toBe(false);
-      expect(q.data?.['question']).toBe('Found Uber, number ending in 999. Send this message to this chat?');
+      expect(q.data?.['question']).toBe('Found Uber, number ending in 999. Send "ride was great" to this chat?');
       expect(await inPage('tele.localhost', 'window.__sent.length')).toBe(1);
+    }, 60_000);
+  });
+
+  // ------------------------------------------------------------------------ many people whose names contain "Anna"
+  describe('Anna among the Annas (chat.localhost)', () => {
+    const titleNow = () => inPage('chat.localhost', 'document.getElementById("chat-title").textContent');
+    const sentCount = () => inPage('chat.localhost', 'window.__sent.length');
+
+    it('an exact name is the chat that is opened, and it is checked against the names that contain it', async () => {
+      const opened = await call('open_website', { url: chatUrl() });
+      expect(opened.ok, JSON.stringify(opened)).toBe(true);
+      await waitFor(async () => String(await inPage('chat.localhost', 'document.title')).includes('MockChat Web'), 10_000, 'the chat app to load');
+      session.clear();
+      const r = await call('find_chat', { query: 'Anna' });
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(r.data).toMatchObject({ status: 'opened', chat: 'Anna', verified: true, matchEvidence: 'exact name', headerChecked: true });
+      expect(await titleNow()).toBe('Anna'); // not Ramesh Anna, not Anna Reddy, not whichever the search listed first
+      expect(session.chat()?.confusableWith).toEqual(expect.arrayContaining(['Ramesh Anna', 'Anna Reddy', 'Anna Kumar']));
+    }, 90_000);
+
+    it('a chat the user opens meanwhile is not mistaken for it, although its name contains it: nothing is attached', async () => {
+      writeFileSync(join(work, 'anna.pdf'), '%PDF-1.4 a small file');
+      const sentBefore = await sentCount();
+      await inPage('chat.localhost', 'document.querySelector(".chat-item[data-id=\\"7\\"]").click()'); // the user clicks "Ramesh Anna"
+      await waitFor(async () => (await titleNow()) === 'Ramesh Anna', 10_000, 'the other chat to open');
+      const attach = await call('attach_file', { path: join(work, 'anna.pdf'), confirm: true });
+      expect(attach.ok).toBe(false);
+      expect(attach.data).toMatchObject({ status: 'wrong_chat' });
+      expect(await sentCount()).toBe(sentBefore);
+    }, 60_000);
+
+    it('asked for again, "Anna" is not taken to be open (the header shows "Ramesh Anna"): the right chat is opened', async () => {
+      const r = await call('find_chat', { query: 'Anna' });
+      expect(r.ok, JSON.stringify(r)).toBe(true);
+      expect(r.data).toMatchObject({ status: 'opened', chat: 'Anna', verified: true });
+      expect(r.data?.['alreadyOpen']).toBeUndefined();
+      expect(await titleNow()).toBe('Anna');
+    }, 60_000);
+
+    it('a Send in the wrong chat is refused even with the user\'s yes, and the page shows nothing sent', async () => {
+      const sentBefore = await sentCount();
+      await call('fill_on_page', { label: 'Type a message', value: 'for Anna only' });
+      await inPage('chat.localhost', 'document.querySelector(".chat-item[data-id=\\"8\\"]").click()'); // the user clicks "Anna Reddy" instead
+      await waitFor(async () => (await titleNow()) === 'Anna Reddy', 10_000, 'the other chat to open');
+      const send = await call('click_on_page', { text: 'Send', confirm: true });
+      expect(send.ok).toBe(false);
+      expect(send.summary).toBe('wrong chat');
+      expect(send.data).toMatchObject({ status: 'wrong_chat' });
+      await sleep(900); // (the mock page takes a moment to deliver: nothing must arrive)
+      expect(await sentCount()).toBe(sentBefore);
+    }, 60_000);
+
+    it('opened by the user\'s choice among several: that chat, and it is an identity', async () => {
+      session.clear();
+      const asked = await call('find_chat', { query: 'Reddy' });
+      expect(asked.ok, JSON.stringify(asked)).toBe(true);
+      expect(asked.data).toMatchObject({ status: 'opened', chat: 'Anna Reddy' }); // the only Reddy: a likely match, said to be one
+      expect(asked.data?.['verified']).toBe(false);
+      expect(asked.data?.['matchNote']).toContain('likely match');
     }, 60_000);
   });
 

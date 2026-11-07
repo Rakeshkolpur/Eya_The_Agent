@@ -57,9 +57,11 @@ describe('find_chat: choosing the right chat locally', () => {
     expect(r.data).toMatchObject({ status: 'opened', chat: 'Rahul Sharma', app: 'WhatsApp' });
     expect(app.open?.name).toBe('Rahul Sharma');
     expect(session.chat()?.label).toBe('Rahul Sharma');
-    // It typed the name into the app's own search box, and clicked the row.
+    // It typed the name into the app's own search box, and opened the row by what it IS (its first line, found as the page is now), not by the
+    // row's whole text (name, preview, time), which changes whenever a message arrives.
     expect(app.calls).toContain('fill:Search or start new chat=rahul sharma');
-    expect(app.calls.some((c) => c.startsWith('click:Rahul Sharma'))).toBe(true);
+    expect(app.calls).toContain('clickItem:Rahul Sharma');
+    expect(app.calls.some((c) => c.startsWith('click:'))).toBe(false);
   });
 
   it('waits for a search that updates the list late, and never chooses from the stale list before it', async () => {
@@ -588,6 +590,21 @@ describe('verify_sent: clicking Send is not proof', () => {
     const r = await sent('normal', 'message');
     const v = await r.run('verify_sent', { text: 'a typed message' });
     expect(v.data).toMatchObject({ status: 'sent' });
+  });
+
+  it('sent: a message with an emoji is found by its words (WhatsApp draws an emoji as a picture, so the text on the page has none)', async () => {
+    const r = await sent('normal', 'message');
+    // (a page's text search is a plain substring search: the fake's own search ignores symbols, which would hide exactly what is being tested)
+    r.app.findOnPage = async (query: string) => {
+      const q = query.toLowerCase().replace(/\s+/g, ' ').trim();
+      const hit = r.app.thread.some((m) => m.text.toLowerCase().includes(q));
+      return { url: r.app.url, title: r.app.title, query, matches: [], textMatches: hit ? [query] : [], totalControls: 0 };
+    };
+    const v = await r.run('verify_sent', { text: 'a typed message 😊' });
+    expect(v.data).toMatchObject({ status: 'sent' });
+    // and a message that is NOT on the page is still not found, emoji or not
+    const missing = await r.run('verify_sent', { text: 'something nobody wrote 😊', recheck: true });
+    expect(missing.data).toMatchObject({ status: 'not_found' });
   });
 
   it('failed: the app shows a failure mark — it says it did NOT go', async () => {

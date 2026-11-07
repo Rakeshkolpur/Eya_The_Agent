@@ -7,7 +7,10 @@
 // The cookie value is deliberately distinctive, so a test can prove it never reaches anything Eya reports.
 export const SESSION_COOKIE_VALUE = 'SESSION-SECRET-9f3a71c2';
 
-const hasSession = (req) => (req.headers.cookie ?? '').includes(`sid=${SESSION_COOKIE_VALUE}`);
+// Bumped by /auth/expire: every session cookie handed out before that stops working, as when a site ends a session on its side.
+let epoch = 0;
+const cookieValue = () => `${SESSION_COOKIE_VALUE}-${epoch}`;
+const hasSession = (req) => (req.headers.cookie ?? '').includes(`sid=${cookieValue()}`);
 
 function html(title, body) {
   return `<!doctype html><html><head><title>${title}</title></head><body><nav><a href="/auth/account">Account</a> <a href="/auth/dashboard">Dashboard</a> <a href="/auth/logout">Sign out</a></nav><main><h1>${title}</h1>${body}</main></body></html>`;
@@ -21,9 +24,12 @@ export function handleAuth(req, res, url) {
     res.end(body);
     return true;
   };
-  const start = () => ({ 'set-cookie': `sid=${SESSION_COOKIE_VALUE}; Path=/; HttpOnly`, location: '/auth/account' });
+  const start = () => ({ 'set-cookie': `sid=${cookieValue()}; Path=/; HttpOnly`, location: '/auth/account' });
 
   switch (url.pathname) {
+    case '/auth/expire':
+      epoch += 1;
+      return send(200, html('Expired', '<p>The session was ended on the server.</p>'));
     case '/auth/quick-login':
       return send(302, '', start());
     case '/auth/login':

@@ -324,3 +324,38 @@ describe('loop protection', () => {
     }
   });
 });
+
+describe('click_on_page on a shop or a food menu', () => {
+  it('passes the item a repeated button belongs to along with the words', async () => {
+    const f = fakeService({ hasPage: true, clickResult: { ok: true, snapshot: snap() } });
+    await toolMap(f.service)['click_on_page']!.execute({ text: 'ADD', near: 'Veg Biryani' });
+    expect(f.clicked).toEqual(['ADD — Veg Biryani']);
+  });
+
+  it('is unchanged without an item, and does not add it twice when it is already in the words', async () => {
+    const f = fakeService({ hasPage: true, clickResult: { ok: true, snapshot: snap() } });
+    const tools = toolMap(f.service);
+    await tools['click_on_page']!.execute({ text: 'Cause List' });
+    await tools['click_on_page']!.execute({ text: 'ADD — Veg Biryani', near: 'Veg Biryani' });
+    expect(f.clicked).toEqual(['Cause List', 'ADD — Veg Biryani']);
+  });
+
+  it('when the same button is on the page for several items, tells the model which items and how to name one (nothing was clicked)', async () => {
+    const f = fakeService({
+      hasPage: true,
+      clickResult: { ok: false, reason: 'ambiguous', name: 'ADD', options: ['Veg Biryani', 'Masala Dosa'], snapshot: snap() },
+    });
+    const result = await toolMap(f.service)['click_on_page']!.execute({ text: 'Add to cart' });
+    expect(result.ok).toBe(false);
+    expect(result.summary).toBe('which one?');
+    expect(result.error).toMatch(/Nothing was clicked/);
+    expect(result.error).toMatch(/Veg Biryani; Masala Dosa/);
+    expect(result.error).toMatch(/near set to that item/);
+    expect(result.data?.['choices']).toEqual(['Veg Biryani', 'Masala Dosa']);
+  });
+
+  it('offers the item argument in its description of itself', () => {
+    const schema = toolMap(fakeService().service)['click_on_page']!.schema;
+    expect(Object.keys(schema.args ?? {})).toEqual(expect.arrayContaining(['text', 'near', 'confirm']));
+  });
+});

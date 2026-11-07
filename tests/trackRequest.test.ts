@@ -115,3 +115,38 @@ describe('trackRequest', () => {
     expect(m.completer.snapshot().items[0]).toMatchObject({ state: 'waiting' });
   });
 });
+
+describe('a conversation is not a task', () => {
+  it('a greeting that a slow AI took long over is never shown as working on it, and never recorded, when no tool started', async () => {
+    const m = setup();
+    let finish: (r: AgentResult) => void = () => undefined;
+    const pending = trackRequest(m.completer, req('Hi'), () => new Promise<AgentResult>((r) => (finish = r)), { timers: m.fake, now: () => m.clock.t, isWork: () => false });
+    m.pass(9_000);
+    expect(m.completer.snapshot().items).toHaveLength(0); // (still going after the few seconds, and still not a task)
+    m.pass(30_000);
+    finish(ok('Hello! How can I help you today?'));
+    await pending;
+    expect(m.completer.snapshot().items).toHaveLength(0);
+    expect(m.notices).toHaveLength(0);
+  });
+
+  it('once tools have started it is the real thing: shown while it goes on, recorded when it is done', async () => {
+    const m = setup();
+    let working = false;
+    let finish: (r: AgentResult) => void = () => undefined;
+    const pending = trackRequest(m.completer, req('open the cause list'), () => new Promise<AgentResult>((r) => (finish = r)), { timers: m.fake, now: () => m.clock.t, isWork: () => working });
+    working = true;
+    m.pass(9_000);
+    expect(m.completer.snapshot().items[0]).toMatchObject({ request: 'open the cause list', state: 'running' });
+    m.pass(30_000);
+    finish(ok('Here it is.'));
+    await pending;
+    expect(m.completer.snapshot().items[0]).toMatchObject({ state: 'done' });
+  });
+
+  it('what could not finish is still kept, tools or not (the AI was out, a question is waiting)', async () => {
+    const m = setup();
+    await trackRequest(m.completer, req('send the invoice to Akka'), async () => ok('The AI is out.', { ok: false, pending: { kind: 'retry', why: 'the AI is out', retryAfterMs: 600_000 } }), { timers: m.fake, now: () => m.clock.t, isWork: () => false });
+    expect(m.completer.snapshot().items[0]).toMatchObject({ state: 'waiting' });
+  });
+});

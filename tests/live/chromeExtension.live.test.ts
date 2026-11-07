@@ -95,7 +95,7 @@ describe.skipIf(!live || findBrowserExe(KIND) === undefined)('Eya Browser Bridge
 
   it('paired with the real extension in a real browser', () => {
     expect(bridge.isConnected(EXPECTED_BROWSER)).toBe(true);
-    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.9.0' });
+    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.11.8' });
     expect(secrets.hashes.get(EXPECTED_BROWSER)).toBeDefined();
   });
 
@@ -138,6 +138,22 @@ describe.skipIf(!live || findBrowserExe(KIND) === undefined)('Eya Browser Bridge
   it('goes back through the browser history', async () => {
     const back = must(await svc.goBack());
     expect(back.snapshot.title).toBe('Courts Portal');
+  }, 30_000);
+
+  it('a click lands on the innermost element under the pointer, as a real click does (an app that listens on an inner node of a row is heard)', async () => {
+    const snap = await svc.openWebsite(`${base}/inner-click.html`);
+    expect(snap.visibleText).toContain('nothing opened');
+    must(await svc.clickOnPage('Open Anna'));
+    await waitFor(async () => (await svc.inspectPage()).visibleText?.includes('opened: Anna') === true, 5000, 'the inner node to hear the click');
+  }, 30_000);
+
+  it('presses Escape (and only Escape): the open chat closes, and no other key can be sent', async () => {
+    const before = await svc.openWebsite(`${base}/escape.html`);
+    expect(before.visibleText).toContain('chat is open');
+    const pressed = await svc.pressEscape();
+    expect(pressed.ok).toBe(true);
+    await waitFor(async () => !((await svc.inspectPage()).visibleText ?? '').includes('chat is open'), 5000, 'the chat to close');
+    expect((await svc.inspectPage()).visibleText).toContain('no other key');
   }, 30_000);
 
   it('reuses tabs instead of piling them up, and never steers a tab it did not open', async () => {

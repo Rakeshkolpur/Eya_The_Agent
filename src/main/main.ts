@@ -1,6 +1,9 @@
 import { existsSync } from 'node:fs';
+import { traceAI, traceFileFromEnv, traceTools } from '@main/agent/trace';
 import { basename, join } from 'node:path';
-import { app, clipboard, desktopCapturer, ipcMain, nativeImage, net, Notification, screen, session, shell } from 'electron';
+import { execFileSync } from 'node:child_process';
+import type { BrowserWindow } from 'electron';
+import { app, clipboard, desktopCapturer, ipcMain, nativeImage, net, Notification, powerSaveBlocker, screen, session, shell } from 'electron';
 import { createScreenCapture } from '@main/screen/screenCapture';
 import { queryWindowSize } from '@main/screen/windowSize';
 import { OrbWindow } from '@main/windows/OrbWindow';
@@ -14,6 +17,10 @@ import { createOpenApplicationTool, defaultOpenApplicationDeps } from '@main/too
 import { closeApplicationTool } from '@main/tools/impl/closeApplication';
 import { createFileTools } from '@main/tools/impl/fileTools';
 import { createDocumentTool, createWebSearchTool } from '@main/tools/impl/documentTools';
+import { AttachedFiles } from '@main/files/attachedFiles';
+import { ChatStore } from '@main/chats/ChatStore';
+import { registerChatsIpc } from '@main/chats/chatsIpc';
+import { purgeAttachments, registerAttachmentsIpc } from '@main/files/attachmentsIpc';
 import { Researcher } from '@main/research/Researcher';
 import { WebFetcher } from '@main/research/webFetch';
 import { createResearchTool } from '@main/tools/impl/researchTools';
@@ -25,6 +32,9 @@ import { AppCatalog } from '@main/local/AppCatalog';
 import { FileIndex } from '@main/local/FileIndex';
 import { LocalCommands } from '@main/local/LocalCommands';
 import { ChatCommands } from '@main/local/ChatCommands';
+import { makeRefiner } from '@main/local/messageRefine';
+import { LiveChatHub } from '@main/livechat/LiveChatHub';
+import { RelationBook } from '@main/livechat/RelationBook';
 import { CardWindow } from '@main/writing/CardWindow';
 import { createCloudCheck } from '@main/writing/CloudCheck';
 import { FocusedTextSource, ReaderProcess, WordSource } from '@main/writing/ReaderProcess';
@@ -57,6 +67,8 @@ import { closeFileTool } from '@main/tools/impl/closeFile';
 import { createSystemTools, defaultSystemControlDeps } from '@main/tools/impl/systemTools';
 import { createRecycleBinTools } from '@main/tools/impl/recycleBinTools';
 import { createBrowserTools } from '@main/tools/impl/browserTools';
+import { createSiteTools } from '@main/tools/impl/siteTools';
+import { showRecoveryEvent } from '@main/browser/recoveryProgress';
 import { createScreenshotTool } from '@main/tools/impl/screenshotTool';
 import { createWindowTools } from '@main/tools/impl/windowTools';
 import { createCommunicationStatusTool } from '@main/tools/impl/communicationTools';
@@ -65,13 +77,37 @@ import { createArchiveTools } from '@main/tools/impl/archiveTools';
 import { createScreenTools } from '@main/tools/impl/screenTools';
 import { createUiAutomation } from '@main/screen/uiAutomation';
 import { ChatSession } from '@main/chat/chatSession';
+import { FileSendJournal } from '@main/chat/sendJournal';
+import { whatsappConnector } from '@main/plugins/builtin/whatsapp';
+import { LocalCatalog } from '@main/plugins/catalog';
+import { ChatTaskJournal } from '@main/plugins/chatTaskJournal';
+import { PluginManager } from '@main/plugins/PluginManager';
+import { PluginStateStore } from '@main/plugins/PluginStateStore';
+import { registerPluginsIpc } from '@main/plugins/pluginsIpc';
+import { LiveChatController } from '@main/livechat/LiveChatController';
+import { LiveChatStore } from '@main/livechat/LiveChatStore';
+import { userInfo } from 'node:os';
+import { LiveChatSwitch, LiveChatSwitchStore } from '@main/livechat/LiveChatSwitch';
+import { EMPTY_LIVE_CHAT_VIEW } from '@shared/liveChat';
+import { registerLiveChatIpc } from '@main/livechat/liveChatIpc';
+import { KeepAwake, trackAgentWork } from '@main/power/KeepAwake';
+import { createChatActions, createChatWatcher } from '@main/livechat/liveChatWiring';
+import { createChatMedia } from '@main/livechat/liveChatMedia';
+import { createLiveChatTool } from '@main/tools/impl/liveChatTool';
+import { ChatTask } from '@main/chat/chatTask';
+import { diagnoseChatTools, FileDiagnostics } from '@main/chat/chatDiagnostics';
+import { startPageProbe } from '@main/chat/pageProbeRunner';
+import { browserAccessLine } from '@main/browser/browserAccess';
 import { CommunicationPolicy } from '@main/privacy/communicationAccess';
 import { CommunicationAccessStore } from '@main/privacy/communicationAccessStore';
 import { registerCommunicationAccessIpc } from '@main/privacy/communicationAccessIpc';
 import { startPolicySync } from '@main/privacy/policySync';
 import { createWindowControl } from '@main/windowsApi/windowControl';
-import { PlaywrightBrowserService } from '@main/browser/PlaywrightBrowserService';
+import { EmbeddedBrowserService } from '@main/browser/EmbeddedBrowserService';
+import { ElectronBrowserEnvironment } from '@main/browser/ElectronBrowserEnvironment';
 import { BrowserSessionManager, parseBrowserMode } from '@main/browser/BrowserSessionManager';
+import { BrowserPanel } from '@main/browser/BrowserPanel';
+import { registerBrowserPanelIpc } from '@main/browser/browserPanelIpc';
 import { createBrowserLauncher } from '@main/browser/browserLauncher';
 import { ChromeBridge, FileSecretStore } from '@main/chrome/ChromeBridge';
 import { publishBootstrap } from '@main/chrome/bootstrapFile';
@@ -84,7 +120,7 @@ import type { AgentResult, AgentUpdate } from '@shared/types';
 import { TaskStore } from '@main/tasks/TaskStore';
 import { TaskCompleter } from '@main/tasks/TaskCompleter';
 import { describeProgress } from '@main/tasks/progress';
-import { runWithUserWords } from '@main/security/userWords';
+import { currentUserWords, runWithUserWords } from '@main/security/userWords';
 import { TaskCommands } from '@main/tasks/TaskCommands';
 import { trackRequest } from '@main/tasks/trackRequest';
 import { createTaskNotifier, registerTasksIpc } from '@main/tasks/tasksIpc';
@@ -96,11 +132,15 @@ import { OpenAITTS } from '@main/providers/tts/OpenAITTS';
 import { TtsStreamService } from '@main/providers/tts/TtsStreamService';
 import { OllamaAIProvider } from '@main/providers/ai/OllamaAIProvider';
 import { GeminiAIProvider } from '@main/providers/ai/GeminiAIProvider';
+import { GeminiKeyPool } from '@main/config/geminiKeyPool';
+import { createGeminiKeysService, createPoolStateStore, registerGeminiKeysIpc } from '@main/config/geminiKeysIpc';
 import { ChainedAIProvider } from '@main/providers/ai/ChainedAIProvider';
 import type { ChainStore } from '@main/providers/ai/ChainedAIProvider';
 import { SwitchableAIProvider } from '@main/providers/ai/SwitchableAIProvider';
 import { MAX_BACKUPS } from '@shared/backupAi';
 import { createChosenAiNotice, describeRoute } from '@shared/aiRoute';
+import { registerLocalAiIpc } from '@main/config/localAiIpc';
+import { languageRule } from '@shared/language';
 import type { AiRouteStatus } from '@shared/aiRoute';
 import { createBackupAiService, createChainStore, registerBackupAiIpc } from '@main/config/backupAiIpc';
 import type { AIProvider } from '@main/providers/ai/AIProvider';
@@ -173,11 +213,13 @@ async function bootstrap(): Promise<void> {
     callback({ responseHeaders: withIsolationHeaders(details.responseHeaders) });
   });
 
+  // (EYA_NO_MIC is only for testing: a test copy of Eya must not react to whatever is said in the room)
+  const micAllowed = process.env['EYA_NO_MIC'] !== '1';
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    if (permission === 'media') { callback(true); return; }
+    if (permission === 'media' && micAllowed) { callback(true); return; }
     callback(false);
   });
-  session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'media');
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'media' && micAllowed);
 
   // Eya's own small settings and where the bubble was left, kept in her data folder.
   const settingsStore = new AppSettingsStore(join(app.getPath('userData'), 'settings.json'));
@@ -191,13 +233,34 @@ async function bootstrap(): Promise<void> {
 
   // Build Gemini and (optional) chained provider. The tools that read
   // documents and search the web use it directly; so does voice transcription.
-  const gemini = new GeminiAIProvider();
+  // Gemini: the person's own key and any extra keys (family, friends) from Settings, used one after another: when one key's free allowance
+  // for the day is spent the next takes over, for answers, documents, transcribing, speech and the live voice alike.
+  const gemini = new GeminiKeyPool({
+    makeAi: (apiKey) => new GeminiAIProvider({ apiKey }),
+    makeSpeech: (apiKey) => new GeminiTTS({ apiKey }),
+    state: createPoolStateStore(join(app.getPath('userData'), 'gemini-key-state.json')),
+  });
+  const geminiKeys = createGeminiKeysService(join(app.getPath('userData'), 'gemini-keys.bin'), gemini, () => process.env['EYA_GEMINI_API_KEY']?.trim() || null, () => chain.clearRests('gemini'));
+  geminiKeys.start();
+  registerGeminiKeysIpc(geminiKeys, gemini);
+  let announceGeminiKeys: () => void = () => undefined;
+  gemini.onChange(() => announceGeminiKeys());
   // The backup AI: a second online service (the user's own key, set in Settings) that takes over when Gemini's free allowance for the
   // day is used up or Gemini is overloaded. It starts empty and is filled — without a restart — when a key is saved.
   // One slot per backup AI the user can have, asked in order after Gemini; an empty slot is skipped.
   const backupSlots = Array.from({ length: MAX_BACKUPS }, (_, i) => new SwitchableAIProvider(`backup${i + 1}`));
-  const chain = buildAIProvider(gemini, backupSlots, createChainStore(join(app.getPath('userData'), 'ai-state.json')));
-  const ai: AIProvider = chain;
+  // The local AI (Ollama): no key, nothing leaves this PC. Its model, language and whether it may hand a hard request to a cloud AI follow Settings.
+  const ollama = new OllamaAIProvider({
+    model: () => process.env['EYA_OLLAMA_MODEL']?.trim() || settingsStore.get().localModel,
+    languageRule: () => languageRule(settingsStore.get().language),
+    mayHandOver: () => settingsStore.get().aiFirst !== 'local-only',
+    // (only for testing: so a model that never answers is given up on quickly)
+    ...(Number(process.env['EYA_OLLAMA_FIRST_WORD_MS']) > 0 ? { firstWordMs: Number(process.env['EYA_OLLAMA_FIRST_WORD_MS']) } : {}),
+  });
+  const chain = buildAIProvider(gemini, backupSlots, ollama, createChainStore(join(app.getPath('userData'), 'ai-state.json')));
+  // (EYA_TRACE_FILE is only for diagnosing: the AI's raw answers and every tool run are written to that file)
+  const traceFile = traceFileFromEnv();
+  const ai: AIProvider = traceFile !== null ? traceAI(chain, traceFile) : chain;
   for (const slot of backupSlots) slot.onChange(() => chain.clearRests());
   const backupAi = createBackupAiService(join(app.getPath('userData'), 'backup-ai.bin'), backupSlots, (id) => chain.clearRests(id), (id, kind) => chain.markFailed(id, kind));
   backupAi.start();
@@ -210,15 +273,26 @@ async function bootstrap(): Promise<void> {
       geminiKey: gemini.hasKey(),
       backups: b.entries.map((e) => ({ id: e.id, label: e.label, model: e.model, models: e.models })),
       prefer: settingsStore.get().aiFirst,
+      local: { ready: ollama.isReady(), model: ollama.currentModel() ?? '' },
       now: Date.now(),
     });
   };
   const chosenAiNotice = createChosenAiNotice(aiRouteStatus);
   let announceAiRoute: () => void = () => undefined;
   chain.onChange(() => announceAiRoute());
-  const applyAiFirst = (): void => chain.setPreferred(settingsStore.get().aiFirst === 'backup' ? (backupSlots[0] ?? null) : null);
+  // Which AI is asked first: Gemini (auto), the first backup, the local AI first with the cloud as a help, or the local AI alone (nothing is
+  // handed to a cloud AI). The local model is loaded into memory ahead of the first question only while it is the one being used.
+  const applyAiFirst = (): void => {
+    const first = settingsStore.get().aiFirst;
+    chain.restrictTo(first === 'local-only' ? ollama : null);
+    chain.setPreferred(first === 'backup' ? (backupSlots[0] ?? null) : first === 'local' ? ollama : null);
+    if (first === 'local' || first === 'local-only') void ollama.warm();
+  };
   applyAiFirst();
   settingsStore.onChange(() => applyAiFirst());
+  ollama.onChange(() => announceAiRoute());
+  ollama.startMonitoring();
+  registerLocalAiIpc(ollama, settingsStore, () => (process.env['EYA_OLLAMA_MODEL']?.trim() ?? '') !== '');
   registerBackupAiIpc(backupAi, () => chain.summary(), aiRouteStatus);
 
   const folders: KnownFolders = {
@@ -261,6 +335,7 @@ async function bootstrap(): Promise<void> {
   fileIndex.start(profile.fileIndexStartMs);
 
   const tools = new ToolRegistry();
+  if (traceFile !== null) traceTools(tools, traceFile);
   tools.register(
     createOpenApplicationTool({
       ...defaultOpenApplicationDeps,
@@ -271,7 +346,12 @@ async function bootstrap(): Promise<void> {
   );
   tools.register(closeApplicationTool);
   for (const tool of createFileTools(folders)) tools.register(tool);
-  tools.register(createDocumentTool(folders, gemini));
+  // A file attached to a message with no place on disk (a pasted picture) is kept here for a few days and read from here.
+  const attachmentsDir = join(app.getPath('userData'), 'attachments');
+  void purgeAttachments(attachmentsDir);
+  registerAttachmentsIpc(attachmentsDir);
+  const attachedFiles = new AttachedFiles();
+  tools.register(createDocumentTool(folders, gemini, { attachmentsDir, attached: attachedFiles }));
   // Microsoft Word, in the document the user has open: write, format, page numbers, contents, list of events, running index.
   const wordControl = new WordControl(
     new ReaderProcess(join(app.getPath('userData'), 'scripts'), undefined, 30_000, { fileName: 'word-helper.ps1', text: WORD_HELPER }),
@@ -312,6 +392,10 @@ async function bootstrap(): Promise<void> {
       }
     }, 6000);
   });
+  // (only for finding out how a real chat page is built: writes its structure, never its content, to page-probe.jsonl; reads only)
+  if (process.env['EYA_PAGE_PROBE'] !== undefined && process.env['EYA_PAGE_PROBE'] !== '') {
+    startPageProbe({ bridge: chromeBridge, file: join(app.getPath('userData'), 'page-probe.jsonl'), host: process.env['EYA_PAGE_PROBE'] === '1' ? 'web.whatsapp.com' : (process.env['EYA_PAGE_PROBE'] as string) });
+  }
   // Communication Access: the user's privacy switch for chat apps (WhatsApp, Telegram, Instagram…). OFF unless they turn it on in
   // Eya's panel; a missing or damaged settings file means OFF. The browser extension is kept in step with it.
   const communicationStore = new CommunicationAccessStore(join(app.getPath('userData'), 'communication-access.json'));
@@ -319,7 +403,10 @@ async function bootstrap(): Promise<void> {
   const communication = new CommunicationPolicy(() => communicationStore.get());
   startPolicySync({ bridge: chromeBridge, blockRules: () => communication.blockRules(), onPolicyChange: (cb) => communicationStore.onChange(() => cb()) });
   // What Eya remembers about the chat she is working in (memory only): forgotten the moment Communication Access is narrowed.
-  const chatSession = new ChatSession();
+  // (and a fingerprint of each recent send — never a name or a word — so that a repeat after Eya was closed is looked at, not sent a second time)
+  const chatSession = new ChatSession(undefined, undefined, new FileSendJournal(join(app.getPath('userData'), 'send-journal.json')));
+  // Plugins: what is installed, connected and allowed. Built once the tools they name are registered (below); until then nothing is held back.
+  let pluginManager: PluginManager | null = null;
   // Eya's memory database (opened further down). Declared here because the chat tools below tell its contact book which chats they see.
   let memory: MemoryService | null = null;
   communicationStore.onChange((s) => {
@@ -328,21 +415,44 @@ async function bootstrap(): Promise<void> {
   const browserMode = parseBrowserMode(process.env['EYA_BROWSER_MODE']);
   const preferredEnv = (process.env['EYA_PREFERRED_BROWSER'] ?? '').toLowerCase();
   log.info('browser mode', { browserMode, ...(preferredEnv !== '' ? { preferred: preferredEnv } : {}) });
+  // The Browser page: where the task works, what it is doing, and the user's controls (pause, stop, take over).
+  const browserPanel = new BrowserPanel({ preference: settingsStore.get().browser });
+  settingsStore.onChange((s) => browserPanel.setPreference(s.browser));
+  // Eya Browser: Eya's own browser, drawn inside the Eya window by the Chromium that is already part of Eya (nothing to install). It has a
+  // profile of its own that keeps its sign-ins; the Browser page says where on the window it is drawn.
+  let appWindow: BrowserWindow | null = null;
+  const eyaEnvironment = new ElectronBrowserEnvironment({
+    getWindow: () => appWindow,
+    partition: 'persist:eya-browser',
+    // (only for testing: so a test never fills the real Downloads folder)
+    downloadsDir: process.env['EYA_BROWSER_DOWNLOADS'] ?? app.getPath('downloads'),
+    reveal: () => orb.openApp('browser'),
+  });
+  const eyaBrowser = new EmbeddedBrowserService({
+    env: eyaEnvironment,
+    // (only for testing: so a page that never answers is given up on quickly)
+    ...(Number(process.env['EYA_BROWSER_NAV_TIMEOUT_MS']) > 0 ? { navTimeoutMs: Number(process.env['EYA_BROWSER_NAV_TIMEOUT_MS']) } : {}),
+  });
+  // Reading a search results page: a browser nobody sees, with nothing kept.
+  const lookupEnvironment = new ElectronBrowserEnvironment({
+    getWindow: () => null,
+    partition: 'eya-lookup',
+    downloadsDir: join(app.getPath('userData'), 'lookup-downloads'),
+    reveal: () => undefined,
+    hidden: true,
+  });
   const browserService = new BrowserSessionManager({
     bridge: chromeBridge,
     world: browserWorld,
-    isolated: new PlaywrightBrowserService({
-      profileDir: join(app.getPath('userData'), 'browser-profile'),
-      downloadsDir: app.getPath('downloads'),
-    }),
-    lookup: new PlaywrightBrowserService({
-      profileDir: join(app.getPath('userData'), 'lookup-profile'),
-      downloadsDir: join(app.getPath('userData'), 'lookup-downloads'),
-      headless: true,
-    }),
+    isolated: eyaBrowser,
+    activity: browserPanel,
+    words: () => currentUserWords(),
+    preference: () => settingsStore.get().browser,
+    lookup: new EmbeddedBrowserService({ env: lookupEnvironment }),
     launcher: createBrowserLauncher({
       findExe: findAppExe,
-      launch: (browser, url) => launchBrowser(browser, url),
+      // (only for testing: a test must not start the real Chrome or Edge of whoever is running it)
+      launch: (browser, url) => (process.env['EYA_NO_BROWSER_LAUNCH'] === '1' ? Promise.resolve(false) : launchBrowser(browser, url)),
       listProcessNames: defaultOpenApplicationDeps.listRunningProcessNames,
     }),
     mode: browserMode,
@@ -429,11 +539,24 @@ async function bootstrap(): Promise<void> {
     connector: chromeConnector,
     session: browserService,
     // A send in a chat app names who it goes to and asks first.
-    chatGate: createChatSendGate(chatSession, communication),
+    chatGate: createChatSendGate(chatSession, communication, { permitsApp: (appId, permission) => pluginManager?.permitsApp(appId, permission) ?? null }),
     // A verification code the user said and Eya typed: whatever was waiting for that code is over, and the conversation carries on.
     onCodeEntered: () => {
       taskCompleter.userContinued();
     },
+  })) {
+    tools.register(tool);
+  }
+  // A site that may have moved (its new address found and checked) and a download carried out from start to finish and checked: what they are
+  // doing shows in "Your Agent at Work".
+  for (const tool of createSiteTools({
+    service: browserService,
+    folders,
+    // (where the browser saves what it downloads: the Downloads folder)
+    downloadsDir: process.env['EYA_BROWSER_DOWNLOADS'] ?? app.getPath('downloads'),
+    progress: (event) => showRecoveryEvent(browserPanel, event),
+    // (the page's own direct link, when clicking its control starts nothing; the user's yes was given to download_from_site)
+    directDownload: (url) => tools.invoke('download_file', { url, confirm: true }),
   })) {
     tools.register(tool);
   }
@@ -448,7 +571,97 @@ async function bootstrap(): Promise<void> {
     favourite: (appId: string, labels: readonly string[]): string | null => (memory?.contacts.learning() === 'on' ? memory.contacts.favourite(appId, labels) : null),
     offerConsent: (appId: string, label: string): string | null => chatCommandsRef?.offerConsent(appId, label) ?? null,
   };
-  for (const tool of createChatTools({ service: browserService, policy: communication, session: chatSession, folders, names: chatNames })) tools.register(tool);
+  for (const tool of createChatTools({ service: browserService, policy: communication, session: chatSession, folders, names: chatNames, country: () => settingsStore.get().country })) tools.register(tool);
+  // The Live Chat Companion: ONE chat the person chose is watched (the page tells Eya when it changes), each new message is read, a reply is drafted, and it is sent
+  // only as far as the person allowed. It works through the same tools (find_chat, fill_on_page and click_on_page behind the Send gate, verify_sent) and the same
+  // plugin permissions as every other WhatsApp action; the tool below can start, pause, resume and stop it but never approve or send a reply.
+  // The ONE "Enable live chat" switch (made below, once the plugins exist): it puts everything the live chat needs in place with one click on Eya's own page.
+  let liveChatSwitch: LiveChatSwitch | null = null;
+  // (one controller per live chat that runs: the first keeps the file it always had, the others have a file each; the hub below lets them take turns)
+  const makeLiveChat = (slot: number): LiveChatController => new LiveChatController({
+    store: new LiveChatStore(join(app.getPath('userData'), slot === 0 ? 'live-chat.json' : `live-chat-${slot + 1}.json`)),
+    enable: {
+      view: () => liveChatSwitch?.view() ?? EMPTY_LIVE_CHAT_VIEW.enable,
+      standing: () => liveChatSwitch?.standing() === true,
+      turnOn: () => liveChatSwitch?.turnOn() ?? { ok: false, message: 'The live chat switch is not ready yet.' },
+      turnOff: () => liveChatSwitch?.turnOff() ?? { ok: false, message: 'The live chat switch is not ready yet.' },
+      ownerName: () => liveChatSwitch?.ownerName() ?? '',
+      setOwnerName: (name) => liveChatSwitch?.setOwnerName(name) ?? { ok: false, message: 'The live chat switch is not ready yet.' },
+    },
+    ai,
+    watcher: createChatWatcher(chromeBridge, browserService),
+    chat: createChatActions({
+      tools: { invoke: (name, args) => tools.invoke(name, args) },
+      service: browserService,
+      session: chatSession,
+      // (a send is kept as a task like any other WhatsApp send: the Tasks card and the send journal)
+      beginTask: (label, text) =>
+        new ChatTask(
+          'whatsapp',
+          'message',
+          { query: label, isNumber: false },
+          text,
+          chatDiagnostics,
+          undefined,
+          new ChatTaskJournal({
+            beginPlugin: (info) => taskCompleter.beginPlugin(info),
+            pluginUpdate: (key, change) => taskCompleter.pluginUpdate(key, change),
+            pluginFinish: (key, outcome, note) => taskCompleter.pluginFinish(key, outcome, note),
+          }),
+        ),
+    }),
+    permits: (permission) => pluginManager?.permitsApp('whatsapp', permission) ?? null,
+    allowed: () => {
+      const whatsapp = communication.apps().find((a) => a.id === 'whatsapp');
+      return whatsapp !== undefined && communication.allowed(whatsapp) ? null : 'Chats are switched off for WhatsApp in Eya.';
+    },
+    // (why a live chat stopped or could not start: a category and counts, written to the same privacy-safe file as every other chat step)
+    diagnose: (event) => chatDiagnostics.record({ task: 'livechat', op: event.op, ...(event.category !== undefined ? { category: event.category } : {}), ...(event.counts !== undefined ? { counts: event.counts } : {}) }),
+    // (never the words of a message: only that something needs the person)
+    alert: (message) => {
+      if (Notification.isSupported()) new Notification({ title: 'Eya — live chat', body: message, silent: false }).show();
+    },
+    // What the other person asked Eya to pass on, said TO the person: shown in the chat with Eya, and spoken (see orb.tsx `onTasksSay`)
+    say: (spoken, shown) => getSender()?.send(IpcChannels.tasksSay, { text: spoken, kind: 'relay', display: shown }),
+    // Pictures and documents the other person sends: taken into the Downloads folder (and nowhere else) and read, so Eya can say what it is and ask why it was sent
+    media: createChatMedia({ service: browserService, downloadsDir: folders.downloads, tools: { invoke: (name, args) => tools.invoke(name, args) } }),
+  });
+  // Several live chats at once (the setting "Several live chats at once"; on by default): they take turns in the one WhatsApp page, see LiveChatHub.
+  const liveChat = new LiveChatHub({ make: makeLiveChat, multi: () => settingsStore.get().multiLiveChats });
+  // Who each person is to the person (asked once before a live chat; a hash of the name or number is kept, never the name or the number)
+  const liveRelations = new RelationBook(join(app.getPath('userData'), 'live-chat-relations.json'));
+  tools.register(createLiveChatTool(liveChat));
+  // The plugins that ship with Eya (WhatsApp first), over the tools registered above. A tool of a plugin that is not installed, switched on, connected and
+  // allowed is not offered to the AI and is refused if called; installing a plugin connects and allows nothing; WhatsApp's connection is the same switch as
+  // Communication Access, not a second one.
+  pluginManager = new PluginManager({
+    catalog: new LocalCatalog(),
+    store: new PluginStateStore(join(app.getPath('userData'), 'plugins.json')),
+    connectors: { whatsapp: whatsappConnector(communication, communicationStore) },
+    eyaVersion: app.getVersion(),
+    knownTools: () => new Set(tools.list().map((t) => t.schema.name)),
+  });
+  const plugins: PluginManager = pluginManager;
+  // (what Eya calls the person in the chat: the name they set on the Live chat page, else their Windows account's name unless it is a generic one)
+  const windowsName = (): string => {
+    try {
+      const raw = userInfo().username.trim();
+      return /^(admin|administrator|user|owner|pc|guest|default|home)$/i.test(raw) ? '' : raw.charAt(0).toUpperCase() + raw.slice(1);
+    } catch {
+      return '';
+    }
+  };
+  liveChatSwitch = new LiveChatSwitch(plugins, new LiveChatSwitchStore(join(app.getPath('userData'), 'live-chat-switch.json')), Date.now, windowsName);
+  // (what the switch shows follows the plugin and Chats: a permission taken away on the Plugins page shows on the Live chat page at once)
+  plugins.onChange(() => liveChat.refresh());
+  communicationStore.onChange(() => liveChat.refresh());
+  tools.setGuard({ blocked: (name) => plugins.blockFor(name), observe: (name, result) => plugins.observe(name, result) });
+  // (Communication Access is how WhatsApp is connected: when it changes, the Plugins page shows the new state)
+  communicationStore.onChange(() => plugins.refresh());
+  // Why a chat action failed, written down in a way that holds no message, name or number (see chat/chatDiagnostics.ts): the model's own chat steps and the
+  // fast layer's alike. Kept small, on this PC only.
+  const chatDiagnostics = new FileDiagnostics(join(app.getPath('userData'), 'chat-diagnostics.jsonl'));
+  diagnoseChatTools(tools, chatDiagnostics);
   for (const tool of createArchiveTools(folders)) tools.register(tool);
   tools.register(createCommunicationStatusTool(communication));
   tools.register(
@@ -482,8 +695,31 @@ async function bootstrap(): Promise<void> {
   }
 
   const window = orb.create();
+  appWindow = window;
   const getSender = () => (window.isDestroyed() ? null : window.webContents);
   announceAiRoute = () => getSender()?.send(IpcChannels.aiRoute, aiRouteStatus());
+  announceGeminiKeys = () => getSender()?.send(IpcChannels.geminiKeysChanged, geminiKeys.status());
+  // The conversations kept on this PC (the chat history in the sidebar); opening or starting one also resets what the assistant remembers of the talk.
+  const chatStore = new ChatStore(join(app.getPath('userData'), 'chats.json'), undefined, 300);
+  app.on('will-quit', () => chatStore.flush());
+  registerChatsIpc({ store: chatStore, context, enabled: () => settingsStore.get().keepChats, send: (channel, payload) => getSender()?.send(channel, payload) });
+  // (set once the engine exists: the Stop of the Browser page ends the request being worked on)
+  let stopWork: () => number = () => 0;
+  const browserPanelIpc = registerBrowserPanelIpc({
+    panel: browserPanel,
+    eya: eyaBrowser,
+    bridge: chromeBridge,
+    connector: chromeConnector,
+    openExternal: (url) => void shell.openExternal(url),
+    send: (channel, payload) => getSender()?.send(channel, payload),
+    setPreference: (kind) => settingsStore.update({ browser: kind }),
+    onStop: () => void stopWork(),
+  });
+  app.on('will-quit', () => {
+    browserPanelIpc.dispose();
+    eyaEnvironment.dispose();
+    lookupEnvironment.dispose();
+  });
 
   // Forward renderer console.* to the structured main-process log. The mic
   // capture and TTS pipelines run entirely in the renderer, so without this
@@ -499,7 +735,7 @@ async function bootstrap(): Promise<void> {
   const tts = new RendererTTSBridge(getSender);
   await tts.init();
   // ChatGPT's voice uses the OpenAI key saved in Settings (the key stays in this process).
-  const speechStream = new TtsStreamService(new GeminiTTS(), getSender, new OpenAITTS({ getKey: () => backupAi.keyFor('openai'), ...(process.env['EYA_OPENAI_BASE_URL']?.trim() ? { config: { baseUrl: process.env['EYA_OPENAI_BASE_URL'].trim() } } : {}) }));
+  const speechStream = new TtsStreamService(gemini.speech, getSender, new OpenAITTS({ getKey: () => backupAi.keyFor('openai'), ...(process.env['EYA_OPENAI_BASE_URL']?.trim() ? { config: { baseUrl: process.env['EYA_OPENAI_BASE_URL'].trim() } } : {}) }));
   speechStream.register();
 
   // Eya's memory: a local SQLite database (preferences, facts, saved routines). It uses the same tools as the model, so a routine
@@ -527,6 +763,20 @@ async function bootstrap(): Promise<void> {
   // before anything is sent. Needs the memory database for the saved chat names.
   // Sending a file by name ("send the latest pdf to Akka") finds the file in the same in-memory index "open the latest pdf" uses.
   let locateFileForChat: ((words: string) => Promise<FileLocation | null>) | undefined;
+  // Whether WhatsApp for Windows is installed: its web-address handler (whatsapp:) is registered. Looked at at most every few minutes.
+  let whatsappSeen: { at: number; yes: boolean } | null = null;
+  const whatsappInstalled = (): boolean => {
+    if (whatsappSeen !== null && Date.now() - whatsappSeen.at < 5 * 60_000) return whatsappSeen.yes;
+    let yes = false;
+    try {
+      execFileSync('reg.exe', ['query', 'HKCR\\whatsapp', '/ve'], { stdio: 'ignore', windowsHide: true, timeout: 3000 });
+      yes = true;
+    } catch {
+      yes = false;
+    }
+    whatsappSeen = { at: Date.now(), yes };
+    return yes;
+  };
   const chatCommands =
     memory === null
       ? undefined
@@ -535,6 +785,9 @@ async function bootstrap(): Promise<void> {
           contacts: memory.contacts,
           policy: communication,
           session: chatSession,
+          // (what the person says to tell someone is written properly, shown, and sent only on their yes; a readable message even when no AI answers in time)
+          refine: makeRefiner(ai),
+          relations: liveRelations,
           files: { locate: (words) => locateFileForChat?.(words) ?? Promise.resolve(null) },
           // "send it to Uber": the file found most recently (by the fast search, by the model, or by opening it), if that was a few minutes ago.
           lastFile: () => {
@@ -545,7 +798,31 @@ async function bootstrap(): Promise<void> {
             }
             return null;
           },
+          // The installed program of a chat app (WhatsApp for Windows), checked first; its own link is opened for a message to a phone number.
+          installedApp: (id) => id === 'whatsapp' && whatsappInstalled(),
+          openAppLink: async (url) => {
+            if (!/^whatsapp:\/\/send\?phone=\d{10,15}&text=/.test(url)) return false;
+            try {
+              await shell.openExternal(url);
+              return true;
+            } catch {
+              return false;
+            }
+          },
           chatAppOpen: () => (['chrome', 'edge'] as const).some((b) => browserWorld.tabsOf(b).some((t) => communication.appForUrl(t.url) !== null)),
+          diagnostics: chatDiagnostics,
+          // Every request is kept as a task through the plugin for its app (what it settled on, what was seen, where it stands), as it happens.
+          journal: new ChatTaskJournal({
+            beginPlugin: (info) => taskCompleter.beginPlugin(info),
+            pluginUpdate: (key, change) => taskCompleter.pluginUpdate(key, change),
+            pluginFinish: (key, outcome, note) => taskCompleter.pluginFinish(key, outcome, note),
+          }),
+          permits: (appId, permission) => plugins.permitsApp(appId, permission),
+          liveChat,
+          // A phone number said without its country code is read as a number of this country (Settings; India until another is chosen).
+          country: () => settingsStore.get().country,
+          // A browser with the Eya extension is connected: a chat is worked in the app's web page (typed, sent and checked), not in the installed program.
+          browserReady: () => Object.values(chromeBridge.info().browsers).some((b) => b?.connected === true),
           extensionIsOld: () => Object.values(chromeBridge.info().browsers).some((b) => b?.connected === true && !(b.capabilities ?? []).includes('quick_actions')),
         });
   chatCommandsRef = chatCommands;
@@ -601,25 +878,48 @@ async function bootstrap(): Promise<void> {
     index: fileIndex,
     folders: browsedFolders,
     clipboardText: () => clipboard.readText(),
+    // An address the person typed that is not one of the well-known sites is looked at first: a dead one is handed to the assistant, who finds the right one.
+    probe: async (url) => {
+      try {
+        const r = await net.fetch(url, { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(5000) });
+        void r.body?.cancel();
+        // (a site that refuses a visitor like this one, or limits it, is alive: only "gone" and "broken" count as dead)
+        return r.status !== 404 && r.status !== 410 && r.status < 500;
+      } catch {
+        return false;
+      }
+    },
   });
   locateFileForChat = (words) => local.locateFile(words);
   // What the person asked for is kept until it is done: a slow page, an AI that is out for the day, a CAPTCHA to tick, a question waiting for a
   // yes. The completer tries again by itself (through the same engine, told what was already done), watches the browser while the person
   // does a check, and tells them by notification when it is finished or needs them.
+  // While Eya works for the person (a request, a task, a tool of the live voice) the PC is kept from sleeping, so she does not go offline in the middle of it.
+  const keepAwake = new KeepAwake(powerSaveBlocker);
+  setInterval(() => keepAwake.sweep(), 60_000).unref();
+  app.on('will-quit', () => keepAwake.releaseAll());
   const taskCompleter: TaskCompleter = new TaskCompleter({
     store: new TaskStore(join(app.getPath('userData'), 'tasks.json')),
     run: (task): Promise<AgentResult> =>
       engine.handle(
-        { requestId: `task-${task.id}-${task.attempts}`, text: task.request, source: 'text', resume: { steps: task.steps, note: task.note } },
+        { requestId: `task-${task.id}-${task.attempts}`, text: task.request, source: 'text', resume: { steps: task.steps, note: task.note, ...(task.done !== undefined && task.done.length > 0 ? { done: task.done } : {}) } },
         (update: AgentUpdate) => getSender()?.send(IpcChannels.agentUpdate, update),
       ),
+    // (a task that is stopped ends the request behind it at once)
+    stopRequest: (requestId) => void engine.stopRequest(requestId),
     notify: createTaskNotifier(() => orb.openApp()),
     say: (text, kind) => getSender()?.send(IpcChannels.tasksSay, { text, kind }),
     watchBrowser: async (ms) => (await browserService.waitForUserChange(ms)).changed,
-    onChange: () => getSender()?.send(IpcChannels.tasksChanged, taskCompleter.snapshot()),
+    onChange: () => {
+      const snapshot = taskCompleter.snapshot();
+      keepAwake.setTasksOpen(snapshot.open); // a task Eya is keeping holds the PC awake until it is over
+      getSender()?.send(IpcChannels.tasksChanged, snapshot);
+    },
   });
   registerTasksIpc(taskCompleter);
   const taskCommands: TaskCommands = new TaskCommands(taskCompleter);
+  // The requests that tools have started working on: only those can be shown as tasks (a greeting that a slow AI took long over is not one).
+  const workedOn = new Set<string>();
   const engine = new AgentEngine({
     router,
     tools,
@@ -628,24 +928,55 @@ async function bootstrap(): Promise<void> {
     context,
     local,
     tasks: taskCommands,
+    attached: attachedFiles,
+    workStarted: (requestId) => workedOn.add(requestId),
+    // (what a request has done that cannot be done twice is kept with its task as it happens, so being cut off does not repeat it)
+    checkpoint: (requestId, progress) => taskCompleter.checkpoint(requestId, progress),
+    // (a task the person has stopped does not go on with the rest of its steps)
+    shouldStop: (requestId) => taskCompleter.wasStopped(requestId),
+    // (Pause holds the whole request: no new AI step and no new tool until it is resumed)
+    waitWhilePaused: (signal) => browserPanel.waitWhilePaused(signal),
     // (Run with the person's own words attached: a verification code is typed only if they said it.)
-    around: (req, run) => runWithUserWords(req.text, () => trackRequest(taskCompleter, req, run)),
+    around: async (req, run) => {
+      browserPanel.beginRequest(req.text);
+      try {
+        return await runWithUserWords(req.text, () => trackRequest(taskCompleter, req, run, { isWork: () => workedOn.has(req.requestId) }));
+      } finally {
+        workedOn.delete(req.requestId);
+        browserPanel.endRequest();
+      }
+    },
     progress: () => describeProgress(taskCompleter.openTasks(), Date.now()),
     aiNote: chosenAiNotice,
+    language: () => settingsStore.get().language,
     ...(chatCommands !== undefined ? { chat: chatCommands } : {}),
     writing: writingAndWord,
-    browserContext: () => [browserWorld.summary(), communication.summary()].filter((x) => x !== '').join('\n'),
+    browserContext: () => [browserWorld.summary(), communication.summary(), plugins.summary()].filter((x) => x !== '').join('\n'),
+    // (what the model's hands in the browser are, for a request about a website: connected and ready, or exactly what is missing)
+    browserAccess: () => browserAccessLine(browserService.describe()),
+    // (a click that found nothing: she looks at the person's browser window herself unless they turned that off; their own Chrome or Edge only, never her own browser)
+    autoLook: async (question) => {
+      if (settingsStore.get().autoScreenLook === false) return null;
+      const browser = browserService.pinnedBrowser();
+      if (browser === null) return null;
+      const r = await tools.invoke('describe_screen', { target: 'window', window: browser === 'edge' ? 'Edge' : 'Chrome', question, confirm: true });
+      const description = r.data?.['description'];
+      return r.ok && typeof description === 'string' ? description : null;
+    },
     ...(ai !== undefined ? { ai } : {}),
     ...(gemini.hasKey() ? { gemini } : {}),
     ...(memory !== null ? { memory } : {}),
     ...(activityLog !== undefined ? { activity: activityLog } : {}),
   });
+  // The Stop of the Browser page ends the request being worked on, on the spot (not only the browser steps after it).
+  stopWork = () => engine.stopAll();
   void permissions;
 
   // Talk mode: the live model gets ONE extra tool, quick_command, that runs the same chat and everyday-command layers on what the user
   // actually said (so messaging by name, files, folders, sites and downloads work there without a model step per page action).
   const quick = new QuickCommands([taskCommands, writingAndWord, ...(chatCommands !== undefined ? [chatCommands] : []), local]);
-  registerLiveBridge({ gemini, tools, quick, context, tasks: taskCompleter, progress: () => describeProgress(taskCompleter.openTasks(), Date.now()), ...(memory !== null ? { memory } : {}), ...(activityLog !== undefined ? { activity: activityLog } : {}) });
+  let liveWork = 0;
+  registerLiveBridge({ gemini, tools, quick, context, tasks: taskCompleter, work: { begin: () => { const name = `live:${++liveWork}`; keepAwake.hold(name); return () => keepAwake.release(name); } }, browserRequest: { begin: (text) => browserPanel.beginRequest(text), end: () => browserPanel.endRequest() }, language: () => settingsStore.get().language, progress: () => describeProgress(taskCompleter.openTasks(), Date.now()), ...(memory !== null ? { memory } : {}), ...(activityLog !== undefined ? { activity: activityLog } : {}) });
 
   // Screen sharing: Eya looks at the screen about once a second ONLY while the user has turned it on; her own windows are left out of
   // the picture, and it pauses while a chat app that Chats are OFF for is showing.
@@ -763,6 +1094,19 @@ async function bootstrap(): Promise<void> {
     policy: communication,
     notify: (state) => getSender()?.send(IpcChannels.communicationAccessChanged, state),
   });
+  registerPluginsIpc({ manager: plugins, notify: (snapshot) => getSender()?.send(IpcChannels.pluginsChanged, snapshot) });
+  registerLiveChatIpc({ controller: liveChat, notify: (view) => getSender()?.send(IpcChannels.liveChatChanged, view) });
+  // A live chat that was running when Eya closed comes back PAUSED: nothing is watched or sent until the person resumes it.
+  liveChat.restore();
+  // Switching Chats off, or taking the plugin's permission away, pauses it at once (it does not wait for the next message to find out).
+  const pauseLiveChatIfNotAllowed = (): void => {
+    if (!liveChat.view().active) return;
+    const why = pluginManager?.permitsApp('whatsapp', 'chats.live') ?? null;
+    const whatsapp = communication.apps().find((a) => a.id === 'whatsapp');
+    if (why !== null || whatsapp === undefined || !communication.allowed(whatsapp)) void liveChat.pause('access_off', 'Chats or the live chat permission were switched off, so the live chat is paused.');
+  };
+  communicationStore.onChange(pauseLiveChatIfNotAllowed);
+  plugins.onChange(pauseLiveChatIfNotAllowed);
 
   // On-device wake word ("hey Eya", heard as sound). Optional: if the native
   // model can't load on this machine, the renderer falls back to noticing the
@@ -778,7 +1122,7 @@ async function bootstrap(): Promise<void> {
     }
   });
 
-  const ipc = new IpcRouter(engine, engine);
+  const ipc = new IpcRouter(engine, engine, (update) => trackAgentWork(keepAwake, update));
   ipc.register(getSender);
   taskCompleter.start();
 
@@ -805,6 +1149,7 @@ async function bootstrap(): Promise<void> {
   app.on('before-quit', () => orb.prepareToQuit());
   app.on('will-quit', () => {
     taskCompleter.stop();
+    ollama.stopMonitoring();
     screenShare.dispose();
     wordControl.close();
     writingWatch.stop();
@@ -822,7 +1167,7 @@ async function bootstrap(): Promise<void> {
   app.on('second-instance', () => orb.openApp());
 }
 
-function buildAIProvider(gemini: GeminiAIProvider, backups: readonly AIProvider[], store: ChainStore): ChainedAIProvider {
+function buildAIProvider(gemini: GeminiKeyPool, backups: readonly AIProvider[], ollama: OllamaAIProvider, store: ChainStore): ChainedAIProvider {
   const providers: AIProvider[] = [];
   if (gemini.hasKey()) {
     log.info('AI: Gemini enabled (primary)');
@@ -830,11 +1175,8 @@ function buildAIProvider(gemini: GeminiAIProvider, backups: readonly AIProvider[
   } else {
     log.info('AI: Gemini disabled (no EYA_GEMINI_API_KEY)');
   }
-  const ollama = new OllamaAIProvider();
-  ollama.checkAvailability().then((ok) => {
-    log.info(ok ? 'AI: Ollama reachable (backup)' : 'AI: Ollama unreachable');
-  }).catch(() => undefined);
-  // Order: Gemini, then the user's online backup (if they set one), then the local Ollama if it happens to be running.
+  // Order: Gemini, then the user's online backups (if they set any), then the local Ollama if it is running (or first, or alone, when the
+  // person chooses the local AI: see applyAiFirst).
   providers.push(...backups, ollama);
   return new ChainedAIProvider(providers, { store });
 }

@@ -7,6 +7,9 @@
  */
 export type AiRole = 'gemini' | 'backup' | 'ollama';
 
+/** The person's choice: Gemini first and the backups when it is out (auto), the first backup first, the local AI first with the cloud as a help, or the local AI only. */
+export type AiPreference = 'auto' | 'backup' | 'local' | 'local-only';
+
 /** Gemini as the user should hear about it: usable, its allowance is over, busy for a moment, its key was refused, or no key. */
 export type GeminiState = 'ready' | 'limit' | 'busy' | 'refused' | 'no-key';
 
@@ -29,8 +32,10 @@ export interface AiRouteStatus {
   readonly gemini: GeminiState;
   /** When Gemini will be tried again (epoch ms), when it is being left alone. */
   readonly geminiBackAt: number | null;
-  /** The user's choice: Gemini first and the backups when it is out (auto), or the first backup first. */
-  readonly prefer: 'auto' | 'backup';
+  /** The user's choice (see AiPreference). */
+  readonly prefer: AiPreference;
+  /** The AI on this PC (Ollama): whether it can answer now and which model it asks for. */
+  readonly local: { readonly ready: boolean; readonly model: string };
   /** The AIs that would have answered but are being left alone (their allowance is over, they are busy, or the key was refused). */
   readonly passedOver: readonly { readonly label: string; readonly why: PassedWhy }[];
   /** The backups set up, in the order they are asked. */
@@ -51,7 +56,9 @@ export interface RouteInput {
   readonly entries: readonly RouteEntryLike[];
   readonly geminiKey: boolean;
   readonly backups: readonly RouteBackup[];
-  readonly prefer: 'auto' | 'backup';
+  readonly prefer: AiPreference;
+  /** The local AI as it stands now (omitted: not asked about). */
+  readonly local?: { readonly ready: boolean; readonly model: string };
   readonly now: number;
 }
 
@@ -69,7 +76,7 @@ export function describeRoute(input: RouteInput): AiRouteStatus {
   const backupOf = (e: RouteEntryLike): RouteBackup | undefined => backups.find((b) => b.id === e.name);
   const labelOf = (e: RouteEntryLike): string => {
     const role = roleOf(e.name);
-    return role === 'gemini' ? 'Gemini' : role === 'ollama' ? 'Ollama' : (backupOf(e)?.label ?? e.name);
+    return role === 'gemini' ? 'Gemini' : role === 'ollama' ? 'Local AI' : (backupOf(e)?.label ?? e.name);
   };
   // What can answer: Gemini with a key, a backup that is set up (an empty slot is in the list only so the chain can skip it), and Ollama
   // when it is reachable. Whether the last try failed is not asked here: that is what a rest is for, and a rest ends.
@@ -106,6 +113,7 @@ export function describeRoute(input: RouteInput): AiRouteStatus {
     gemini,
     geminiBackAt: g !== undefined && resting(g) ? (g.restingUntil ?? null) : null,
     prefer: input.prefer,
+    local: input.local ?? { ready: false, model: '' },
     passedOver,
     backups,
   };
@@ -137,6 +145,11 @@ function passedPhrase(passed: AiRouteStatus['passedOver']): string {
   return passed.every((p) => p.why === 'limit' || p.why === 'credit') ? `${names} limit over` : `${names} unavailable`;
 }
 
+/** The local AI was chosen but cannot answer (Ollama is not running, or has not got the model): said next to the AI that answers instead. */
+function localDownPhrase(route: AiRouteStatus): string {
+  return (route.prefer === 'local' || route.prefer === 'local-only') && !route.local.ready ? 'Local AI is not running' : '';
+}
+
 export function routeBadge(route: AiRouteStatus | null, whileLoading = 'Connecting…'): RouteBadge {
   if (route === null) return { text: whileLoading, sub: '', title: '' };
   const u = route.using;
@@ -151,20 +164,20 @@ export function routeBadge(route: AiRouteStatus | null, whileLoading = 'Connecti
     };
   }
   if (u.role === 'gemini' || u.role === 'ollama') {
-    const name = u.role === 'gemini' ? 'Gemini' : 'Ollama';
+    const name = u.role === 'gemini' ? 'Gemini' : 'Local AI';
     const model = shortModel(u.model);
     // An AI that came first (the one you chose) was passed over: say so, or it looks as though the choice was ignored.
-    const passed = passedPhrase(route.passedOver);
+    const passed = passedPhrase(route.passedOver) || localDownPhrase(route);
     return {
       text: `${name} connected`,
       sub: passed !== '' ? passed : model,
       title:
-        (u.role === 'gemini' ? (model === '' ? 'Gemini is answering.' : `Gemini (${u.model}) is answering.`) : 'The AI on this PC (Ollama) is answering.') +
+        (u.role === 'gemini' ? (model === '' ? 'Gemini is answering.' : `Gemini (${u.model}) is answering.`) : `The AI on this PC (Ollama${model === '' ? '' : `, ${model}`}) is answering on this PC: the question is not sent to a cloud AI.`) +
         (passed !== '' ? ` The AI you chose is not: ${passed}.` : ''),
     };
   }
   const model = shortModel(u.model);
-  const passed = passedPhrase(route.passedOver);
+  const passed = passedPhrase(route.passedOver) || localDownPhrase(route);
   const why = passed !== '' ? passed : route.prefer === 'backup' ? 'your choice' : '';
   return {
     text: model === '' ? u.label : `${u.label} · ${model}`,
@@ -184,6 +197,13 @@ export function createChosenAiNotice(route: () => AiRouteStatus, now: () => numb
   const told = new Map<string, number>();
   return () => {
     const r = route();
+    if ((r.prefer === 'local' || r.prefer === 'local-only') && !r.local.ready && r.using !== null && r.using.role !== 'ollama') {
+      const key = 'local:down';
+      const last = told.get(key);
+      if (last !== undefined && now() - last < NOTICE_EVERY_MS) return null;
+      told.set(key, now());
+      return `The local AI isn't answering (Ollama is not running, or ${r.local.model || 'its model'} is not installed), so ${r.using.label} is answering for now. Start Ollama and I'll switch straight back.`;
+    }
     const chosen = r.prefer === 'backup' ? r.backups[0] : undefined;
     const passed = chosen === undefined ? undefined : r.passedOver.find((p) => p.label === chosen.label);
     if (chosen === undefined || passed === undefined) {

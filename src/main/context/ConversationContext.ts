@@ -33,6 +33,11 @@ export class ConversationContext {
     return this.turns;
   }
 
+  /** Forgets the conversation so far (a new chat starts with nothing to refer back to). */
+  clear(): void {
+    this.turns.length = 0;
+  }
+
   lastRefOfKind(kind: TurnRef['kind']): TurnRef | undefined {
     for (let i = this.turns.length - 1; i >= 0; i -= 1) {
       const turn = this.turns[i];

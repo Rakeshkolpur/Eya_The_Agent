@@ -20,8 +20,9 @@ import {
   expandedBounds,
   overlaps,
   snapToEdge,
+  toggledMaximize,
 } from './geometry';
-import type { Point, Rect } from './geometry';
+import type { MaximizeState, Point, Rect } from './geometry';
 
 const log = rootLogger.child('orbwindow');
 
@@ -49,6 +50,8 @@ export class OrbWindow {
   private bubble: Rect = { x: 0, y: 0, ...BUBBLE_WINDOW };
   private anchor: WindowAnchor = 'bottom-right';
   private quitting = false;
+  /** The full app filling the screen (and where it was before). Kept while Eya is a bubble, so the app comes back the way it was left. */
+  private maximize: MaximizeState = { maximized: false, restore: null };
   private dragging: { readonly cursor: Point; readonly start: Rect; readonly timer: ReturnType<typeof setInterval> } | null = null;
   private settling: ReturnType<typeof setInterval> | null = null;
   private readonly modeListeners = new Set<(state: WindowModeState) => void>();
@@ -122,7 +125,7 @@ export class OrbWindow {
 
   // ----------------------------------------------------------------------------------------------- modes
   getModeState(): WindowModeState {
-    return { mode: this.mode, anchor: this.anchor };
+    return { mode: this.mode, anchor: this.anchor, maximized: this.maximize.maximized };
   }
 
   onModeChange(listener: (state: WindowModeState) => void): () => void {
@@ -136,6 +139,14 @@ export class OrbWindow {
     if (win === null) return;
     this.cancelSettle();
     if (this.dragging !== null) this.endDrag();
+
+    // Asked for the app while it is already open and filling the screen (a task opening it, the tray): bring it forward, do not shrink it.
+    if (mode === 'app' && this.mode === 'app' && this.maximize.maximized) {
+      win.show();
+      win.focus();
+      this.announce(page);
+      return;
+    }
 
     // Coming out of an expanded shape, the bubble is wherever the expanded window says it is.
     if (this.mode === 'assistant') this.bubble = bubbleWithin(win.getBounds(), this.anchor);
@@ -160,7 +171,8 @@ export class OrbWindow {
         break;
       }
       case 'app': {
-        win.setBounds(appBounds(this.workAreaOf(this.mode === 'bubble' ? this.bubble : win.getBounds())), false);
+        const area = this.workAreaOf(this.mode === 'bubble' ? this.bubble : win.getBounds());
+        win.setBounds(this.maximize.maximized ? { ...area } : appBounds(area), false);
         win.setSkipTaskbar(false);
         win.setAlwaysOnTop(false);
         win.show();
@@ -171,6 +183,19 @@ export class OrbWindow {
     this.mode = mode;
     log.info('window mode', { mode, anchor: this.anchor, bounds: win.getBounds() });
     this.announce(page);
+  }
+
+  /** The maximize button of the full app: fill the screen's work area, or go back to the usual size and place. */
+  toggleMaximize(): void {
+    const win = this.live();
+    if (win === null || this.mode !== 'app') return;
+    const here = win.getBounds();
+    const next = toggledMaximize(this.maximize, here, this.workAreaOf(here));
+    this.maximize = next.state;
+    win.setBounds(next.bounds, false);
+    win.focus();
+    log.info('app window', { maximized: next.state.maximized, bounds: next.bounds });
+    this.announce();
   }
 
   /** The shortcut: bubble ⇄ quick assistant; from the full app, back to the bubble. */
@@ -314,6 +339,7 @@ export class OrbWindow {
     this.deps.state.saveBubble(this.bubble);
     if (this.mode === 'bubble') win.setBounds(this.bubble, false);
     else if (this.mode === 'assistant') this.setMode('assistant');
+    else if (this.maximize.maximized) win.setBounds(this.workAreaOf(win.getBounds()), false);
     else win.setBounds(clampRect(win.getBounds(), this.workAreaOf(win.getBounds())), false);
     log.info('screens changed; bubble kept on screen', { bubble: this.bubble });
   };

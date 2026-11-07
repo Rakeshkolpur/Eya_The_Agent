@@ -1,11 +1,14 @@
 import { promises as fs } from 'node:fs';
-import { basename, extname } from 'node:path';
-import { checkReadablePath } from '@main/security/pathPolicy';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { checkReadablePath, isBlockedFileName } from '@main/security/pathPolicy';
 import type { KnownFolders } from '@main/security/pathPolicy';
 import type { SearchSource } from '@main/providers/ai/GeminiAIProvider';
 import { describeAIFailure } from '@main/agent/AgentEngine';
 import { formatHitsAsAnswer } from '@main/browser/webSearchResults';
 import type { WebSearchHit } from '@main/browser/webSearchResults';
+import type { AttachedFiles } from '@main/files/attachedFiles';
+import { attachmentInfo, MAX_ATTACHMENT_BYTES } from '@shared/attachments';
+import { docxText } from './docx';
 import type { Tool, ToolArgs, ToolResult } from '../types';
 
 /** The slice of the Gemini provider these tools need. */
@@ -15,26 +18,11 @@ export interface DocumentBrain {
   groundedSearch(query: string): Promise<{ text: string; sources: SearchSource[] }>;
 }
 
-// Inline uploads are capped at ~20MB per request, and base64 adds a third.
-const MAX_DOCUMENT_BYTES = 14 * 1024 * 1024;
 const MAX_ANSWER_CHARS = 8000;
 
-const MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
-  '.pdf': 'application/pdf',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.txt': 'text/plain',
-  '.md': 'text/plain',
-  '.csv': 'text/csv',
-  '.json': 'text/plain',
-  '.html': 'text/html',
-  '.htm': 'text/html',
-};
-
+/** The kind of a file as Gemini is told it (null when this tool cannot read it). */
 export function mimeTypeFor(path: string): string | undefined {
-  return MIME_BY_EXTENSION[extname(path).toLowerCase()];
+  return attachmentInfo(path)?.mime;
 }
 
 function stringArg(args: ToolArgs, key: string): string | undefined {
@@ -42,14 +30,27 @@ function stringArg(args: ToolArgs, key: string): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-export function createDocumentTool(folders: KnownFolders, brain: DocumentBrain): Tool {
+/** Files the person gave to Eya are read without the usual folder rules, since they chose them: a pasted picture kept by Eya, and any file attached from the disk. */
+export interface DocumentToolOptions {
+  readonly attachmentsDir?: string;
+  /** The files attached to messages, by exact path. */
+  readonly attached?: AttachedFiles;
+}
+
+function isInside(dir: string, target: string): boolean {
+  const rel = relative(resolve(dir), resolve(target));
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+export function createDocumentTool(folders: KnownFolders, brain: DocumentBrain, options: DocumentToolOptions = {}): Tool {
   return {
     schema: {
       name: 'analyze_document',
       status: 'Reading the document…',
       description:
-        'Read a PDF, image or text document and answer a question about it (summarize it, find a date or case number, ' +
-        'extract details, describe a picture). The document is sent to Gemini to be read. Word/Excel files are not supported.',
+        'Read a file and answer a question about it (summarize it, find a date or case number, extract details, describe a picture, ' +
+        'say what is in a recording): a PDF, a picture, a Word (.docx) or text file, an audio file or a video. It is sent to Gemini to be read. ' +
+        'Excel and PowerPoint files are not supported. A file the user attached to their message is given to you with its path: use that path.',
       args: {
         path: { type: 'string', required: true, description: 'Full path to the file.' },
         question: {
@@ -67,23 +68,36 @@ export function createDocumentTool(folders: KnownFolders, brain: DocumentBrain):
       }
       if (!brain.hasKey()) return { ok: false, summary: 'no Gemini key', error: 'Reading documents needs the Gemini key.' };
 
-      const check = checkReadablePath(path, folders);
+      const kept = options.attachmentsDir !== undefined && isInside(options.attachmentsDir, path);
+      // (An attached file is read where it is, but a secret by its name — a key file, a password store — is still refused.)
+      const given = options.attached?.has(path) === true && !isBlockedFileName(basename(path));
+      const check = kept || given ? { ok: true as const, path: resolve(path) } : checkReadablePath(path, folders);
       if (!check.ok) return { ok: false, summary: 'not allowed', error: check.reason };
-      const mime = mimeTypeFor(check.path);
-      if (mime === undefined) {
+      const info = attachmentInfo(check.path);
+      if (info === null) {
         return {
           ok: false,
           summary: 'unsupported type',
-          error: 'I can read PDFs, images and text files, but not that type of file.',
+          error: 'I can read pictures, PDFs, Word (.docx) and text files, audio and video, but not that type of file.',
         };
       }
       try {
         const stat = await fs.stat(check.path);
         if (!stat.isFile()) return { ok: false, summary: 'not a file', error: 'That is not a file.' };
-        if (stat.size > MAX_DOCUMENT_BYTES) {
-          return { ok: false, summary: 'too large', error: 'That file is too large for me to read (over 14 MB).' };
+        if (stat.size > MAX_ATTACHMENT_BYTES) {
+          return { ok: false, summary: 'too large', error: `That file is too large for me to read (over ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MB).` };
         }
-        const bytes = await fs.readFile(check.path);
+        let bytes = await fs.readFile(check.path);
+        let mime = info.mime;
+        if (info.extractText === true) {
+          // A Word document: its words are taken out here and read as text.
+          const text = docxText(bytes);
+          if (text === null || text === '') {
+            return { ok: false, summary: 'could not read', error: 'I could not read the words in that Word file (it may be damaged or protected).' };
+          }
+          bytes = Buffer.from(text, 'utf8');
+          mime = 'text/plain';
+        }
         let answer: string;
         try {
           answer = await brain.analyzeFile(bytes.toString('base64'), mime, question);

@@ -23,6 +23,7 @@ function route(over: Partial<AiRouteStatus>): AiRouteStatus {
     gemini: 'ready',
     geminiBackAt: null,
     prefer: 'auto',
+    local: { ready: false, model: 'llama3.2:1b' },
     passedOver: [],
     backups: [],
     ...over,

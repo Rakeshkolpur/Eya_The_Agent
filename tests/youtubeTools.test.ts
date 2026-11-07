@@ -218,6 +218,6 @@ describe('skip_ads', () => {
     const none = tools(fakeBrowser([], { adsMissing: true }).browser, []);
     const result = await none[1].execute({});
     expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/your own browser/);
+    expect(result.error).toMatch(/skip adverts in this browser window/);
   });
 });

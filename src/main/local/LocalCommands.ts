@@ -8,6 +8,7 @@ import { resolveWhen } from '@main/tools/dateQuery';
 import type { ToolArgs, ToolResult } from '@main/tools/types';
 import type { IndexHit, IndexQuery, IndexResult, IndexedFolder } from './FileIndex';
 import { parseLocalIntent } from './localIntents';
+import { isKnownSiteAddress } from './sites';
 import type { FileQuery, LocalIntent } from './localIntents';
 
 const log = rootLogger.child('local');
@@ -39,6 +40,11 @@ export interface LocalCommandsDeps {
   readonly now?: () => Date;
   /** Whether a file is still there (the index can be a moment out of date). */
   readonly exists?: (path: string) => Promise<boolean>;
+  /**
+   * Whether an address a person typed is alive (true) or dead, out of date or gone (false). A dead one is not opened blindly in the browser: the
+   * request goes on to the assistant, who works out the right address herself. Optional: without it every address is opened as before.
+   */
+  readonly probe?: (url: string) => Promise<boolean>;
 }
 
 const SPEAK_FILES = 3;
@@ -86,7 +92,8 @@ export class LocalCommands {
   async tryHandle(text: string, options: { readonly live?: boolean } = {}): Promise<LocalCommandResult | null> {
     const intent = parseLocalIntent(text);
     if (intent === null) return null;
-    if (options.live === true && intent.kind === 'download') return null;
+    // (both fetch from the internet, which is not done from always-on listening)
+    if (options.live === true && (intent.kind === 'download' || intent.kind === 'play')) return null;
     const started = Date.now();
     try {
       const result = await this.run(intent);
@@ -102,9 +109,11 @@ export class LocalCommands {
   private run(intent: LocalIntent): Promise<LocalCommandResult | null> {
     switch (intent.kind) {
       case 'open_site':
-        return this.openUrl(intent.url, intent.label, `Opening ${intent.label}.`, 'open_site', intent.browser);
+        return this.openSite(intent);
       case 'search':
         return this.openUrl(intent.url, intent.site.label, `Searching ${intent.site.label} for ${intent.query}.`, 'search_site', intent.browser);
+      case 'play':
+        return this.playOnYoutube(intent);
       case 'open_folder':
         return this.openKnownFolder(intent.folder);
       case 'open_named_folder':
@@ -118,6 +127,16 @@ export class LocalCommands {
 
   // -------------------------------------------------------------------------- web
 
+  /** An address the person typed: the well-known sites open at once; any other is checked first, and one that is not answering goes on to the assistant to be worked out. */
+  private async openSite(intent: Extract<LocalIntent, { readonly kind: 'open_site' }>): Promise<LocalCommandResult | null> {
+    const probe = this.deps.probe;
+    if (probe !== undefined && !isKnownSiteAddress(intent.url) && !(await probe(intent.url))) {
+      log.info('an address is not answering; the assistant takes it', { label: intent.label });
+      return null;
+    }
+    return this.openUrl(intent.url, intent.label, 'Opening ' + intent.label + '.', 'open_site', intent.browser);
+  }
+
   private async openUrl(url: string, label: string, success: string, intent: string, browser?: string): Promise<LocalCommandResult> {
     // No browser named: open_url uses Chrome.
     const result = await this.deps.tools.invoke('open_url', { url, ...(browser !== undefined ? { browser } : {}) });
@@ -130,6 +149,44 @@ export class LocalCommands {
       ...(result.ok ? { urls: [url] } : {}),
       refs: [],
     };
+  }
+
+  /**
+   * "Open YouTube and play <song>": play_on_youtube is the whole job (it searches, picks the right result, opens it where the user's browser setting says,
+   * skips the adverts and checks that the video really started), so no model is asked: this used to take 2 to 5 model calls of about 16,000 tokens each
+   * to arrive at that same one call. What is said is what the tool reported, never more. A result that needs a decision (a film with no official upload)
+   * or any failure that is not about the browser goes on to the model, as before.
+   */
+  private async playOnYoutube(intent: Extract<LocalIntent, { readonly kind: 'play' }>): Promise<LocalCommandResult | null> {
+    const result = await this.deps.tools.invoke('play_on_youtube', { query: intent.query, ...(intent.browser !== undefined ? { browser: intent.browser } : {}) });
+    const data = result.data ?? {};
+    const base = { intent: 'play_on_youtube', tools: ['play_on_youtube'], refs: [] as TurnRef[] };
+    if (!result.ok) {
+      // Stopped by the person while it worked: that is the end of it, not a failure for a model to take up.
+      if (data['stoppedByUser'] === true) return { ...base, ok: false, spoken: 'Okay, I stopped.' };
+      // The browser itself would not answer: another try by a model would meet the same wall, so the person is told what to do.
+      if (data['browserUnavailable'] === true) {
+        return { ...base, ok: false, spoken: "I couldn't reach your browser, so I couldn't play it. Check that the Eya Browser Bridge extension is switched on in it, or choose Eya Browser in Settings, and ask me again." };
+      }
+      return null;
+    }
+    const video = data['video'] as { readonly title?: unknown; readonly url?: unknown } | undefined;
+    const title = typeof video?.title === 'string' ? speakable(video.title) : '';
+    if (data['played'] === true) {
+      return { ...base, ok: true, spoken: title === '' ? 'Playing it on YouTube.' : `Playing ${title} on YouTube.`, ...(typeof video?.url === 'string' ? { urls: [video.url] } : {}) };
+    }
+    if (video !== undefined) {
+      // Opened, but the browser has not started it: said exactly like that (an advert that cannot be skipped, or Chrome waiting for one click on play).
+      const spoken = data['stillInAnAdvert'] === true
+        ? `I opened ${title === '' ? 'it' : title} on YouTube. An advert that can't be skipped is playing first, and it will start by itself after it.`
+        : `I opened ${title === '' ? 'it' : title} on YouTube, but the browser is waiting for one click on play. Allowing sound for youtube.com in the site settings stops that.`;
+      return { ...base, ok: true, spoken, ...(typeof video.url === 'string' ? { urls: [video.url] } : {}) };
+    }
+    if (data['reason'] === 'no clear match') {
+      return { ...base, ok: true, spoken: "I couldn't tell which result is the one, so I opened YouTube's search for it. Tell me which one and I'll play it." };
+    }
+    // (a film with no official upload and the like: what to offer instead is for the assistant to work out)
+    return null;
   }
 
   private async download(url: string | null): Promise<LocalCommandResult | null> {

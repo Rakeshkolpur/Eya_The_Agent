@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { OrbState, AgentResult } from '../shared/types';
 import type { AiRouteStatus } from '../shared/aiRoute';
 import type { TaskAction, TasksSnapshot } from '../shared/tasks';
+import type { PluginChange, PluginChangeResult, PluginsSnapshot } from '../shared/plugins';
+import type { LiveChatRequest, LiveChatResult, LiveChatView } from '../shared/liveChat';
 import type {
   ActivityAction,
   ActivitySnapshot,
@@ -25,18 +27,27 @@ import type {
   WindowModeState,
 } from '../shared/ipcContract';
 import { AppShell } from './AppShell';
+import { getAutoSplit } from './ui/prefs';
 import type { PageRequest } from './AppShell';
 import { AssistantPanel } from './AssistantPanel';
 import { Bubble } from './Bubble';
 import { APP_PAGES, IDLE_SCREEN_ASK } from './control';
-import type { AppPage, EyaControl, ScreenAskState } from './control';
+import type { AiChoice, AppPage, EyaControl, ScreenAskState } from './control';
+import type { LocalAiStatus } from '../shared/localAi';
+import type { AttachmentRef } from '../shared/attachments';
 import { addMessage, emptyThread, liveEnded, liveHeard, liveSaid } from './thread';
+import { useChatHistory } from './chatHistory';
 import type { ThreadState } from './thread';
 import { statusLine } from './ui/format';
 import { DEFAULT_VOICE, VOICE_OPTIONS } from '../shared/constants';
 import { CuePicker } from '../shared/humanCues';
 import { carryOnLine, shouldCarryOn, talkWay } from '../shared/liveFallback';
+import { liveRetryAllowed } from '../shared/geminiKeys';
+import type { GeminiKeysInput, GeminiKeysResult, GeminiKeysStatus } from '../shared/geminiKeys';
+import type { BrowserPanelAction, BrowserPanelResult, BrowserPanelState, BrowserViewBounds } from '../shared/browserPanel';
 import type { LiveStop } from '../shared/liveFallback';
+import { answered, freshQuiet, nextQuiet, personSpoke } from './talkIdle';
+import type { QuietState } from './talkIdle';
 import { initRendererTTS, previewCloudVoice, setOfflineVoiceAllowed, setTTSEngine, setTTSMuted, setTTSVoice, speakPreview, stopSpeaking } from './tts';
 import { DEFAULT_OPENAI_VOICE, isOpenAIVoice } from '../shared/openaiVoice';
 import { createLiveListener } from './liveListener';
@@ -57,11 +68,20 @@ const VOICE_STORAGE_KEY = 'eya.voice';
 const VOICE_NAME_STORAGE_KEY = 'eya.voiceName';
 const OPENAI_VOICE_STORAGE_KEY = 'eya.openaiVoice';
 /** A hands-free conversation with ChatGPT ends after this long with nothing said (longer while Eya is keeping a task). */
-const GPT_TALK_IDLE_MS = 45_000;
 /** What ends a conversation when it is all that is said. */
 const END_TALK_WORDS = /^(?:ok(?:ay)?[, ]+)?(?:stop|bye|good ?bye|that'?s all|that is all|thank you|thanks|never ?mind|enough)[\s.!]*$/i;
 const LIVE_BAD_MODELS_KEY = 'eya.liveBadModels';
 const INTERRUPT_STORAGE_KEY = 'eya.interrupt';
+const AGENT_MODE_STORAGE_KEY = 'eya.agentMode';
+
+/** Agent mode starts off: Eya talks until the person switches the Agent button on (and the choice is remembered). */
+function readAgentMode(): boolean {
+  try {
+    return window.localStorage.getItem(AGENT_MODE_STORAGE_KEY) === 'on';
+  } catch {
+    return false;
+  }
+}
 
 /** Talking over Eya is on by default (echo cancellation kept her voice out of the mic in testing); the pill turns it off. */
 function readInterruptPreference(): boolean {
@@ -137,10 +157,31 @@ function randomId(): string {
 export function OrbApp(): JSX.Element {
   const [state, setState] = useState<OrbState>('idle');
   const [transcript, setTranscript] = useState<string>('');
+  // The answer so far, while the local AI is still writing it (shown growing in the conversation and the quick panel).
+  const [streaming, setStreaming] = useState('');
+  // Whether a request is being worked on with tools, and the step she is on: from her own updates only (the orb's state also follows the voice).
+  const [agent, setAgent] = useState<{ working: boolean; message: string }>({ working: false, message: '' });
+  /** The request the tools are working for: an "idle" or "speaking" update of an earlier request (its voice finishing) must not end this one. */
+  const agentRequest = useRef('');
+  // (what the state is right now, for a timer that checks it later)
+  const stateNow = useRef<OrbState>('idle');
+  stateNow.current = state;
   // Eya's one window is a bubble, the quick assistant that grows out of it, or the full app. The main process owns which (and where).
-  const [win, setWin] = useState<WindowModeState>({ mode: 'bubble', anchor: 'bottom-right' });
+  const [win, setWin] = useState<WindowModeState>({ mode: 'bubble', anchor: 'bottom-right', maximized: false });
   const [pageRequest, setPageRequest] = useState<PageRequest | null>(null);
   const [thread, setThread] = useState<ThreadState>(emptyThread);
+  const [agentMode, setAgentModeState] = useState<boolean>(readAgentMode);
+  const agentModeRef = useRef(agentMode);
+  agentModeRef.current = agentMode;
+  const setAgentMode = useCallback((on: boolean) => {
+    setAgentModeState(on);
+    agentModeRef.current = on;
+    try {
+      window.localStorage.setItem(AGENT_MODE_STORAGE_KEY, on ? 'on' : 'off');
+    } catch {
+      // blocked storage: the choice lasts until the window closes
+    }
+  }, []);
   // What was said so far, for a live conversation that has to start again (it ended, or the connection was cut): it is told, so it does not
   // begin knowing nothing and ask the user to explain it all again.
   const threadRef = useRef(thread);
@@ -151,6 +192,9 @@ export function OrbApp(): JSX.Element {
   /** Live voice stopped and the chat carries on in the other way of talking: the voice follows the AI that can answer, not only the chosen one. */
   const [liveFallback, setLiveFallback] = useState(false);
   const carryOnRef = useRef<(stop: LiveStop) => void>(() => undefined);
+  /** When the live voice was last started again on another Gemini key (so a broken connection cannot loop), and the way to do it. */
+  const liveRetries = useRef<number[]>([]);
+  const restartLiveRef = useRef<() => void>(() => undefined);
   /**
    * The conversation so far, to send along with what is said next while a chat is being carried from one way of talking to another (a
    * hands-free chat is going, or a Live conversation ended a few minutes ago): the AI that answers carries on instead of starting blank.
@@ -187,10 +231,58 @@ export function OrbApp(): JSX.Element {
   const [talk, setTalk] = useState<'off' | 'connecting' | 'on'>('off');
   // Communication Access: the user's switch for whether Eya may look at or use chat apps. OFF until they turn it on here.
   const [comm, setComm] = useState<CommunicationAccessState | null>(null);
+  const [plugins, setPlugins] = useState<PluginsSnapshot | null>(null);
+  const [liveChat, setLiveChat] = useState<LiveChatView | null>(null);
   const [geminiKey, setGeminiKey] = useState<GeminiKeyStatus | null>(null);
   useEffect(() => {
     void window.eya.getGeminiKey().then(setGeminiKey).catch(() => undefined);
   }, []);
+  // The extra Gemini keys (family, friends), used one after another: how each stands, kept up to date as they are used up and come back.
+  const [geminiKeys, setGeminiKeys] = useState<GeminiKeysStatus | null>(null);
+  useEffect(() => {
+    void window.eya.getGeminiKeys().then(setGeminiKeys).catch(() => undefined);
+    return window.eya.onGeminiKeys(setGeminiKeys);
+  }, []);
+  const addGeminiKeys = useCallback(async (input: GeminiKeysInput): Promise<GeminiKeysResult> => {
+    const result = await window.eya.addGeminiKeys(input);
+    setGeminiKeys(result.status);
+    return result;
+  }, []);
+  const removeGeminiKeyEntry = useCallback(async (id: string): Promise<GeminiKeysResult> => {
+    const result = await window.eya.removeGeminiKeyEntry(id);
+    setGeminiKeys(result.status);
+    return result;
+  }, []);
+  const testGeminiKeyEntry = useCallback(async (id: string): Promise<GeminiKeysResult> => {
+    const result = await window.eya.testGeminiKeyEntry(id);
+    setGeminiKeys(result.status);
+    return result;
+  }, []);
+  // The Browser page: where the task works, what it is doing and the controls over it (the live pictures go straight to that page, not through here).
+  const [browserPanel, setBrowserPanel] = useState<BrowserPanelState | null>(null);
+  useEffect(() => {
+    void window.eya.getBrowserPanel().then(setBrowserPanel).catch(() => undefined);
+    return window.eya.onBrowserPanel(setBrowserPanel);
+  }, []);
+  const browserAct = useCallback(async (action: BrowserPanelAction): Promise<BrowserPanelResult> => {
+    const result = await window.eya.actOnBrowserPanel(action);
+    setBrowserPanel(result.state);
+    return result;
+  }, []);
+  const setBrowserView = useCallback((bounds: BrowserViewBounds | null) => window.eya.setBrowserView(bounds), []);
+  // When a task starts working on a website in Eya Browser, the app opens with the browser beside Eya (the way an agent is watched in Manus or
+  // Gemini's agent), once per task. The switch for it is on the workspace itself.
+  const splitGoal = useRef('');
+  useEffect(() => {
+    const p = browserPanel;
+    if (p === null) return;
+    const active = p.status === 'working' || p.status === 'waiting_you';
+    if (!active || p.where !== 'eya' || p.goal === '' || p.goal === splitGoal.current) return;
+    splitGoal.current = p.goal;
+    if (!getAutoSplit()) return;
+    setPageRequest((prev) => ({ page: 'browser', n: (prev?.n ?? 0) + 1 }));
+    window.eya.setWindowMode('app');
+  }, [browserPanel]);
   const saveGeminiKey = useCallback(async (key: string) => {
     const result = await window.eya.setGeminiKey(key);
     setGeminiKey(result.status);
@@ -205,6 +297,10 @@ export function OrbApp(): JSX.Element {
   const [tasks, setTasks] = useState<TasksSnapshot | null>(null);
   const tasksOpenRef = useRef(0);
   tasksOpenRef.current = tasks?.open ?? 0;
+  // A request she is carrying out counts as work too, even when the orb has gone back to "idle" after saying she is on it: the person may be silent for
+  // minutes meanwhile (busy with their own work), and she must not go off.
+  const agentWorkingRef = useRef(false);
+  agentWorkingRef.current = agent.working;
   useEffect(() => {
     void window.eya.getTasks().then(setTasks).catch(() => undefined);
     return window.eya.onTasksChanged(setTasks);
@@ -233,20 +329,43 @@ export function OrbApp(): JSX.Element {
     void window.eya.getBackupAi().then(setBackupAi).catch(() => undefined);
     refreshAiUsage();
   }, [refreshAiUsage]);
-  const chooseAi = useCallback(async (choice: 'auto' | { readonly id: string; readonly model: string }) => {
-    if (choice !== 'auto') {
-      const r = await window.eya.setBackupAiModel(choice.model, choice.id).catch(() => null);
+  // The local AI (Ollama): looked at on start and whenever the page asks.
+  const [localAi, setLocalAi] = useState<LocalAiStatus | null>(null);
+  const refreshLocalAi = useCallback(async () => {
+    const s = await window.eya.getLocalAi();
+    setLocalAi(s);
+    return s;
+  }, []);
+  useEffect(() => {
+    void refreshLocalAi().catch(() => undefined);
+  }, [refreshLocalAi]);
+  const setLocalModel = useCallback(async (model: string) => {
+    setLocalAi(await window.eya.setLocalModel(model));
+    void window.eya.getAiRoute().then(setAiRoute).catch(() => undefined);
+  }, []);
+  const chooseAi = useCallback(async (choice: AiChoice) => {
+    const backup = typeof choice === 'object' ? choice : null;
+    if (backup !== null) {
+      const r = await window.eya.setBackupAiModel(backup.model, backup.id).catch(() => null);
       if (r !== null) setBackupAi(r.status);
       if (r === null || !r.ok) return;
     }
-    const snapshot = await window.eya.setSettings({ aiFirst: choice === 'auto' ? 'auto' : 'backup' }).catch(() => null);
+    const snapshot = await window.eya.setSettings({ aiFirst: typeof choice === 'object' ? 'backup' : choice }).catch(() => null);
     if (snapshot !== null) setSettings(snapshot);
     void window.eya.getAiRoute().then(setAiRoute).catch(() => undefined);
-    if (choice !== 'auto') {
+    if (choice === 'local' || choice === 'local-only') {
+      // Find out at once whether the local AI can answer, and say what to do if it cannot, instead of leaving the person to wonder.
+      void refreshLocalAi()
+        .then((s) => {
+          if (s.state !== 'connected') setTranscript(`${s.message} ${s.fix ?? ''}`.trim());
+        })
+        .catch(() => undefined);
+    }
+    if (backup !== null) {
       // Find out at once whether the one just chosen can answer, and say so, instead of leaving the person to wonder why another AI
       // keeps answering (its account may be empty, its key refused).
       void window.eya
-        .testBackupAi(choice.id)
+        .testBackupAi(backup.id)
         .then((t) => {
           setBackupAi(t.status);
           void window.eya.getAiRoute().then(setAiRoute).catch(() => undefined);
@@ -254,7 +373,7 @@ export function OrbApp(): JSX.Element {
         })
         .catch(() => undefined);
     }
-  }, []);
+  }, [refreshLocalAi]);
   const saveBackupAi = useCallback(
     async (input: BackupAiInput) => {
       const result = await window.eya.setBackupAi(input);
@@ -296,9 +415,27 @@ export function OrbApp(): JSX.Element {
     return window.eya.onCommunicationAccessChanged(setComm);
   }, []);
   useEffect(() => {
-    void window.eya.getWindowMode().then((m) => setWin({ mode: m.mode, anchor: m.anchor })).catch(() => undefined);
+    void window.eya.getPlugins().then(setPlugins).catch(() => undefined);
+    return window.eya.onPluginsChanged(setPlugins);
+  }, []);
+  useEffect(() => {
+    void window.eya.getLiveChat().then(setLiveChat).catch(() => undefined);
+    return window.eya.onLiveChatChanged(setLiveChat);
+  }, []);
+  const liveChatAct = useCallback(async (request: LiveChatRequest): Promise<LiveChatResult> => {
+    const result = await window.eya.liveChatAction(request);
+    setLiveChat(result.view);
+    return result;
+  }, []);
+  const changePlugin = useCallback(async (change: PluginChange): Promise<PluginChangeResult> => {
+    const result = await window.eya.changePlugin(change);
+    setPlugins(result.snapshot);
+    return result;
+  }, []);
+  useEffect(() => {
+    void window.eya.getWindowMode().then((m) => setWin({ mode: m.mode, anchor: m.anchor, maximized: m.maximized === true })).catch(() => undefined);
     return window.eya.onWindowMode((m) => {
-      setWin({ mode: m.mode, anchor: m.anchor });
+      setWin({ mode: m.mode, anchor: m.anchor, maximized: m.maximized === true });
       const page = m.page;
       if (m.mode === 'app' && page !== undefined && (APP_PAGES as readonly string[]).includes(page)) {
         setPageRequest((prev) => ({ page: page as AppPage, n: (prev?.n ?? 0) + 1 }));
@@ -419,7 +556,7 @@ export function OrbApp(): JSX.Element {
           },
         },
         createPlayback: () => createPcmPlayback(),
-        keepOpen: () => tasksOpenRef.current > 0,
+        keepOpen: () => tasksOpenRef.current > 0 || agentWorkingRef.current,
         setFrameSink: (sink) => {
           micSink.current = sink;
           listener.setFrameSink(sink);
@@ -460,8 +597,21 @@ export function OrbApp(): JSX.Element {
           setState('idle');
           setTranscript(endedMessage(reason, detail));
           liveEndedAt.current = Date.now();
-          // It gave out (its limit, a dropped connection): the chat does not end, it carries on the other way.
-          if (reason === 'closed' || reason === 'error') carryOnRef.current(reason);
+          // It gave out (its limit, a dropped connection): with another Gemini key set up, the live voice starts again on that one; otherwise
+          // the chat does not end, it carries on the other way.
+          if (reason === 'closed' || reason === 'error') {
+            void window.eya
+              .reportLiveTrouble()
+              .catch(() => false)
+              .then((another) => {
+                if (another && liveRetryAllowed(liveRetries.current, Date.now())) {
+                  liveRetries.current.push(Date.now());
+                  restartLiveRef.current();
+                } else {
+                  carryOnRef.current(reason);
+                }
+              });
+          }
         },
       },
     );
@@ -533,11 +683,11 @@ export function OrbApp(): JSX.Element {
   const previewOpenaiVoice = useCallback((voice: string) => previewCloudVoice('openai', voice, "Hi, I'm Eya. This is how I sound."), []);
 
   const gptTalkRef = useRef(false);
-  const gptLastActive = useRef(0);
+  const gptQuiet = useRef<QuietState>(freshQuiet(0));
   const startGptTalk = useCallback(async (): Promise<string> => {
     if (gptTalkRef.current) return 'ok';
     gptTalkRef.current = true;
-    gptLastActive.current = Date.now();
+    gptQuiet.current = freshQuiet(Date.now());
     setGptTalk(true);
     setState('listening');
     setTranscript('Listening…');
@@ -550,17 +700,19 @@ export function OrbApp(): JSX.Element {
     setLiveFallback(false);
     setState((s) => (s === 'listening' ? 'idle' : s));
   }, []);
-  // Ends itself after a quiet while (not while she is answering, and later while she is keeping a task for the person).
+  // Ends itself after a quiet while — but never while she is answering or WORKING for the person (a request she is carrying out, a task she is keeping): they may
+  // be silent for minutes, busy with their own work. After the work ends she waits two minutes for them (see talkIdle.ts).
   useEffect(() => {
     if (!gptTalk) return undefined;
     const t = window.setInterval(() => {
       const s = orbStateRef.current;
-      if (s === 'speaking' || s === 'thinking' || s === 'working') {
-        gptLastActive.current = Date.now();
-        return;
-      }
-      const limit = tasksOpenRef.current > 0 ? 10 * 60_000 : GPT_TALK_IDLE_MS;
-      if (Date.now() - gptLastActive.current > limit) {
+      const verdict = nextQuiet(gptQuiet.current, {
+        now: Date.now(),
+        working: s === 'working' || agentWorkingRef.current || tasksOpenRef.current > 0,
+        busy: s === 'speaking' || s === 'thinking',
+      });
+      gptQuiet.current = verdict.state;
+      if (verdict.end) {
         endGptTalk();
         setTranscript('We stopped talking after a quiet while. Say "Hey Eya" to start again.');
       }
@@ -582,7 +734,15 @@ export function OrbApp(): JSX.Element {
       return startGptTalk();
     }
     if (conversation.active) return 'ok';
-    const result = await conversation.start();
+    let result = await conversation.start();
+    // The live voice failed on the Gemini key it was given (its allowance, a refused key): with another key set up, try it on that one, at
+    // most twice, before giving up on the live voice.
+    while (!result.ok && result.reason !== 'Live voice needs a Gemini key.') {
+      const another = await window.eya.reportLiveTrouble().catch(() => false);
+      if (!another || !liveRetryAllowed(liveRetries.current, Date.now())) break;
+      liveRetries.current.push(Date.now());
+      result = await conversation.start();
+    }
     if (result.ok) {
       setLiveFallback(false);
       return 'ok';
@@ -597,6 +757,8 @@ export function OrbApp(): JSX.Element {
     }
     return result.reason;
   }, [conversation, startGptTalk]);
+
+  restartLiveRef.current = () => void startTalk();
 
   // Carrying the chat over from Gemini Live to the other way of talking: heard on this PC, answered by the next AI that can (ChatGPT when it
   // is set up), spoken in an AI voice, with the conversation so far sent along so nothing has to be said again.
@@ -709,6 +871,17 @@ export function OrbApp(): JSX.Element {
     const offStatus = window.eya.onStatus((s) => setProviderStatus(s));
     const offUpdate = window.eya.onAgentUpdate((update) => {
       setState(update.state);
+      if (update.state === 'working') {
+        agentRequest.current = update.requestId;
+        setAgent((a) => ({ working: true, message: update.message ?? a.message }));
+      } else if (update.state !== 'thinking' && update.requestId === agentRequest.current) {
+        agentRequest.current = '';
+        setAgent((a) => (a.working ? { working: false, message: '' } : a));
+      }
+      if (update.partial !== undefined) {
+        setStreaming(update.partial);
+        setTranscript(update.partial);
+      } else if (update.state !== 'thinking') setStreaming('');
       if (update.message !== undefined) setTranscript(update.message);
     });
     return () => {
@@ -718,21 +891,51 @@ export function OrbApp(): JSX.Element {
     };
   }, []);
 
-  const submitText = useCallback(async (text: string) => {
+  /**
+   * Stop. The engine ends the request in this moment and the answer ("Okay, I stopped.") comes straight back; the voice is silenced. If for some reason the
+   * box is still showing that she is working a moment later, it is released here anyway: pressing Stop must never leave it waiting.
+   */
+  const stopAll = useCallback((): void => {
+    void window.eya.stopAll().catch(() => 0);
+    setStreaming('');
+    window.setTimeout(() => {
+      if (stateNow.current !== 'thinking' && stateNow.current !== 'working' && stateNow.current !== 'speaking') return;
+      agentRequest.current = '';
+      setAgent({ working: false, message: '' });
+      setStreaming('');
+      setState('idle');
+    }, 1200);
+  }, []);
+
+  const submitText = useCallback(async (text: string, attachments?: readonly AttachmentRef[], options?: { readonly agent?: boolean }) => {
     const t = text.trim();
     if (t.length === 0) return;
     setTranscript(`" ${t} "`);
-    setThread((th) => addMessage(th, 'user', t, 'typed'));
+    const files = attachments ?? [];
+    setThread((th) => addMessage(th, 'user', t, 'typed', Date.now(), files.map((a) => ({ name: a.name, kind: a.kind, size: a.size }))));
+    const requestId = randomId();
+    const finished = (): void => {
+      if (agentRequest.current !== requestId) return;
+      agentRequest.current = '';
+      setAgent((a) => (a.working ? { working: false, message: '' } : a));
+    };
     try {
       const result: AgentResult = await window.eya.submit({
         text: t,
         source: 'text',
-        requestId: randomId(),
+        requestId,
+        ...(files.length > 0 ? { attachments: files } : {}),
+        // (typed in the app: as chat or as a task by the Agent button; the quick panel and "do it again" are tasks)
+        mode: options?.agent === true || agentModeRef.current ? ('agent' as const) : ('chat' as const),
         ...historyFor(t),
       });
+      setStreaming('');
+      finished();
       setTranscript(result.spoken);
-      setThread((th) => addMessage(th, 'eya', result.spoken, 'typed'));
+      setThread((th) => addMessage(th, 'eya', result.spoken, 'typed', Date.now(), undefined, result.suggestAgent === true, result.tokens));
     } catch (err) {
+      setStreaming('');
+      finished();
       const message = err instanceof Error ? err.message : String(err);
       setTranscript(message);
       setThread((th) => addMessage(th, 'eya', message, 'typed'));
@@ -746,7 +949,7 @@ export function OrbApp(): JSX.Element {
     const showResult = (result: AgentResult): void => {
       // Noise that produced no words comes back with nothing to say.
       setTranscript(result.spoken.length > 0 ? result.spoken : '');
-      setThread((th) => addMessage(th, 'eya', result.spoken, 'voice'));
+      setThread((th) => addMessage(th, 'eya', result.spoken, 'voice', Date.now(), undefined, false, result.tokens));
     };
     try {
       // 1. On this PC: no request, no quota, no network round trip.
@@ -776,9 +979,9 @@ export function OrbApp(): JSX.Element {
           void speakPreview('Okay.');
           return;
         }
-        if (chatting) gptLastActive.current = Date.now();
+        if (chatting) gptQuiet.current = personSpoke(gptQuiet.current, Date.now());
         showResult(await window.eya.submit({ text, source: 'voice', requestId: randomId(), ...(chatting ? {} : { live: true }), ...historyFor(text) }));
-        if (chatting) gptLastActive.current = Date.now();
+        if (chatting) gptQuiet.current = answered(gptQuiet.current, Date.now());
         return;
       }
 
@@ -923,13 +1126,17 @@ export function OrbApp(): JSX.Element {
     () =>
       window.eya.onTasksSay((say) => {
         void (async () => {
+          // What someone in a live chat said for the person: it is in the chat with Eya at once (with the number hidden), whatever happens to the voice.
+          if (say.kind === 'relay') setThread((t) => addMessage(t, 'eya', say.display ?? say.text, 'typed'));
           const deadline = Date.now() + 20_000;
           while (Date.now() < deadline && (orbStateRef.current === 'speaking' || orbStateRef.current === 'working')) {
             await new Promise<void>((resolve) => setTimeout(resolve, 300));
           }
           if (talkRef.current === 'on') {
             const line =
-              say.kind === 'ask'
+              say.kind === 'relay'
+                ? `[Eya's note] Tell the user this now, clearly, in a friendly voice, in words close to these: "${say.text}" Then wait. If the user tells you what to answer, call quick_command with exactly what they say (for example "tell them I will call at 6") so it is sent in that chat. Do not answer for them.`
+                : say.kind === 'ask'
                 ? `[Eya's note] The step you started has finished, and it asks the user this: "${say.text}" Ask the user exactly that in your own words, wait for THEIR answer, then call quick_command again so it is carried out. Never answer it for them.`
                 : say.kind === 'done'
                   ? `[Eya's note] The step that was taking long has finished: "${say.text}" Tell the user in a few words.`
@@ -998,6 +1205,7 @@ export function OrbApp(): JSX.Element {
     if (screenAsk.answer !== '') void speakPreview(screenAsk.answer);
   }, [screenAsk.answer]);
 
+  const chats = useChatHistory({ thread, setThread, keep: settings?.settings.keepChats !== false, busy: state === 'thinking' || state === 'working' });
   const control: EyaControl = {
     state,
     statusText: statusLine({ state, talk: talk !== 'off' ? talk : gptTalk ? 'on' : 'off', voiceOn, listening, wakeReady: wakeAvailable }),
@@ -1016,7 +1224,11 @@ export function OrbApp(): JSX.Element {
     providerStatus,
     transcript,
     thread: thread.messages,
+    chats,
+    agent,
     comm,
+    plugins,
+    liveChat,
     memory,
     settings,
     activity,
@@ -1024,21 +1236,37 @@ export function OrbApp(): JSX.Element {
     frame,
     screenAsk,
     submit: submitText,
+    stopAll,
+    agentMode,
+    setAgentMode,
     toggleTalk,
     toggleVoice,
     toggleInterrupt,
     changeVoiceName,
     changeComm,
+    changePlugin,
+    liveChatAct,
     actOnMemory,
     changeSettings,
     geminiKey,
     saveGeminiKey,
     removeGeminiKey,
+    browserPanel,
+    browserAct,
+    setBrowserView,
+    geminiKeys,
+    addGeminiKeys,
+    removeGeminiKeyEntry,
+    testGeminiKeyEntry,
     tasks,
     actOnTasks,
     backupAi,
     aiRoute,
     chooseAi,
+    localAi,
+    refreshLocalAi,
+    setLocalModel,
+    streaming,
     saveBackupAi,
     removeBackupAi,
     testBackupAi,
@@ -1049,6 +1277,8 @@ export function OrbApp(): JSX.Element {
     checkWriting,
     actOnActivity,
     setWindowMode,
+    maximized: win.maximized === true,
+    toggleMaximize: () => window.eya.toggleMaximize(),
     startShare,
     stopShare,
     askScreen,

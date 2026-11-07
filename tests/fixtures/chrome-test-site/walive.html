@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WhatsApp (mock for the live chat)</title>
+<style>
+  body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
+  #side { width: 300px; border-right: 1px solid #ccc; display: flex; flex-direction: column; }
+  #list { overflow: auto; flex: 1; margin: 0; padding: 0; list-style: none; }
+  .chat-item { padding: 10px 12px; border-bottom: 1px solid #eee; cursor: pointer; }
+  .chat-item .name { font-weight: bold; }
+  .chat-item .last { color: #666; font-size: 12px; }
+  #main { flex: 1; display: flex; flex-direction: column; }
+  header#head { padding: 10px 14px; border-bottom: 1px solid #ccc; min-height: 40px; }
+  #thread { flex: 1; overflow: auto; padding: 10px 14px; }
+  .row { margin: 6px 0; }
+  .row.out { text-align: right; }
+  .bubble { background: #dcf8c6; border-radius: 6px; padding: 6px 10px; display: inline-block; max-width: 60%; }
+  .row.in .bubble { background: #fff; border: 1px solid #ddd; }
+  .tick { color: #4a90d9; font-size: 12px; margin-left: 8px; }
+  #composer { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #ccc; }
+  #composer textarea { flex: 1; }
+  #presence { font-size: 11px; color: #888; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+</style>
+</head>
+<body>
+<div id="side">
+  <input id="search" type="text" aria-label="Search or start a new chat" placeholder="Search or start a new chat">
+  <ul id="list"></ul>
+</div>
+<div id="main">
+  <header id="head"><span id="chat-title" title="">Select a chat</span> <span id="presence"></span></header>
+  <div id="thread" role="log" aria-label="Message list"></div>
+  <div id="composer" hidden>
+    <textarea id="msg" aria-label="Type a message" placeholder="Type a message"></textarea>
+    <button id="send" aria-label="Send">Send</button>
+  </div>
+</div>
+
+<script>
+  // A WhatsApp-shaped page for the live chat's real-browser test: the open chat is #main; each message is a row with the page's own id
+  // ("true_…" the account sent it, "false_…" it received it), its words in a span.selectable-text, its stamp in data-pre-plain-text.
+  const CHATS = [
+    { id: 1, name: 'Rahul Sharma', phone: '+91 98765 00432', last: 'See you tomorrow' },
+    // (unread messages: the row has screen-reader text "12 unread messages" before the name, as the real page does — it is not the chat's name)
+    { id: 2, name: 'Priya Singh', phone: '+91 99887 70432', last: 'Thanks!', unread: 12 },
+    { id: 3, name: 'Amit Kumar', phone: '+91 98111 22333', last: 'Done' },
+    // a NEW chat: nothing but the page's own notices in it (as WhatsApp shows a chat with a number never written to)
+    { id: 4, name: 'Kiran Rao', phone: '+91 98765 08501', last: 'Say hi', fresh: true },
+    // an unsaved contact: the page shows only the number
+    { id: 5, name: '+91 70000 11122', phone: '+91 70000 11122', last: 'Hello', unsaved: true },
+  ];
+  let counter = 100;
+  const THREADS = new Map(CHATS.map((c) => [c.id, c.fresh ? [] : [{ n: ++counter, from: 'them', text: c.last, stamp: '[09:00, 27/10/2026] ' + c.name + ': ' }]]));
+  let current = null;
+  window.__sent = [];
+  const $ = (id) => document.getElementById(id);
+
+  function renderList(filter) {
+    const f = (filter || '').trim().toLowerCase();
+    $('list').innerHTML = '';
+    for (const c of CHATS) {
+      // (the page's own search finds a chat by its name, or by the digits of its number)
+      const digits = f.replace(/\D/g, '');
+      if (f && !c.name.toLowerCase().includes(f) && !(digits.length >= 4 && c.phone.replace(/\D/g, '').includes(digits))) continue;
+      const li = document.createElement('li');
+      li.className = 'chat-item';
+      li.setAttribute('role', 'listitem');
+      li.tabIndex = 0;
+      li.innerHTML = '<span class="sr"></span><div class="name"></div><div class="last"></div>';
+      li.querySelector('.sr').textContent = c.unread ? c.unread + ' unread messages' : '';
+      li.querySelector('.name').textContent = c.name;
+      li.querySelector('.last').textContent = c.last;
+      li.addEventListener('click', () => openChat(c.id));
+      $('list').appendChild(li);
+    }
+  }
+
+  function renderThread() {
+    const t = $('thread');
+    t.innerHTML = '';
+    // The page's own notices are rows too (role=row) but are not messages: no id, no time, no copy block.
+    if (CHATS.find((x) => x.id === current)?.fresh) {
+      for (const text of ['TODAY', 'Messages are end-to-end encrypted. No one outside of this chat can read them.']) {
+        const notice = document.createElement('div');
+        notice.className = 'row notice';
+        notice.setAttribute('role', 'row');
+        notice.textContent = text;
+        t.appendChild(notice);
+      }
+    }
+    for (const m of THREADS.get(current) || []) {
+      // The page as the real one is built today ('modern'): no direction in any id or class, plain ids, nested wrappers, a copy block with the sender (whose name need not equal the
+      // header's), a time line, delivery ticks on what the account sent ('modern' only: 'modern-noticks' has none), pictures with no copy block at all.
+      const lay = window.__layout || (window.__unrecognised ? 'blind' : 'ids');
+      if (lay === 'modern' || lay === 'modern-noticks') {
+        t.appendChild(modernRow(m, lay));
+        continue;
+      }
+      const row = document.createElement('div');
+      row.className = 'row ' + (m.from === 'me' ? 'out' : 'in');
+      row.setAttribute('role', 'row');
+      // (window.__unrecognised: the page changed how it names its messages, so this reader no longer recognises them)
+      const layout = window.__layout || (window.__unrecognised ? 'blind' : 'ids');
+      row.setAttribute('data-id', layout === 'ids' ? (m.from === 'me' ? 'true_' : 'false_') + m.n : 'msg-' + m.n);
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      const copyable = document.createElement('div');
+      copyable.className = 'copyable-text';
+      const stamp = m.stamp || '[10:00, 27/10/2026] ';
+      copyable.setAttribute('data-pre-plain-text', layout === 'blind' ? stamp.replace(/\] .*$/, '] ') : stamp);
+      const sel = document.createElement('span');
+      sel.className = 'selectable-text';
+      const inner = document.createElement('span');
+      inner.textContent = m.text;
+      sel.appendChild(inner);
+      copyable.appendChild(sel);
+      bubble.appendChild(copyable);
+      if (m.from === 'me') {
+        const tick = document.createElement('span');
+        tick.className = 'tick';
+        tick.setAttribute('aria-label', m.status === 'sent' ? 'Sent' : 'Sending');
+        tick.textContent = m.status === 'sent' ? '✓' : '🕓';
+        bubble.appendChild(tick);
+      }
+      row.appendChild(bubble);
+      if (layout === 'blind') row.style.textAlign = 'center'; // (nothing says which side: not the ids, not the sender, not where it is drawn)
+      t.appendChild(row);
+    }
+    t.scrollTop = t.scrollHeight;
+  }
+
+  const hex = (n) => ('3EB0' + Number(n).toString(16).toUpperCase().padStart(28, 'A')).slice(0, 32);
+  function el(tag, attrs, ...kids) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+    for (const kid of kids) e.append(kid);
+    return e;
+  }
+  window.__downloadsPressed = [];
+  const pictureBlobs = new Map();
+  function pictureBlobUrl(n) {
+    if (!pictureBlobs.has(n)) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 160;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#' + ((n * 2654435) % 0xffffff).toString(16).padStart(6, '0');
+      ctx.fillRect(0, 0, 160, 160);
+      const bin = atob(canvas.toDataURL('image/png').split(',')[1]);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      pictureBlobs.set(n, URL.createObjectURL(new Blob([bytes], { type: 'image/png' })));
+    }
+    return pictureBlobs.get(n);
+  }
+  function modernRow(m, lay) {
+    const mine = m.from === 'me';
+    const chat = CHATS.find((x) => x.id === current);
+    const row = el('div', { role: 'row', style: 'display:flex; margin:6px 0; justify-content:' + (m.centered ? 'center' : mine ? 'flex-end' : 'flex-start') }); // (m.centered: a picture drawn in the middle, so that nothing tells its side)
+    const holder = el('div', { 'data-id': hex(m.n) });
+    const container = el('div', { 'data-testid': 'msg-container' });
+    const bubble = el('div', { class: 'bubble', style: mine ? '' : 'background:#fff; border:1px solid #ddd' });
+    if (m.kind === 'image') {
+      // (m.real: a loaded photo — a real 160 x 160 PNG held as a blob; otherwise the 1-pixel placeholder, which is not a picture to take)
+      bubble.append(el('img', { alt: '', width: '120', height: '80', src: m.real ? pictureBlobUrl(m.n) : 'data:image/gif;base64,R0lGODlhAQABAAAAACw=' }));
+    } else if (m.kind === 'document') {
+      // (a document bubble: its icon, its file name, and the page's own download control — which starts a real browser download of a small file with that name)
+      // m.words: the REAL page's shape — the file name is selectable text with its size line beneath it, so the bubble HAS words in it (a mock without them hid, on 6 Nov 2026, that a
+      // PDF was read as a text message). m.bare: the download arrow has no name at all — only the document's own icon inside a button.
+      const download = () => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob(['%PDF-1.4 mock of ' + m.name], { type: 'application/pdf' }));
+        a.download = m.name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.__downloadsPressed.push(m.name);
+      };
+      const icon = el('span', { 'data-icon': 'document-pdf' });
+      if (m.bare) {
+        const holder = el('div', { role: 'button', tabindex: '0' });
+        holder.append(icon);
+        holder.addEventListener('click', download);
+        bubble.append(holder);
+      } else {
+        bubble.append(icon);
+      }
+      bubble.append(m.words ? el('span', { class: 'selectable-text', title: m.name }, m.name) : el('span', { title: m.name }, m.name));
+      if (m.words) bubble.append(el('span', { class: 'selectable-text' }, '12 pages · PDF · 1 MB'));
+      if (!m.bare) {
+        const dl = el('span', { 'data-icon': 'download', role: 'button', 'aria-label': 'Download' }, '⬇');
+        dl.addEventListener('click', download);
+        bubble.append(dl);
+      }
+    } else {
+      const author = mine ? 'Rakesh' : chat.name.split(' ')[0] + ' S.'; // (not the header's name: "Rahul S." for "Rahul Sharma")
+      const copy = el('div', { class: 'copyable-text', 'data-pre-plain-text': '[10:01, 27/10/2026] ' + author + ': ' });
+      const inner = document.createElement('span');
+      inner.textContent = m.text;
+      // ('modern-noticks' also has no "selectable-text" span: the words are only in the copy block)
+      copy.append(lay === 'modern' ? el('span', { class: 'selectable-text' }, inner) : inner);
+      bubble.append(copy);
+    }
+    const meta = el('div', { 'data-testid': 'msg-meta' }, '10:01');
+    if (mine && lay === 'modern') meta.append(el('span', { 'data-icon': m.status === 'sent' ? 'msg-dblcheck' : 'msg-time', 'aria-label': m.status === 'sent' ? ' Sent ' : ' Pending ' }, m.status === 'sent' ? '✓✓' : '🕓'));
+    bubble.append(meta);
+    container.append(el('div', {}, el('div', {}, bubble)));
+    holder.append(container);
+    row.append(holder);
+    return row;
+  }
+
+  function openChat(id) {
+    current = id;
+    const c = CHATS.find((x) => x.id === id);
+    $('chat-title').textContent = c.name;
+    $('chat-title').setAttribute('title', c.name);
+    $('msg').setAttribute('aria-label', 'Type a message to ' + c.name);
+    $('composer').hidden = false;
+    document.title = c.name + ' - WhatsApp';
+    renderThread();
+  }
+
+  $('search').addEventListener('input', (e) => renderList(e.target.value));
+  $('send').addEventListener('click', () => {
+    const text = $('msg').value.trim();
+    if (!text || current === null) return;
+    $('msg').value = '';
+    const message = { n: ++counter, from: 'me', text, status: 'sending', stamp: '[10:02, 27/10/2026] You: ' };
+    THREADS.get(current).push(message);
+    renderThread();
+    setTimeout(() => {
+      message.status = 'sent';
+      window.__sent.push({ chat: current, text });
+      renderThread();
+    }, 300);
+  });
+
+  // ---- hooks for the test (what "the other person" does)
+  window.__receive = (text, chatId) => {
+    const id = chatId || current;
+    const c = CHATS.find((x) => x.id === id);
+    THREADS.get(id).push({ n: ++counter, from: 'them', text, stamp: '[10:01, 27/10/2026] ' + c.name + ': ' });
+    if (id === current) renderThread();
+  };
+  // a picture, from the other person or from the account itself (no copy block, no sender: only a time line and the picture)
+  window.__receiveImage = (chatId, centered) => {
+    const id = chatId || current;
+    THREADS.get(id).push({ n: ++counter, from: 'them', kind: 'image', text: '', centered: centered === true });
+    if (id === current) renderThread();
+  };
+  window.__sendImageOut = () => {
+    THREADS.get(current).push({ n: ++counter, from: 'me', kind: 'image', text: '', status: 'sent' });
+    renderThread();
+  };
+  // a loaded photo from the other person (a real PNG, as a blob), or — with false — the placeholder the page shows before the photo has loaded
+  window.__receivePicture = (chatId, real) => {
+    const id = chatId || current;
+    THREADS.get(id).push({ n: ++counter, from: 'them', kind: 'image', text: '', real: real !== false });
+    if (id === current) renderThread();
+  };
+  // a document from the other person: its bubble shows the file name and a download control
+  window.__receiveDocument = (name, chatId, shape) => {
+    const id = chatId || current;
+    THREADS.get(id).push({ n: ++counter, from: 'them', kind: 'document', text: '', name, words: !!(shape && shape.words), bare: !!(shape && shape.bare) });
+    if (id === current) renderThread();
+  };
+  window.__noise = () => { $('presence').textContent = 'online ' + Date.now(); };
+  window.__edit = (n, text) => { const m = (THREADS.get(current) || []).find((x) => x.n === n); if (m) { m.text = text; renderThread(); } };
+  window.__lastIncomingId = () => { const l = (THREADS.get(current) || []).filter((m) => m.from === 'them'); return l.length ? l[l.length - 1].n : null; };
+
+  renderList('');
+</script>
+</body>
+</html>

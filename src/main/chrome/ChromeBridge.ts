@@ -159,6 +159,8 @@ export interface BridgeBrowserEvent {
 /** A view of the bridge bound to ONE browser, which is all a per-browser service needs. */
 export interface BrowserLink {
   isConnected(): boolean;
+  /** What the connected extension said it can do (empty when none is connected). */
+  capabilities?(): readonly string[];
   request<T = unknown>(op: string, args?: Readonly<Record<string, unknown>>, timeoutMs?: number): Promise<T>;
 }
 
@@ -399,6 +401,7 @@ export class ChromeBridge {
   forBrowser(browser: BrowserName): BrowserLink {
     return {
       isConnected: () => this.isConnected(browser),
+      capabilities: () => this.conns.get(browser)?.hello.capabilities ?? [],
       request: <T = unknown>(op: string, args: Readonly<Record<string, unknown>> = {}, timeoutMs?: number) => this.request<T>(op, args, timeoutMs, browser),
     };
   }

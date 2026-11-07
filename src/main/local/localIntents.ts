@@ -35,6 +35,8 @@ export type NamedBrowser = 'chrome' | 'edge' | 'firefox';
 export type LocalIntent =
   | { readonly kind: 'open_site'; readonly url: string; readonly label: string; readonly browser?: NamedBrowser }
   | { readonly kind: 'search'; readonly site: Site; readonly query: string; readonly url: string; readonly browser?: NamedBrowser }
+  /** "Open YouTube and play a feel-good Telugu song", "play Tum Hi Ho on YouTube": one tool (play_on_youtube) does all of it, so no model is asked. */
+  | { readonly kind: 'play'; readonly query: string; readonly browser?: NamedBrowser }
   | { readonly kind: 'open_folder'; readonly folder: FolderName }
   | { readonly kind: 'open_named_folder'; readonly tokens: readonly string[] }
   | FileQuery
@@ -246,6 +248,26 @@ function cleanQuery(query: string): string | null {
   return q.length > 0 && q.length <= MAX_QUERY_CHARS ? q : null;
 }
 
+// "Play <something> on YouTube", worded the ways people say it (and mistype it: "paly", "youtub"). YouTube has to be NAMED: a bare "play <name>" means a
+// file on this PC and goes on as before. play_on_youtube picks the result, skips the adverts and checks that it started, so there is nothing for a model to decide.
+const YT = 'you\\s?tub\\w*(?:\\s+(?:website|web site|site|app|page|music))?';
+const PLAY_VERB = '(?:play|paly|plya|put on|start playing|listen to|watch)';
+const PLAY_AFTER_OPEN = new RegExp(`^(?:open|go to|goto|launch|visit|start)\\s+(?:the\\s+)?${YT}\\s*(?:and|then|&)?\\s*(?:then\\s+)?${PLAY_VERB}\\s+(.+)$`);
+const PLAY_ON_SITE = new RegExp(`^${PLAY_VERB}\\s+(.+?)\\s+(?:on|in|from|at|using|through|via)\\s+(?:the\\s+)?${YT}$`);
+const PLAY_SITE_FIRST = new RegExp(`^${PLAY_VERB}\\s+(?:on|in)\\s+(?:the\\s+)?${YT}\\s+(.+)$`);
+// Said alone these name nothing to look for (what to play is then for the assistant to choose).
+const NOTHING_IN_PARTICULAR = new Set(['it', 'this', 'that', 'something', 'anything', 'one', 'song', 'songs', 'music', 'video', 'videos', 'a song', 'a video', 'some music', 'some songs']);
+
+function parsePlay(text: string): { readonly query: string } | null {
+  const found = PLAY_AFTER_OPEN.exec(text) ?? PLAY_ON_SITE.exec(text) ?? PLAY_SITE_FIRST.exec(text);
+  if (found === null) return null;
+  const query = (found[1] ?? '').replace(/^(?:me|us)\s+/, '').replace(/^(?:a|an|some|any|the|my|one)\s+/, '').replace(/\s+(?:please|for me|now)$/, '').trim();
+  if (query.length === 0 || query.length > MAX_QUERY_CHARS || NOTHING_IN_PARTICULAR.has(query)) return null;
+  // (another site named in the same breath: not a YouTube request)
+  if (new RegExp(`\\s(?:and|then)\\s+(?:open|go to|search)\\b`).test(query)) return null;
+  return { query };
+}
+
 const URL_RE = /\bhttps?:\/\/[^\s<>"']+/i;
 const LINK_TOKEN = 'linktoken';
 const CLIPBOARD_WORDS = new Set([
@@ -281,7 +303,9 @@ export function parseLocalIntent(raw: string): LocalIntent | null {
   const named = splitBrowser(raw);
   if (named === null) return parseIntent(raw);
   const intent = parseIntent(named.text);
-  if (named.browser === null || intent === null || (intent.kind !== 'open_site' && intent.kind !== 'search')) return null;
+  if (named.browser === null || intent === null || (intent.kind !== 'open_site' && intent.kind !== 'search' && intent.kind !== 'play')) return null;
+  // (play_on_youtube starts Chrome or Edge only)
+  if (intent.kind === 'play' && named.browser === 'firefox') return null;
   return { ...intent, browser: named.browser };
 }
 
@@ -302,6 +326,10 @@ function parseIntent(raw: string): LocalIntent | null {
     if (CLIPBOARD_WORDS.has(rest)) return { kind: 'download', url: null };
     return null;
   }
+
+  // play <something> on YouTube / open YouTube and play <something>
+  const play = parsePlay(text);
+  if (play !== null) return { kind: 'play', query: play.query };
 
   // search <something> on <site> / google <something>
   const on = SEARCH_ON.exec(text);

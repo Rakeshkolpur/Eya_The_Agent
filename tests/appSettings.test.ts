@@ -27,7 +27,7 @@ const memoryIo = () => {
 
 describe('Eya\'s own settings', () => {
   it('start with the bubble shown, tap-to-talk on and a history kept — and a missing or damaged file means exactly that', () => {
-    expect(DEFAULT_APP_SETTINGS).toEqual({ showBubble: true, tapToTalk: true, keepHistory: true, performance: 'auto', aiFirst: 'auto' });
+    expect(DEFAULT_APP_SETTINGS).toEqual({ showBubble: true, tapToTalk: true, keepHistory: true, keepChats: true, autoScreenLook: true, multiLiveChats: true, performance: 'auto', aiFirst: 'auto', localModel: 'llama3.2:1b', language: 'english', browser: 'eya', country: 'IN' });
     const { io } = memoryIo();
     expect(new AppSettingsStore('s.json', io).load()).toEqual(DEFAULT_APP_SETTINGS);
     const bad = memoryIo();
@@ -36,8 +36,9 @@ describe('Eya\'s own settings', () => {
   });
 
   it('read only real booleans, field by field: a wrong type falls back to that field\'s default, never to "off"', () => {
-    expect(parseAppSettings({ showBubble: false })).toEqual({ showBubble: false, tapToTalk: true, keepHistory: true, performance: 'auto', aiFirst: 'auto' });
-    expect(parseAppSettings({ showBubble: 'no', tapToTalk: 0, keepHistory: null })).toEqual(DEFAULT_APP_SETTINGS);
+    expect(parseAppSettings({ showBubble: false })).toEqual({ showBubble: false, tapToTalk: true, keepHistory: true, keepChats: true, autoScreenLook: true, multiLiveChats: true, performance: 'auto', aiFirst: 'auto', localModel: 'llama3.2:1b', language: 'english', browser: 'eya', country: 'IN' });
+    expect(parseAppSettings({ showBubble: 'no', tapToTalk: 0, keepHistory: null, keepChats: 'yes' })).toEqual(DEFAULT_APP_SETTINGS);
+    expect(parseAppSettings({ keepChats: false }).keepChats).toBe(false);
     for (const junk of [null, undefined, 5, 'x', [], true]) expect(parseAppSettings(junk)).toEqual(DEFAULT_APP_SETTINGS);
   });
 
@@ -47,7 +48,7 @@ describe('Eya\'s own settings', () => {
     const seen: boolean[] = [];
     store.onChange((s) => seen.push(s.showBubble));
     store.update({ showBubble: false });
-    expect(JSON.parse(files.get('s.json') ?? '{}')).toEqual({ showBubble: false, tapToTalk: true, keepHistory: true, performance: 'auto', aiFirst: 'auto' });
+    expect(JSON.parse(files.get('s.json') ?? '{}')).toEqual({ showBubble: false, tapToTalk: true, keepHistory: true, keepChats: true, autoScreenLook: true, multiLiveChats: true, performance: 'auto', aiFirst: 'auto', localModel: 'llama3.2:1b', language: 'english', browser: 'eya', country: 'IN' });
     expect(seen).toEqual([false]);
     const broken = new AppSettingsStore('s.json', { read: () => null, write: () => { throw new Error('disk is read-only'); } });
     expect(broken.update({ keepHistory: false }).keepHistory).toBe(false);
@@ -64,16 +65,40 @@ describe('Eya\'s own settings', () => {
     expect(realIo.read(path)?.startsWith('{')).toBe(true);
   });
 
+  it('the country of phone numbers is India until another real country is chosen, and a made-up one is never kept', () => {
+    expect(DEFAULT_APP_SETTINGS.country).toBe('IN');
+    expect(parseAppSettings({ country: 'us' }).country).toBe('US');
+    expect(parseAppSettings({ country: 'GB' }).country).toBe('GB');
+    for (const bad of ['', 'ZZ', 'india', 7, null, 'U', 'USA']) expect(parseAppSettings({ country: bad }).country, String(bad)).toBe('IN');
+    // from the page: only a country that numbers can be read for
+    expect(cleanSettingsPatch({ country: 'au' }).patch).toEqual({ country: 'AU' });
+    expect(cleanSettingsPatch({ country: 'ZZ' }).patch).toEqual({});
+    expect(cleanSettingsPatch({ country: 'x1' }).patch).toEqual({});
+    expect(cleanSettingsPatch({ country: 44 }).patch).toEqual({});
+    // and it survives a restart
+    const dir = tmp();
+    const path = join(dir, 'settings.json');
+    new AppSettingsStore(path).update({ country: 'AE' });
+    expect(new AppSettingsStore(path).load().country).toBe('AE');
+  });
+
   it('a settings change from the page may only change booleans it knows', () => {
     expect(cleanSettingsPatch({ showBubble: false, tapToTalk: 'yes', keepHistory: true, evil: true, startWithWindows: true })).toEqual({
       patch: { showBubble: false, keepHistory: true },
       startWithWindows: true,
     });
+    expect(cleanSettingsPatch({ keepChats: false, keepHistory: 1 })).toEqual({ patch: { keepChats: false } });
     expect(cleanSettingsPatch({ startWithWindows: 'yes' })).toEqual({ patch: {} });
     // which AI is asked first: only the two real values get through (this was silently dropped once, so the choice never took)
     expect(cleanSettingsPatch({ aiFirst: 'backup' })).toEqual({ patch: { aiFirst: 'backup' } });
     expect(cleanSettingsPatch({ aiFirst: 'auto' })).toEqual({ patch: { aiFirst: 'auto' } });
+    expect(cleanSettingsPatch({ aiFirst: 'local' })).toEqual({ patch: { aiFirst: 'local' } });
+    expect(cleanSettingsPatch({ aiFirst: 'local-only' })).toEqual({ patch: { aiFirst: 'local-only' } });
     expect(cleanSettingsPatch({ aiFirst: 'gemini' })).toEqual({ patch: {} });
+    expect(cleanSettingsPatch({ localModel: 'qwen3:1.7b' })).toEqual({ patch: { localModel: 'qwen3:1.7b' } });
+    expect(cleanSettingsPatch({ localModel: 'x; rm -rf /' })).toEqual({ patch: {} });
+    expect(parseAppSettings({ aiFirst: 'local-only', localModel: 'qwen3:1.7b' })).toMatchObject({ aiFirst: 'local-only', localModel: 'qwen3:1.7b' });
+    expect(parseAppSettings({ aiFirst: 'nonsense', localModel: '../x' })).toMatchObject({ aiFirst: 'auto', localModel: 'llama3.2:1b' });
     for (const junk of [null, undefined, 3, 'x', []]) expect(cleanSettingsPatch(junk)).toEqual({ patch: {} });
   });
 });
@@ -211,5 +236,21 @@ describe('the performance level setting', () => {
     const hw = currentHardware();
     expect(hw.totalMemBytes).toBeGreaterThan(0);
     expect(hw.logicalCores).toBeGreaterThan(0);
+  });
+});
+
+describe('the language Eya answers in', () => {
+  it('is English until the person chooses, whatever is in a damaged file', () => {
+    expect(DEFAULT_APP_SETTINGS.language).toBe('english');
+    expect(parseAppSettings({ language: 'klingon' }).language).toBe('english');
+    expect(parseAppSettings({ language: 7 }).language).toBe('english');
+  });
+
+  it('keeps a real choice, and lets only a real choice through from the page', () => {
+    for (const language of ['english', 'hindi', 'telugu', 'auto'] as const) {
+      expect(parseAppSettings({ language }).language).toBe(language);
+      expect(cleanSettingsPatch({ language })).toEqual({ patch: { language } });
+    }
+    expect(cleanSettingsPatch({ language: 'klingon' })).toEqual({ patch: {} });
   });
 });

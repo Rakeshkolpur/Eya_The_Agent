@@ -1,5 +1,7 @@
 import { ipcMain } from 'electron';
 import { IpcChannels } from '@shared/ipcContract';
+import { DEFAULT_LANGUAGE, languageRule } from '@shared/language';
+import type { EyaLanguage } from '@shared/language';
 import type { LiveConfig, LiveToolCallRequest, LiveToolCallResult } from '@shared/ipcContract';
 import { DEFAULT_VOICE } from '@shared/constants';
 import { liveSystemPrompt } from '@main/agent/prompts';
@@ -94,6 +96,12 @@ export interface LiveBridgeDeps {
   readonly tasks?: LiveTaskKeeper;
   /** What is in progress (the tasks Eya is keeping), put in front of every new conversation: it knows what the user was doing. Optional. */
   readonly progress?: () => string;
+  /** The Browser page's request boundaries: a new thing the user said, and the end of a step. Optional. */
+  readonly browserRequest?: { begin(text: string): void; end(): void };
+  /** Told when a tool starts running for the live voice; the function it returns is called when that tool ends (the PC is kept awake meanwhile). Optional. */
+  readonly work?: { begin(): () => void };
+  /** The language the live voice is told to speak in (see shared/language.ts). English when not given. */
+  readonly language?: () => EyaLanguage;
 }
 
 function parseModels(raw: string | undefined): string[] {
@@ -135,7 +143,7 @@ export function buildLiveConfig(deps: LiveBridgeDeps, voice: unknown, recent?: u
     url,
     models: parseModels((deps.env ?? process.env)['EYA_LIVE_MODELS']),
     voice: safeVoice,
-    systemInstruction: [base, remembered, inProgress, earlier].filter((part) => part !== '').join('\n\n'),
+    systemInstruction: [base, languageRule(deps.language?.() ?? DEFAULT_LANGUAGE), remembered, inProgress, earlier].filter((part) => part !== '').join('\n\n'),
     tools: [
       ...(deps.quick !== undefined ? [{ name: QUICK_COMMAND_TOOL.name, description: QUICK_COMMAND_TOOL.description, parameters: QUICK_COMMAND_TOOL.parameters }] : []),
       ...deps.tools.toAISchema().map((t) => ({
@@ -156,6 +164,8 @@ const LIVE_TOOL_TIMEOUT_MS = 40_000;
 
 /** The latest thing the user said that was a whole request (not just a code or a yes): what a task waiting for them is called. */
 let lastAsked = '';
+/** The last thing the user said that the Browser page was told about (so a long task does not start over at every step). */
+let lastBegun = '';
 
 function wordsIn(text: string): number {
   return text.trim().split(/\s+/).filter((w) => w !== '').length;
@@ -170,6 +180,7 @@ export async function runLiveTool(
   activity?: { record(input: ActivityInput): void },
   context?: { push(turn: Turn): void },
   tasks?: LiveTaskKeeper,
+  browserRequest?: { begin(text: string): void; end(): void },
 ): Promise<LiveToolCallResult> {
   const request = req as Partial<LiveToolCallRequest> | null;
   if (
@@ -201,6 +212,11 @@ export async function runLiveTool(
   const started = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
   if (heard !== undefined && wordsIn(heard) >= 4 && !/^[\d\s,.-]+$/.test(heard)) lastAsked = heard;
+  // The Browser page's goal is what the user said last.
+  if (heard !== undefined && heard.trim() !== '' && heard !== lastBegun) {
+    lastBegun = heard;
+    browserRequest?.begin(heard);
+  }
   // Run with the user's own words attached: a verification code is typed only if they said it.
   const invocation = runWithUserWords(heard ?? '', () => tools.invoke(request.name as string, request.args as ToolArgs));
   const raced = await Promise.race([
@@ -210,6 +226,7 @@ export async function runLiveTool(
     }),
   ]);
   clearTimeout(timer);
+  browserRequest?.end();
   let result: ToolResult;
   if (raced === 'timeout') {
     // The step is still going (a slow page, say). Giving up on it would forget what the person asked for: it is handed to the task
@@ -323,7 +340,9 @@ async function runQuickCommand(
           say: result.spoken,
           next: question
             ? 'This is a question for the user. Ask it in your own words, wait for THEIR answer, then call quick_command again. Do not answer it yourself.'
-            : 'Say this to the user briefly, in your own words. Do not do it again.',
+            : result.intent === 'chat_live' && !result.ok
+              ? 'This says exactly what went wrong with the live chat and what the user has to do about it. Tell them in the same words as far as you can: do not shorten it to "the page was not clear" and do not add reasons of your own. Do not do it again yourself.'
+              : 'Say this to the user briefly, in your own words. Do not do it again.',
         },
       }),
     };
@@ -346,7 +365,12 @@ export function registerLiveBridge(deps: LiveBridgeDeps): void {
           (task) => deps.activity?.record({ request: task.request, tools: task.tools, urls: task.urls, ok: task.ok }),
         );
   ipcMain.handle(IpcChannels.liveConfig, (_evt, voice: unknown, recent: unknown) => buildLiveConfig(deps, voice, recent));
-  ipcMain.handle(IpcChannels.liveToolCall, (_evt, req: unknown) =>
-    runLiveTool(deps.tools, req, undefined, tracker, deps.quick, deps.activity, deps.context, deps.tasks),
-  );
+  ipcMain.handle(IpcChannels.liveToolCall, async (_evt, req: unknown) => {
+    const ended = deps.work?.begin();
+    try {
+      return await runLiveTool(deps.tools, req, undefined, tracker, deps.quick, deps.activity, deps.context, deps.tasks, deps.browserRequest);
+    } finally {
+      ended?.();
+    }
+  });
 }

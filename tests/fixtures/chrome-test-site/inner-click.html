@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Inner Click</title>
+  <style>
+    #row { cursor: pointer; border: 1px solid #888; width: 320px; padding: 0; }
+    #inner { display: block; padding: 24px; }
+    #out { margin-top: 16px; }
+  </style>
+</head>
+<body>
+  <h1>Inner click</h1>
+  <!-- A chat-list row the way a React app builds it: the pointer cursor is on the outer box, but only an INNER node (filling the row) listens. -->
+  <div id="row"><span id="inner">Open Anna</span></div>
+  <div id="out">nothing opened</div>
+  <script>
+    document.getElementById('inner').addEventListener('click', () => {
+      document.getElementById('out').textContent = 'opened: Anna';
+    });
+  </script>
+</body>
+</html>

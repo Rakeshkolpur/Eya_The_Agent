@@ -1,4 +1,4 @@
-import type { PromptGroup } from './prompts';
+import type { PromptGroup, PromptTopic } from './prompts';
 
 /**
  * Which tools (and which parts of the system prompt) a request needs.
@@ -12,6 +12,24 @@ export type ToolGroup = PromptGroup;
 
 export const TOOL_GROUPS: readonly ToolGroup[] = ['browser', 'chat', 'word', 'files', 'system', 'screen', 'memory', 'research'];
 
+/**
+ * Tools that are always available but lead straight into a group: once the model has used one, that group's tools and its part of the prompt are
+ * switched on for the rest of the request (a site that was found and opened is then clicked, read and filled in; it should not have to ask for those).
+ */
+export const PROMPT_TOPICS: readonly PromptTopic[] = ['ads', 'orders'];
+
+/** Tools that bring a topic's part of the prompt with them once used (playing a video is the moment the rules for adverts matter). */
+export const OPENS_TOPIC: Readonly<Record<string, PromptTopic>> = { play_on_youtube: 'ads', skip_ads: 'ads' };
+
+export const OPENS_GROUP: Readonly<Record<string, ToolGroup>> = { find_and_open_website: 'browser', download_from_site: 'browser' };
+
+/**
+ * Tools sent only while a topic is on: the YouTube player comes with the topic of adverts and videos (a request about a court's cause list does not
+ * carry about 1,700 characters of it on every step). A request about a song, a film or a video switches the topic on by its words, and any other can
+ * ask for it with load_tools.
+ */
+export const TOOL_TOPIC: Readonly<Record<string, PromptTopic>> = { play_on_youtube: 'ads', skip_ads: 'ads' };
+
 /** The group of each tool; a tool that is not listed is core (always sent), the safe default. A test makes every tool name appear here. */
 const GROUP_OF: Readonly<Record<string, ToolGroup | 'core'>> = {
   // core: opening, finding, reading, windows, clipboard, searching the web
@@ -22,6 +40,7 @@ const GROUP_OF: Readonly<Record<string, ToolGroup | 'core'>> = {
   close_application: 'core',
   close_file: 'core',
   download_file: 'core',
+  find_and_open_website: 'core',
   find_file: 'core',
   find_folder: 'core',
   list_windows: 'core',
@@ -42,6 +61,7 @@ const GROUP_OF: Readonly<Record<string, ToolGroup | 'core'>> = {
   inspect_page: 'browser',
   list_browser_tabs: 'browser',
   open_website: 'browser',
+  download_from_site: 'browser',
   read_page: 'browser',
   scroll_page: 'browser',
   switch_browser_tab: 'browser',
@@ -52,8 +72,11 @@ const GROUP_OF: Readonly<Record<string, ToolGroup | 'core'>> = {
   deep_research: 'research',
   // chat apps
   attach_file: 'chat',
+  share_file_to_chat: 'chat',
   communication_access_status: 'chat',
   find_chat: 'chat',
+  find_chat_files: 'chat',
+  live_chat: 'chat',
   learn_chat_names: 'chat',
   verify_sent: 'chat',
   // Microsoft Word
@@ -124,7 +147,7 @@ export function classifiedTools(): readonly string[] {
 const TRIGGERS: ReadonlyArray<readonly [ToolGroup, RegExp]> = [
   [
     'word',
-    /\b(ms\s*word|microsoft word|in word|word (file|document|doc)|docx?|petition|writ|affidavit|vakalat|annexure|index|page numbers?|table of contents|toc|paragraph|heading|bold|italic|underline|font|align(ed|ment)?|justify|spacing|margin|header|footer|list of events|synopsis|prayer|caveat|memo of parties|running index|going to page|go to page|page \d+|next page|previous page|the document|this document|my document)\b/,
+    /\b(ms\s*word|microsoft word|in word|word (file|document|doc)|docx?|petition|writ|affidavit|vakalat|annexure|page numbers?|table of contents|toc|list of events|synopsis|prayer|caveat|memo of parties|running index|the document|this document|my document)\b/,
   ],
   [
     'chat',
@@ -132,7 +155,7 @@ const TRIGGERS: ReadonlyArray<readonly [ToolGroup, RegExp]> = [
   ],
   [
     'browser',
-    /\b(website|web ?site|web ?page|site|browser|chrome|edge|firefox|brave|opera|tabs?|url|link|https?|www|google|youtube|gmail|amazon|flipkart|myntra|meesho|bookmyshow|irctc|redbus|makemytrip|goibibo|zomato|swiggy|order|book|booking|ticket|tickets|buy|purchase|cart|checkout|pay|login|log in|sign in|click|scroll|form|ecourts?|e-courts?|cause ?list|case status|high court|district court|supreme court|judg(e)?ment|online|\.com|\.in|\.org|\.net|\.gov)\b/,
+    /\b(website|web ?site|web ?page|site|browser|chrome|edge|firefox|brave|opera|tabs?|url|link|https?|www|google|youtube|gmail|amazon|flipkart|myntra|meesho|bookmyshow|irctc|redbus|makemytrip|goibibo|zomato|swiggy|order|book|booking|ticket|tickets|buy|purchase|cart|checkout|pay|login|log in|sign in|click|scroll|form|ecourts?|e-courts?|cause ?list|case status|high court|district court|supreme court|judg(e)?ment|online|download|visit|navigate|portal|news|price|prices|score|timetable|notification|admit card|hall ticket|application form|\.com|\.in|\.org|\.net|\.gov)\b/,
   ],
   [
     'files',
@@ -156,6 +179,14 @@ const TRIGGERS: ReadonlyArray<readonly [ToolGroup, RegExp]> = [
   ],
 ];
 
+/**
+ * Words that are about a Word document only when nothing says the request is about a website: "the main heading on the page", "the next page", "the
+ * font" are as often about a web page. (A request that names a website or an address and also says "heading" was sending all 28 Word tools, about 5,000
+ * tokens a step, for nothing.) When they do mean Word, the model switches it on with load_tools.
+ */
+const WEAK_WORD = /\b(index|paragraph|heading|bold|italic|underline|font|align(ed|ment)?|justify|spacing|margin|header|footer|going to page|go to page|page \d+|next page|previous page)\b/;
+const WEB_MARKER = /\b(website|web ?site|web ?page|site|browser|url|https?|www|online|\.com|\.in|\.org|\.net|\.gov)\b/;
+
 export interface RouteOptions {
   /** Tools the last turn or two used, so "now make it bold" or "yes" carries on in the same area. */
   readonly recentTools?: readonly string[];
@@ -166,6 +197,7 @@ export function routeGroups(requestText: string, options: RouteOptions = {}): Se
   const text = requestText.toLowerCase();
   const picked = new Set<ToolGroup>();
   for (const [group, pattern] of TRIGGERS) if (pattern.test(text)) picked.add(group);
+  if (!picked.has('word') && WEAK_WORD.test(text) && !WEB_MARKER.test(text)) picked.add('word');
   // Messaging goes through WhatsApp Web / Telegram Web, which is the browser.
   if (picked.has('chat')) picked.add('browser');
   // Playing a film or song, and opening what research found, happen in the browser.
@@ -185,6 +217,23 @@ export function routeGroups(requestText: string, options: RouteOptions = {}): Se
   return picked;
 }
 
+const TOPIC_TRIGGERS: ReadonlyArray<readonly [PromptTopic, RegExp]> = [
+  ['ads', /\b(ads?|adverts?|advertisements?|pop-?ups?|youtube|videos?|songs?|movies?|films?|music|play|watch|stream\w*|series|episodes?|trailers?|skip|cookies?|banner)\b/],
+  ['orders', /\b(order\w*|book\w*|tickets?|buy\w*|purchase\w*|cart|checkout|pay\w*|flipkart|amazon|myntra|meesho|zomato|swiggy|bookmyshow|irctc|redbus|makemytrip|goibibo|food|delivery|shop\w*)\b/],
+];
+
+/** Which parts of the browser guidance this request needs (see PromptTopic). Anything it turns out to need later is switched on with load_tools. */
+export function routeTopics(requestText: string, options: RouteOptions = {}): Set<PromptTopic> {
+  const text = requestText.toLowerCase();
+  const picked = new Set<PromptTopic>();
+  for (const [topic, pattern] of TOPIC_TRIGGERS) if (pattern.test(text)) picked.add(topic);
+  for (const name of options.recentTools ?? []) {
+    const topic = OPENS_TOPIC[name];
+    if (topic !== undefined) picked.add(topic);
+  }
+  return picked;
+}
+
 /**
  * What a model says when it believes it has no way to do something. While abilities are switched off this usually means "the tool I
  * need is one of them", so the engine switches everything on and asks again rather than telling the user "I can't".
@@ -194,9 +243,12 @@ export function soundsLikeRefusal(text: string): boolean {
 }
 
 /** What `load_tools` accepts: group names, "all", separated by commas, spaces or "and". Unknown words are returned apart. */
-export function parseGroups(raw: string): { readonly groups: ReadonlySet<ToolGroup>; readonly unknown: readonly string[] } {
+export function parseGroups(raw: string): { readonly groups: ReadonlySet<ToolGroup>; readonly topics: ReadonlySet<PromptTopic>; readonly unknown: readonly string[]; readonly pc: boolean } {
   const groups = new Set<ToolGroup>();
+  const topics = new Set<PromptTopic>();
   const unknown: string[] = [];
+  // ("pc": the tools about the PC itself, which a request that has settled into the browser had set aside: see browseFocus)
+  let pc = false;
   const words = raw
     .toLowerCase()
     .split(/[\s,;/&+]+|\band\b/)
@@ -205,6 +257,20 @@ export function parseGroups(raw: string): { readonly groups: ReadonlySet<ToolGro
   for (const w of words) {
     if (w === 'all' || w === 'everything') {
       for (const g of TOOL_GROUPS) groups.add(g);
+      for (const p of PROMPT_TOPICS) topics.add(p);
+      pc = true;
+      continue;
+    }
+    if (w === 'pc' || w === 'apps') {
+      pc = true;
+      continue;
+    }
+    if (w === 'ads' || w === 'ad' || w === 'adverts' || w === 'advert' || w === 'popups' || w === 'pop-ups' || w === 'popup') {
+      topics.add('ads');
+      continue;
+    }
+    if (w === 'orders' || w === 'order' || w === 'ordering' || w === 'booking' || w === 'shopping') {
+      topics.add('orders');
       continue;
     }
     const singular = w.endsWith('s') ? w.slice(0, -1) : w;
@@ -213,18 +279,74 @@ export function parseGroups(raw: string): { readonly groups: ReadonlySet<ToolGro
     else if (w === 'web' || w === 'website' || w === 'chrome') groups.add('browser');
     else if (w === 'message' || w === 'messaging' || w === 'whatsapp') groups.add('chat');
     else if (w === 'document' || w === 'msword') groups.add('word');
-    else if (w === 'pc' || w === 'windows') groups.add('system');
+    else if (w === 'windows') groups.add('system');
     else if (w === 'internet' || w === 'researcher' || w === 'deep_research' || w === 'movie' || w === 'media' || w === 'pdf') groups.add('research');
     else unknown.push(w);
   }
-  return { groups, unknown };
+  return { groups, topics, unknown, pc };
 }
 
-/** The tools to send: core always, the rest only when their group is switched on. */
-export function selectTools<T extends { readonly name: string }>(all: readonly T[], active: ReadonlySet<ToolGroup>): T[] {
+/**
+ * The tools about the PC itself: other applications, windows, finding and opening files and folders, the clipboard. They are core, so every request
+ * carries them, and a request that is plainly about a website does not need them on every step (about 7,000 characters of schemas and 4,000 of
+ * instructions, repeated at every one of up to sixteen steps). See `browseFocus`.
+ */
+export const PC_TOOLS: ReadonlySet<string> = new Set([
+  'clipboard_clear',
+  'clipboard_read',
+  'clipboard_write',
+  'close_application',
+  'close_file',
+  'find_file',
+  'find_folder',
+  'list_windows',
+  'open_application',
+  'open_file',
+  'open_folder',
+  'window_control',
+]);
+
+/** What a request about a website reads, finds and downloads uses these as well; a request that has used only them has not left the web. */
+const WEB_WORK_TOOLS: ReadonlySet<string> = new Set(['web_search', 'find_and_open_website', 'open_url', 'download_file', 'analyze_document', 'read_file']);
+
+/** Words that say a request is about something on the PC as well as the web (or about the PC only). */
+const PC_WORDS =
+  /\b(files?|folders?|director(?:y|ies)|pdfs?|docx?|documents?|spreadsheets?|excel|powerpoint|slides?|zip|downloads?|downloaded|desktop|pictures?|photos?|images?|videos?|screenshots?|clipboard|copy|paste|windows?|minimi[sz]e|maximi[sz]e|close|apps?|applications?|programs?|notepad|my pc|computer|laptop|resume|invoice)\b/i;
+
+export interface FocusInput {
+  readonly groups: ReadonlySet<ToolGroup>;
+  /** What the person asked. */
+  readonly text: string;
+  /** Every tool this request has used so far. */
+  readonly toolsUsed: readonly string[];
+  /** Whether any result so far named a file on the PC (a download that finished, a file that was found). */
+  readonly sawFile: boolean;
+  /** The model asked for the PC tools back (load_tools). */
+  readonly pcOn: boolean;
+}
+
+/**
+ * Whether the PC tools can be set aside for the next step. A request that has begun working in the browser, and has used nothing but the browser and
+ * the web, and is about nothing on the PC (its words, the groups it needs, and no file in sight), goes on without them: each step is then about a
+ * quarter smaller. The first step is never narrowed, so the model always chooses from everything; anything it needs afterwards it gets with
+ * load_tools (the instructions say so), and any file, any PC word or any other group of tools brings them straight back.
+ */
+export function browseFocus(input: FocusInput): boolean {
+  if (input.pcOn || input.sawFile || input.toolsUsed.length === 0) return false;
+  if (!input.groups.has('browser')) return false;
+  for (const g of input.groups) if (g !== 'browser' && g !== 'research') return false;
+  if (PC_WORDS.test(input.text)) return false;
+  return input.toolsUsed.every((name) => WEB_WORK_TOOLS.has(name) || ['browser', 'research'].includes(groupOfTool(name)));
+}
+
+/** The tools to send: core always, the rest only when their group is switched on (and, for the few that belong to a topic, the topic too). */
+export function selectTools<T extends { readonly name: string }>(all: readonly T[], active: ReadonlySet<ToolGroup>, topics?: ReadonlySet<PromptTopic>, focused = false): T[] {
   return all.filter((t) => {
     const g = groupOfTool(t.name);
-    return g === 'core' || active.has(g);
+    if (g !== 'core' && !active.has(g)) return false;
+    if (focused && PC_TOOLS.has(t.name)) return false;
+    const topic = TOOL_TOPIC[t.name];
+    return topic === undefined || topics === undefined || topics.has(topic);
   });
 }
 
@@ -233,11 +355,11 @@ export const LOAD_TOOLS_SPEC = {
   name: 'load_tools',
   description:
     'Switch on more abilities for this request. Call it when what the user asked needs something listed as switched off ' +
-    '(browser, chat, word, files, system, screen, memory), then carry on with the new tools. Costs nothing and is instant.',
+    '(browser, chat, word, files, system, screen, memory, pc, or the browser guidance ads, orders), then carry on with the new tools. Costs nothing and is instant.',
   parameters: {
     type: 'object' as const,
     properties: {
-      groups: { type: 'string', description: 'Which to switch on: one or more of browser, chat, word, files, system, screen, memory (comma separated), or "all".' },
+      groups: { type: 'string', description: 'Which to switch on: one or more of browser, chat, word, files, system, screen, memory, pc, ads, orders (comma separated), or "all".' },
     },
     required: ['groups'] as readonly string[],
   },

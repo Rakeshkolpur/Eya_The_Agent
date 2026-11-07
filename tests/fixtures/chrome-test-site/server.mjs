@@ -11,8 +11,48 @@ const here = dirname(fileURLToPath(import.meta.url));
 const TYPES = { '.html': 'text/html; charset=utf-8', '.txt': 'text/plain' };
 
 export function startTestSite(port = 0) {
+  // for the "r/" pages that behave differently the first time (a site with a hiccup)
+  const hits = { flaky: 0, slowOnce: 0 };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://localhost');
+    if (url.pathname.startsWith('/r/')) {
+      const page = (body, status = 200) => {
+        res.writeHead(status, { 'content-type': 'text/html; charset=utf-8' });
+        res.end(`<!doctype html><html><head><title>${body.title}</title></head><body>${body.html}</body></html>`);
+      };
+      switch (url.pathname) {
+        case '/r/redirect':
+          res.writeHead(302, { location: url.searchParams.get('to') ?? '/' });
+          return res.end();
+        case '/r/chain':
+          res.writeHead(302, { location: '/r/redirect?to=/r/landing' });
+          return res.end();
+        case '/r/landing':
+          return page({ title: 'Landing', html: '<h1>You landed here</h1><a href="/index.html">Home</a>' });
+        case '/r/loop':
+          res.writeHead(302, { location: '/r/loop' });
+          return res.end();
+        case '/r/status':
+          return page({ title: 'Status', html: '<h1>Status page</h1><p>Not what you wanted.</p>' }, Number(url.searchParams.get('code') ?? 500));
+        case '/r/flaky': // the first visit fails, the next works
+          hits.flaky += 1;
+          return hits.flaky === 1 ? page({ title: 'Error', html: '<h1>503</h1>' }, 503) : page({ title: 'Recovered', html: '<h1>It works now</h1><a href="/index.html">Home</a>' });
+        case '/r/slow-once': // the first visit hangs, the next is quick
+          hits.slowOnce += 1;
+          if (hits.slowOnce === 1) return setTimeout(() => page({ title: 'Late', html: '<h1>Too late</h1>' }), 6000);
+          return page({ title: 'Quick now', html: '<h1>Quick now</h1><a href="/index.html">Home</a>' });
+        case '/r/hang':
+          return undefined; // never answers
+        case '/r/dynamic': // blank at first, filled in by a script
+          return page({ title: 'Dynamic', html: '<div id="app"></div><script>setTimeout(() => { document.getElementById("app").innerHTML = "<h1>Records</h1><a href=\\"/index.html\\">First record</a><button>Download list</button>"; }, 1500);</script>' });
+        case '/r/numeric':
+          return page({ title: 'Registration', html: '<h1>Registration</h1><form onsubmit="event.preventDefault(); document.getElementById(\'out\').textContent = \'Saved age \' + document.getElementById(\'age\').value + \' ref \' + document.getElementById(\'ref\').value;"><label>Age <input id="age" name="age" type="number" aria-label="Age"></label><label>Reference number <input id="ref" name="ref" type="text" inputmode="numeric" aria-label="Reference number"></label><button type="submit">Save</button></form><p id="out"></p>' });
+        case '/r/portal': // a page that has no "Reports" anywhere
+          return page({ title: 'Portal home', html: '<h1>Citizen portal</h1><nav><a href="/r/landing">Notices</a> <a href="/r/status?code=200">Services</a></nav><button>Help</button>' });
+        default:
+          return page({ title: 'Not found', html: '<h1>404</h1>' }, 404);
+      }
+    }
     if (url.pathname === '/report.txt') {
       res.writeHead(200, { 'content-type': 'text/plain', 'content-disposition': 'attachment; filename="eya-test-report.txt"' });
       res.end('eya test download\n');

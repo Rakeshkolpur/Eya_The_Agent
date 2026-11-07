@@ -84,9 +84,9 @@ describe('analyze_document', () => {
   });
 
   it('is honest about what it cannot read', async () => {
-    const word = await tool().execute({ path: join(folders.downloads, 'letter.docx'), question: 'Summarize' });
-    expect(word.ok).toBe(false);
-    expect(word.error).toMatch(/PDFs, images and text/);
+    const sheet = await tool().execute({ path: join(folders.downloads, 'budget.xlsx'), question: 'Summarize' });
+    expect(sheet.ok).toBe(false);
+    expect(sheet.error).toContain('pictures, PDFs, Word (.docx) and text files, audio and video');
     expect(calls).toEqual([]);
   });
 
@@ -225,7 +225,10 @@ describe('mimeTypeFor', () => {
   it('maps supported types only', () => {
     expect(mimeTypeFor('a.PDF')).toBe('application/pdf');
     expect(mimeTypeFor('a.jpeg')).toBe('image/jpeg');
-    expect(mimeTypeFor('a.docx')).toBeUndefined();
+    expect(mimeTypeFor('a.docx')).toContain('wordprocessingml');
+    expect(mimeTypeFor('a.mp3')).toBe('audio/mp3');
+    expect(mimeTypeFor('a.mp4')).toBe('video/mp4');
+    expect(mimeTypeFor('a.xlsx')).toBeUndefined();
     expect(mimeTypeFor('a.exe')).toBeUndefined();
   });
 });

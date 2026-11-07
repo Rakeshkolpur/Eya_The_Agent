@@ -3,23 +3,33 @@ import { realIo } from '@main/privacy/communicationAccessStore';
 import type { StoreIo } from '@main/privacy/communicationAccessStore';
 import type { AppSettings } from '@shared/ipcContract';
 import { parsePerformanceSetting } from '@shared/performance';
+import { DEFAULT_LANGUAGE, isEyaLanguage } from '@shared/language';
+import { DEFAULT_LOCAL_MODEL, isModelName } from '@shared/localAi';
+import { countryContext, DEFAULT_COUNTRY } from '@main/chat/phoneNumbers';
 import type { Point } from '@main/windows/geometry';
 
 const log = rootLogger.child('settings');
 
-export const DEFAULT_APP_SETTINGS: AppSettings = { showBubble: true, tapToTalk: true, keepHistory: true, performance: 'auto', aiFirst: 'auto' };
+export const DEFAULT_APP_SETTINGS: AppSettings = { showBubble: true, tapToTalk: true, keepHistory: true, keepChats: true, autoScreenLook: true, multiLiveChats: true, performance: 'auto', aiFirst: 'auto', localModel: DEFAULT_LOCAL_MODEL, language: DEFAULT_LANGUAGE, browser: 'eya', country: DEFAULT_COUNTRY.region };
 
 /** Reads saved settings. Anything that is missing, the wrong type or not an object falls back to its default. */
 export function parseAppSettings(raw: unknown): AppSettings {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return DEFAULT_APP_SETTINGS;
   const r = raw as Record<string, unknown>;
-  const flag = (key: 'showBubble' | 'tapToTalk' | 'keepHistory'): boolean => (typeof r[key] === 'boolean' ? (r[key] as boolean) : DEFAULT_APP_SETTINGS[key]);
+  const flag = (key: 'showBubble' | 'tapToTalk' | 'keepHistory' | 'keepChats' | 'autoScreenLook' | 'multiLiveChats'): boolean => (typeof r[key] === 'boolean' ? (r[key] as boolean) : DEFAULT_APP_SETTINGS[key]);
   return {
     showBubble: flag('showBubble'),
     tapToTalk: flag('tapToTalk'),
     keepHistory: flag('keepHistory'),
+    keepChats: flag('keepChats'),
+    autoScreenLook: flag('autoScreenLook'),
+    multiLiveChats: flag('multiLiveChats'),
     performance: parsePerformanceSetting(r['performance']),
-    aiFirst: r['aiFirst'] === 'backup' ? 'backup' : 'auto',
+    aiFirst: r['aiFirst'] === 'backup' || r['aiFirst'] === 'local' || r['aiFirst'] === 'local-only' ? r['aiFirst'] : 'auto',
+    localModel: isModelName(r['localModel']) ? r['localModel'] : DEFAULT_LOCAL_MODEL,
+    language: isEyaLanguage(r['language']) ? r['language'] : DEFAULT_LANGUAGE,
+    browser: r['browser'] === 'mine' ? 'mine' : 'eya',
+    country: countryContext(typeof r['country'] === 'string' ? r['country'] : undefined).region,
   };
 }
 

@@ -3,6 +3,8 @@ import { VOICE_OPTIONS } from '../../shared/constants';
 import { OPENAI_VOICES } from '../../shared/openaiVoice';
 import { BACKUP_AI_PRESETS, backupPreset, isBackupAiProvider, providerFromKey } from '../../shared/backupAi';
 import { shortModel } from '../../shared/aiRoute';
+import { COUNTRY_OPTIONS } from '../../shared/country';
+import { LANGUAGE_OPTIONS, isEyaLanguage } from '../../shared/language';
 import type { BackupAiProvider } from '../../shared/backupAi';
 import { CommunicationBox } from '../AssistantPanel';
 import type { EyaControl } from '../control';
@@ -10,14 +12,17 @@ import { Icon } from '../ui/icons';
 import type { IconName } from '../ui/icons';
 import { SettingRow, Toggle } from '../ui/widgets';
 import { AiPicker } from '../ui/AiPicker';
+import { GeminiKeysCard } from './GeminiKeysCard';
+import { LocalAiCard } from './LocalAiCard';
 import { TIER_LABEL, TIER_SUMMARY } from '../../shared/performance';
 import type { PerformanceSetting } from '../../shared/performance';
 
-export type Section = 'general' | 'voice' | 'gemini' | 'openai' | 'backup' | 'writing' | 'performance' | 'privacy' | 'about';
+export type Section = 'general' | 'voice' | 'gemini' | 'local' | 'openai' | 'backup' | 'writing' | 'performance' | 'privacy' | 'about';
 const SECTIONS: ReadonlyArray<{ id: Section; label: string; icon: IconName }> = [
   { id: 'general', label: 'General', icon: 'settings' },
   { id: 'voice', label: 'Voice & Wake Word', icon: 'mic' },
-  { id: 'gemini', label: 'Gemini key', icon: 'lock' },
+  { id: 'gemini', label: 'Gemini keys', icon: 'lock' },
+  { id: 'local', label: 'Local AI (Ollama)', icon: 'memory' },
   { id: 'openai', label: 'ChatGPT (OpenAI)', icon: 'bolt' },
   { id: 'backup', label: 'Backup AI', icon: 'bolt' },
   { id: 'writing', label: 'Writing Watch', icon: 'eye' },
@@ -38,6 +43,7 @@ function aiName(name: string): string {
 export function SettingsPage({ c, startOn }: { c: EyaControl; startOn?: Section }): React.ReactElement {
   const [section, setSection] = useState<Section>(startOn ?? 'general');
   const [sure, setSure] = useState(false);
+  const [sureChats, setSureChats] = useState(false);
   const [keyText, setKeyText] = useState('');
   const [keyNote, setKeyNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [keyBusy, setKeyBusy] = useState(false);
@@ -83,6 +89,36 @@ export function SettingsPage({ c, startOn }: { c: EyaControl; startOn?: Section 
             </SettingRow>
             <SettingRow name="Click the bubble to talk" desc="Start a live conversation as soon as you click the bubble, like tapping a phone assistant. Off: it just opens the box to type in.">
               <Toggle on={s?.tapToTalk ?? true} label="Click the bubble to talk" onChange={(on) => c.changeSettings({ tapToTalk: on })} />
+            </SettingRow>
+            <SettingRow name="Browser Eya uses" desc="Eya Browser is Eya's own browser (its own sign-ins that stay; you can watch it on the Browser page). My Browser is your own Chrome or Edge, used only when you connect it. You can also just say 'use my Chrome' for one task.">
+              <select className="ask-input" aria-label="Browser Eya uses" value={s?.browser ?? 'eya'} onChange={(e) => c.changeSettings({ browser: e.target.value === 'mine' ? 'mine' : 'eya' })}>
+                <option value="eya">Eya Browser (default)</option>
+                <option value="mine">My Browser</option>
+              </select>
+            </SettingRow>
+            <SettingRow name="Look at the screen by herself" desc="When Eya cannot find a button on a page in your own Chrome or Edge (a Buy or Place order button that the page does not mark as a button), she looks at that browser window herself, without asking, and goes on. The picture is read by Gemini and never saved, and she says each time that she looked. Turn it off and she will ask first.">
+              <Toggle on={s?.autoScreenLook ?? true} label="Look at the screen by herself" onChange={(on) => c.changeSettings({ autoScreenLook: on })} />
+            </SettingRow>
+            <SettingRow name="Several live chats at once" desc="Eya can keep more than one live chat going (up to five). WhatsApp shows one chat at a time, so she looks after them in turn: the one in front answers at once, and the others wait a short while for their turn. Turn it off and only one live chat runs at a time.">
+              <Toggle on={s?.multiLiveChats ?? true} label="Several live chats at once" onChange={(on) => c.changeSettings({ multiLiveChats: on })} />
+            </SettingRow>
+            <SettingRow name="Language Eya answers in" desc="Every AI is told to answer in this language and not to change it by itself. Choose 'Same language as I speak' if you mix languages. Applies from your next question or conversation.">
+              <select className="ask-input" aria-label="Language Eya answers in" value={s?.language ?? 'english'} onChange={(e) => isEyaLanguage(e.target.value) && c.changeSettings({ language: e.target.value })}>
+                {LANGUAGE_OPTIONS.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </SettingRow>
+            <SettingRow name="Country of my phone numbers" desc="A phone number you say without its country code (like 9361113900) is read as a number of this country. A number said with its code (+44 …) is always read as it is. Eya never adds a code to a number that is not valid here.">
+              <select className="ask-input" aria-label="Country of my phone numbers" value={s?.country ?? 'IN'} onChange={(e) => c.changeSettings({ country: e.target.value })}>
+                {COUNTRY_OPTIONS.map((o) => (
+                  <option key={o.code} value={o.code}>
+                    {o.name}
+                  </option>
+                ))}
+              </select>
             </SettingRow>
             <SettingRow
               name="Start with Windows"
@@ -150,6 +186,25 @@ export function SettingsPage({ c, startOn }: { c: EyaControl; startOn?: Section 
                 </button>
               )}
             </SettingRow>
+            <SettingRow name="Keep my chats" desc="Your conversations stay on this PC so you can open them again from the sidebar. Turn it off and new conversations are not saved (the ones already kept stay until you delete them).">
+              <Toggle on={s?.keepChats ?? true} label="Keep my chats" onChange={(on) => c.changeSettings({ keepChats: on })} />
+            </SettingRow>
+            <SettingRow name="Delete all chats" desc={`${c.chats.items.length} chat${c.chats.items.length === 1 ? '' : 's'} kept right now. This cannot be undone.`}>
+              {sureChats ? (
+                <>
+                  <button type="button" className="btn danger" onClick={() => { c.chats.clearChats(); setSureChats(false); }}>
+                    Yes, delete them all
+                  </button>
+                  <button type="button" className="btn" onClick={() => setSureChats(false)}>
+                    Keep
+                  </button>
+                </>
+              ) : (
+                <button type="button" className="btn" onClick={() => setSureChats(true)} disabled={c.chats.items.length === 0 || c.chats.busy}>
+                  Delete
+                </button>
+              )}
+            </SettingRow>
             <div className="set-note">
               <Icon name="lock" size={15} />
               <span>
@@ -160,7 +215,7 @@ export function SettingsPage({ c, startOn }: { c: EyaControl; startOn?: Section 
         )}
         {section === 'gemini' && (
           <>
-            <h2>Gemini key</h2>
+            <h2>Gemini keys</h2>
             <div className="set-note">
               <Icon name="info" size={15} />
               <span>
@@ -246,6 +301,8 @@ export function SettingsPage({ c, startOn }: { c: EyaControl; startOn?: Section 
             )}
           </>
         )}
+        {section === 'gemini' && <GeminiKeysCard c={c} />}
+        {section === 'local' && <LocalAiCard c={c} />}
         {section === 'openai' && (() => {
           const entry = backups.find((b) => b.id === 'openai');
           const isMain = c.voiceEngine === 'openai';

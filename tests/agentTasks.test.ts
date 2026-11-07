@@ -106,7 +106,7 @@ describe('what a request that did not finish tells the task completer', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-10-16T10:00:00Z'));
     const slow = (): AICompletion => {
-      vi.setSystemTime(Date.now() + 100_000); // the next step starts after the 90 s budget
+      vi.setSystemTime(Date.now() + 200_000); // the next step starts after the budget a website task is given (3 minutes)
       return step([call('open_website', { url: 'https://web.whatsapp.com/' })]);
     };
     const r = await run(engine(new Scripted([slow, say('unreachable')])), 'open whatsapp and send the file');
@@ -114,6 +114,19 @@ describe('what a request that did not finish tells the task completer', () => {
     expect(r.pending).toMatchObject({ kind: 'retry', why: 'it is taking a while', retryAfterMs: 20_000 });
     expect(r.pending?.steps).toEqual(['open_website https://web.whatsapp.com/']);
     expect(r.spoken).toBe("That's taking a while. I'll keep going in the background and tell you as soon as it's done.");
+  });
+
+  it('a website task is given longer than a chat answer: finding the site and then doing the task on it is more than a quick reply', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-16T10:00:00Z'));
+    const slowSite = (): AICompletion => {
+      vi.setSystemTime(Date.now() + 100_000); // past the 90 s a plain request gets, inside the 3 minutes of a website task
+      return step([call('open_website', { url: 'https://example.org/' })]);
+    };
+    const r = await run(engine(new Scripted([slowSite, say('Opened it and found the report.')])), 'open the reports site and find the annual report');
+    expect(r.ok).toBe(true);
+    expect(r.pending).toBeUndefined();
+    expect(r.spoken).toBe('Opened it and found the report.');
   });
 
   it('a CAPTCHA the model reports is kept as waiting for the person, with the browser watched and what was done so far', async () => {

@@ -64,6 +64,8 @@ export type SensitiveAction =
   | 'window_control'
   | 'communication_access_status'
   | 'find_chat'
+  | 'find_chat_files'
+  | 'live_chat'
   | 'verify_sent'
   | 'zip_folder'
   | 'find_folder'
@@ -147,6 +149,10 @@ const RISK_LEVELS: Readonly<Record<SensitiveAction, RiskLevel>> = {
   communication_access_status: 'safe',
   // Finding and opening a chat, and checking afterwards that something went, send nothing. Making a .zip of a folder adds a new file in the temp folder and removes nothing.
   find_chat: 'safe',
+  // Reads WhatsApp's own list of documents (names, senders, dates) and may open the chat at one file's message: nothing is sent, changed or deleted.
+  find_chat_files: 'safe',
+  // Starts, pauses or stops watching one chat and drafting replies. It cannot approve or send a reply or switch automatic replies on (only the Live chat page can).
+  live_chat: 'safe',
   verify_sent: 'safe',
   zip_folder: 'safe',
   find_folder: 'safe',

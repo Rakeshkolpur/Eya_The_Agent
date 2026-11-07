@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Escape</title>
+</head>
+<body>
+  <h1>Escape closes the chat</h1>
+  <div id="chat">chat is open</div>
+  <div id="keys">no other key</div>
+  <script>
+    // Like a chat app: Escape closes the open chat. Any other key is noted (so a test can show none was sent).
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') document.getElementById('chat').remove();
+      else document.getElementById('keys').textContent = 'key: ' + e.key;
+    });
+  </script>
+</body>
+</html>

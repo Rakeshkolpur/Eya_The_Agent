@@ -1,7 +1,9 @@
 import { rootLogger } from '@main/logging/logger';
 import type { AgentResult } from '@shared/types';
-import type { TaskAction, TaskState, TaskView, TasksSnapshot } from '@shared/tasks';
+import type { DoneCall, TaskAction, TaskEntity, TaskPhase, TaskState, TaskView, TasksSnapshot } from '@shared/tasks';
+import { TIME_RETRY_WHY } from '@shared/tasks';
 import type { StoredTask, TaskStore } from './TaskStore';
+import { mergeDone, mergeSteps } from './ledger';
 
 const log = rootLogger.child('tasks');
 
@@ -23,6 +25,8 @@ export interface CompleterDeps {
   /** Watches the person's browser while they do something there; true once what they were doing has changed (they finished). */
   readonly watchBrowser?: (timeoutMs: number) => Promise<boolean>;
   readonly now?: () => number;
+  /** Ends a request that is being worked on, at once (the task it belongs to was stopped). */
+  readonly stopRequest?: (requestId: string) => void;
   /** Called after any change, to refresh what the pages show. */
   readonly onChange?: () => void;
   readonly newId?: () => string;
@@ -39,6 +43,8 @@ export interface CompleterDeps {
 }
 
 const MINUTE = 60_000;
+/** How many runs the clock may cut short before a task is not carried on again (see settle). */
+const MAX_TIMED_OUT_RUNS = 3;
 const DEFAULTS = { maxAttempts: 8, keepMs: 6 * 60 * MINUTE, resumeWithinMs: 30 * MINUTE, notifyAfterMs: 20_000, tickMs: 5_000 };
 const FINISHED_KEPT = 30;
 const FINISHED_VISIBLE = 12;
@@ -56,6 +62,27 @@ export function backoffMs(attempts: number): number {
 }
 
 const isOpen = (s: TaskState): boolean => s === 'running' || s === 'waiting' || s === 'needs_you';
+
+/** What the evidence of a send that was begun starts with: a plugin task that closed after this was seen is said to be uncertain. */
+export const SEND_PRESSED = 'Send was pressed';
+
+/** The state a task shows for a plugin phase: the person's list knows six states; a plugin task has ten phases. */
+export function pluginTaskState(phase: TaskPhase): TaskState {
+  switch (phase) {
+    case 'completed':
+      return 'done';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    case 'waiting_clarification':
+    case 'waiting_permission':
+    case 'uncertain':
+      return 'needs_you';
+    default:
+      return 'running';
+  }
+}
 
 /**
  * Keeps what the person asked for until it is done.
@@ -101,6 +128,50 @@ export class TaskCompleter {
   stop(): void {
     if (this.timer !== null) clearInterval(this.timer);
     this.timer = null;
+    // (the progress of a task still going is written a moment after it is made: closing must not lose it)
+    this.deps.store.flush();
+  }
+
+  // ------------------------------------------------------------------------------------------------------------ progress of a running request
+  private readonly linked = new Map<string, string>();
+  private readonly latest = new Map<string, { readonly steps: readonly string[]; readonly done: readonly DoneCall[] }>();
+
+  /** The request with this id is the task with this id (the task is made a few seconds after the request starts). */
+  link(requestId: string, taskId: string): void {
+    this.linked.set(requestId, taskId);
+    const progress = this.latest.get(requestId);
+    if (progress !== undefined) this.record(taskId, progress);
+  }
+
+  /**
+   * A request has done something that cannot be done twice (or finished a step): keep that with its task at once, so that if Eya is closed or the
+   * request is cut off, carrying on starts from there. Written a moment later, not on every step.
+   */
+  checkpoint(requestId: string, progress: { readonly steps: readonly string[]; readonly done: readonly DoneCall[] }): void {
+    this.latest.set(requestId, progress);
+    const taskId = this.linked.get(requestId);
+    if (taskId !== undefined) this.record(taskId, progress);
+  }
+
+  /** Whether the person has stopped the task this request belongs to (so the request does not go on with its steps). */
+  wasStopped(requestId: string): boolean {
+    const taskId = this.linked.get(requestId);
+    return taskId !== undefined && this.find(taskId)?.state === 'cancelled';
+  }
+
+  /** The request is over: its progress is in the task (or it never was one). */
+  forget(requestId: string): void {
+    this.linked.delete(requestId);
+    this.latest.delete(requestId);
+  }
+
+  private record(taskId: string, progress: { readonly steps: readonly string[]; readonly done: readonly DoneCall[] }): void {
+    const task = this.find(taskId);
+    if (task === undefined) return;
+    const steps = mergeSteps(task.steps, progress.steps);
+    const done = mergeDone(task.done, progress.done);
+    this.tasks = this.tasks.map((t) => (t.id === taskId ? { ...t, steps, ...(done.length > 0 ? { done } : {}) } : t));
+    this.deps.store.saveSoon(this.tasks);
   }
 
   /** Tasks that were running when Eya closed were cut off: carry on with the recent ones, and leave the old ones for the person to say. */
@@ -108,6 +179,16 @@ export class TaskCompleter {
     const now = this.clock();
     this.tasks = this.tasks.map((t) => {
       if (t.state !== 'running') return t;
+      // A task done through a plugin is NEVER carried on by itself: running it again is how a message would go twice. If the Send had been pressed, it may
+      // already have gone, and the person is told so; asking again makes Eya look in the chat first.
+      if (t.plugin !== undefined) {
+        const pressed = t.plugin.evidence.some((e) => e.what.startsWith(SEND_PRESSED));
+        const phase: TaskPhase = pressed ? 'uncertain' : 'failed';
+        const note = pressed
+          ? 'Eya closed while this was being sent, so it may already have gone. Look in the chat. If you ask again, Eya looks there first and will not send it twice.'
+          : 'Eya closed before anything was sent. Ask again if you still want it.';
+        return { ...t, state: pressed ? ('needs_you' as const) : ('failed' as const), note, updatedAt: now, asks: false, plugin: { ...t.plugin, phase, evidence: [...t.plugin.evidence, { at: now, what: 'Eya closed before this was checked' }].slice(-20) } };
+      }
       if (now - t.updatedAt <= this.cfg.resumeWithinMs) {
         return { ...t, state: 'waiting' as const, retryAt: now + 3_000, note: 'Carrying on after Eya started again.', updatedAt: now };
       }
@@ -194,13 +275,20 @@ export class TaskCompleter {
       this.trim();
       return;
     }
-    const steps = [...task.steps, ...(signal?.steps ?? [])].slice(-20);
+    const steps = mergeSteps(task.steps, signal?.steps);
+    const done = mergeDone(task.done, signal?.done);
     const took = options.elapsedMs ?? now - task.createdAt;
     const worth = took >= this.cfg.notifyAfterMs || task.attempts > 1 || options.announce === true;
 
     if (signal?.kind === 'retry') {
       if (task.attempts >= this.cfg.maxAttempts) {
         this.finishAs(id, 'failed', `I tried ${task.attempts} times and could not finish this (${signal.why}).`, { steps, notify: true });
+        return;
+      }
+      // A run cut short by the clock is carried on, but each carrying on is a whole new run of the steps (up to sixteen AI calls of about 12,000 tokens
+      // each): one that got no further than the one before it, or the third of them, is not started again. The person is told, and what was done is kept.
+      if (signal.why === TIME_RETRY_WHY && (task.attempts >= MAX_TIMED_OUT_RUNS || (task.attempts >= 2 && steps.length <= (task.steps?.length ?? 0)))) {
+        this.finishAs(id, 'failed', `I tried ${task.attempts} times and the page was not getting me any further, so I stopped instead of going round again. Tell me which page to look at or what to click, or ask me again later.`, { steps, notify: true });
         return;
       }
       const first = task.told !== true;
@@ -210,6 +298,7 @@ export class TaskCompleter {
         retryAt: now + (signal.retryAfterMs ?? backoffMs(t.attempts)),
         note: signal.why,
         steps,
+        ...(done.length > 0 ? { done } : {}),
         updatedAt: now,
         told: true,
       }));
@@ -227,6 +316,7 @@ export class TaskCompleter {
         state: 'needs_you',
         note,
         steps,
+        ...(done.length > 0 ? { done } : {}),
         updatedAt: now,
         asks: signal.asks === true,
         ...(signal.watch !== undefined ? { watch: signal.watch } : {}),
@@ -263,6 +353,90 @@ export class TaskCompleter {
     for (const id of ids) this.finishAs(id, 'done', 'Answered.', { steps: this.find(id)?.steps ?? [], notify: false });
   }
 
+  // ------------------------------------------------------------------------------------------------------------ tasks done through a plugin
+  /** Whether a task done through a plugin has begun since this moment (so the request that began it is not also listed a second time). */
+  hasPluginTaskSince(at: number): boolean {
+    return this.tasks.some((t) => t.plugin !== undefined && t.createdAt >= at);
+  }
+
+  private findPlugin(key: string): StoredTask | undefined {
+    return this.tasks.find((t) => t.plugin?.key === key);
+  }
+
+  /**
+   * A task is begun through a plugin: what it is, in words that hold no message and no whole number. It is kept from here on — what it settled on, what was
+   * seen to happen, and where it stands — so that nothing is repeated on a guess and a restart cannot make a send look like it never happened.
+   */
+  beginPlugin(info: { readonly key: string; readonly plugin: string; readonly action: string; readonly title: string }): void {
+    if (this.findPlugin(info.key) !== undefined) return;
+    // An older task of the same kind that was still waiting for the person (a choice, a yes, a permission) is over: they have asked for something else.
+    for (const older of this.tasks.filter((t) => isOpen(t.state) && t.plugin?.plugin === info.plugin && t.plugin.action === info.action && (t.plugin.phase === 'waiting_clarification' || t.plugin.phase === 'waiting_permission'))) {
+      this.cancelOne(older, 'Replaced by a newer request.');
+    }
+    const now = this.clock();
+    const task: StoredTask = {
+      id: this.deps.newId?.() ?? `t${now.toString(36)}${(this.counter += 1).toString(36)}`,
+      request: info.title.slice(0, 200),
+      source: 'text',
+      state: 'running',
+      createdAt: now,
+      updatedAt: now,
+      attempts: 1,
+      note: 'Received.',
+      steps: [],
+      plugin: { key: info.key, plugin: info.plugin, action: info.action, phase: 'received', entities: [], evidence: [], retries: 0 },
+    };
+    this.tasks = [task, ...this.tasks];
+    this.trim();
+    this.changed();
+  }
+
+  /** One step of a plugin task: where it is now, who it is for, what was seen, what is being asked. Written at once (a crash must not lose it). */
+  pluginUpdate(key: string, change: { readonly phase?: TaskPhase; readonly title?: string; readonly note?: string; readonly entity?: TaskEntity; readonly evidence?: string; readonly question?: string | null; readonly retries?: number }): void {
+    const task = this.findPlugin(key);
+    if (task === undefined || task.plugin === undefined) return;
+    const info = task.plugin;
+    const now = this.clock();
+    const over = task.state === 'done' || task.state === 'failed' || task.state === 'cancelled';
+    const phase = over || change.phase === undefined ? info.phase : change.phase;
+    const entities = change.entity === undefined ? info.entities : [...info.entities.filter((e) => e.kind !== change.entity?.kind), change.entity];
+    const evidence = change.evidence === undefined ? info.evidence : [...info.evidence, { at: now, what: change.evidence.slice(0, 160) }].slice(-20);
+    const question = change.question === undefined ? info.question : change.question === null ? undefined : change.question;
+    const { question: _q, ...rest } = info;
+    void _q;
+    this.patch(task.id, (t) => ({
+      ...t,
+      request: change.title !== undefined ? change.title.slice(0, 200) : t.request,
+      state: over ? t.state : pluginTaskState(phase),
+      note: change.note !== undefined ? short(change.note, 300) : t.note,
+      updatedAt: now,
+      asks: !over && phase === 'waiting_clarification',
+      plugin: { ...rest, phase, entities, evidence, retries: change.retries ?? info.retries, ...(question !== undefined ? { question } : {}) },
+    }));
+  }
+
+  /** A plugin task ended: done, failed, stopped, or UNCERTAIN (something outside Eya may or may not have happened — the person is told, and nothing is repeated). */
+  pluginFinish(key: string, outcome: 'completed' | 'failed' | 'cancelled' | 'uncertain', note: string): void {
+    const task = this.findPlugin(key);
+    if (task === undefined || task.plugin === undefined) return;
+    const info = task.plugin;
+    const now = this.clock();
+    // A task the person stopped that went through anyway is said to have: the record never claims it did not happen.
+    const late = task.state === 'cancelled' && outcome === 'completed';
+    const finalNote = late ? 'You stopped this, but it had already gone through.' : note;
+    const state = pluginTaskState(outcome);
+    const { question: _q, ...rest } = info;
+    void _q;
+    this.patch(task.id, (t) => {
+      const { retryAt: _r, watch: _w, ...kept } = t;
+      void _r;
+      void _w;
+      return { ...kept, state: late ? 'done' : state, note: short(finalNote, 300), updatedAt: now, asks: false, told: true, plugin: { ...rest, phase: outcome } };
+    });
+    this.trim();
+    if (outcome === 'uncertain') this.notice('needs_you', "Eya isn't sure it was sent", `${short(task.request)} — look in the chat; Eya will not send it again without checking.`, task.id);
+  }
+
   // ------------------------------------------------------------------------------------------------------------ the person's say
   /** Stops a task, or with no id the most recent open one. Returns how many were stopped. */
   cancel(id?: string): number {
@@ -278,11 +452,13 @@ export class TaskCompleter {
   }
 
   private cancelOne(t: StoredTask, note = 'You stopped this.'): void {
+    // (the request behind the task, if one is being worked on, is ended on the spot: not at its next step)
+    for (const [requestId, taskId] of this.linked) if (taskId === t.id) this.deps.stopRequest?.(requestId);
     this.patch(t.id, (x) => {
       const { retryAt: _r, watch: _w, ...rest } = x;
       void _r;
       void _w;
-      return { ...rest, state: 'cancelled', note, updatedAt: this.clock(), asks: false };
+      return { ...rest, state: 'cancelled', note, updatedAt: this.clock(), asks: false, ...(rest.plugin !== undefined ? { plugin: { ...rest.plugin, phase: 'cancelled' as const } } : {}) };
     });
     this.trim();
   }
@@ -290,7 +466,8 @@ export class TaskCompleter {
   /** Tries a task that is waiting, or that was left for the person, again right away. */
   resume(id: string): boolean {
     const t = this.find(id);
-    if (t === undefined || (t.state !== 'needs_you' && t.state !== 'waiting' && t.state !== 'failed' && t.state !== 'cancelled')) return false;
+    // (a plugin task is not run again from here: what it sent, or may have sent, is looked at first when the person asks again)
+    if (t === undefined || t.plugin !== undefined || (t.state !== 'needs_you' && t.state !== 'waiting' && t.state !== 'failed' && t.state !== 'cancelled')) return false;
     this.patch(id, (x) => {
       const { watch: _w, ...rest } = x;
       void _w;
@@ -341,6 +518,10 @@ export class TaskCompleter {
       attempts: t.attempts,
       retryAt: t.retryAt ?? null,
       asks: t.asks === true,
+      plugin:
+        t.plugin === undefined
+          ? null
+          : { id: t.plugin.plugin, action: t.plugin.action, phase: t.plugin.phase, entities: t.plugin.entities, evidence: t.plugin.evidence.map((e) => e.what) },
     });
     return { items: [...open, ...finished].map(view), open: open.length };
   }
@@ -356,7 +537,7 @@ export class TaskCompleter {
     for (const t of this.tasks.filter((x) => x.state === 'needs_you' && x.watch === 'browser' && !this.watching.has(x.id))) void this.watch(t.id);
     if (this.working) return;
     const due = this.tasks
-      .filter((t) => t.state === 'waiting' && (t.retryAt ?? 0) <= now)
+      .filter((t) => t.plugin === undefined && t.state === 'waiting' && (t.retryAt ?? 0) <= now)
       .sort((a, b) => (a.retryAt ?? 0) - (b.retryAt ?? 0))[0];
     if (due === undefined) return;
     this.working = true;

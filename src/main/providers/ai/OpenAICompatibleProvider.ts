@@ -1,5 +1,7 @@
 import { rootLogger } from '@main/logging/logger';
-import type { AIChatMessage, AICompletion, AIProvider, AIToolCall, AIToolSpec } from './AIProvider';
+import { recordTokens } from './tokenMeter';
+import { StoppedError, wasAborted } from '@main/agent/stopping';
+import type { AIChatMessage, AICompletion, AIProvider, AIToolCall, AIToolSpec, CompleteOptions } from './AIProvider';
 import { CREDIT_PATTERN } from './failure';
 
 const log = rootLogger.child('ai.backup');
@@ -41,8 +43,8 @@ interface ChatToolCall {
 }
 
 interface ChatResponse {
-  readonly choices?: ReadonlyArray<{ readonly message?: { readonly content?: string | null; readonly tool_calls?: readonly ChatToolCall[] } }>;
-  readonly usage?: { readonly prompt_tokens?: number; readonly completion_tokens?: number; readonly total_tokens?: number };
+  readonly choices?: ReadonlyArray<{ readonly finish_reason?: string | null; readonly message?: { readonly content?: string | null; readonly refusal?: string | null; readonly tool_calls?: readonly ChatToolCall[] } }>;
+  readonly usage?: { readonly prompt_tokens?: number; readonly completion_tokens?: number; readonly total_tokens?: number; readonly prompt_tokens_details?: { readonly cached_tokens?: number } };
   readonly error?: { readonly message?: string; readonly code?: unknown };
 }
 
@@ -108,7 +110,8 @@ export class OpenAICompatibleProvider implements AIProvider {
     return this.models;
   }
 
-  async complete(messages: readonly AIChatMessage[], tools: readonly AIToolSpec[]): Promise<AICompletion> {
+  async complete(messages: readonly AIChatMessage[], tools: readonly AIToolSpec[], options?: CompleteOptions): Promise<AICompletion> {
+    const signal = options?.signal;
     const base: Record<string, unknown> = {
       messages: toOpenAIMessages(messages),
       temperature: 0.2,
@@ -126,11 +129,14 @@ export class OpenAICompatibleProvider implements AIProvider {
     let lastError: unknown;
     let forbidden = 0;
     for (const model of order) {
+      if (signal?.aborted === true) throw new StoppedError();
       try {
-        const done = await this.withOneRetry({ ...base, model });
+        const done = await this.withOneRetry({ ...base, model }, signal);
         this.lastModel = model;
         return done;
       } catch (err) {
+        // (stopped by the person: no other model is asked, and this one is not rested for it)
+        if (wasAborted(signal)) throw new StoppedError();
         firstError ??= err;
         lastError = err;
         const http = err instanceof AIHttpError ? err : null;
@@ -154,13 +160,14 @@ export class OpenAICompatibleProvider implements AIProvider {
   }
 
   /** Smaller models now and then write a malformed tool call, which the service rejects with 400; a second try usually comes out right. */
-  private async withOneRetry(body: Record<string, unknown>): Promise<AICompletion> {
+  private async withOneRetry(body: Record<string, unknown>, signal?: AbortSignal): Promise<AICompletion> {
     const model = String(body['model']);
     let malformedTries = 0;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await this.send(this.shaped(body, model));
+        return await this.send(this.shaped(body, model), signal);
       } catch (err) {
+        if (wasAborted(signal)) throw err;
         const http = err instanceof AIHttpError && err.status === 400 ? err : null;
         // A parameter this model does not take is learned from the service's own answer, once, and used from then on.
         const learned = http !== null && this.learnQuirk(model, http.message);
@@ -206,13 +213,13 @@ export class OpenAICompatibleProvider implements AIProvider {
     return learned;
   }
 
-  private async send(body: Record<string, unknown>): Promise<AICompletion> {
+  private async send(body: Record<string, unknown>, stop?: AbortSignal): Promise<AICompletion> {
     const started = Date.now();
     const res = await this.cfg.fetchFn(`${this.cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${this.cfg.apiKey}` },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.cfg.timeoutMs),
+      signal: stop === undefined ? AbortSignal.timeout(this.cfg.timeoutMs) : AbortSignal.any([AbortSignal.timeout(this.cfg.timeoutMs), stop]),
     });
     if (!res.ok) {
       const text = await res.text().catch(() => '');
@@ -226,6 +233,7 @@ export class OpenAICompatibleProvider implements AIProvider {
       const daily = status === 429 && DAILY_PATTERN.test(message);
       throw new AIHttpError(status, daily ? `${this.cfg.label} daily quota exhausted (429)` : `${this.cfg.label} error: ${message}`, undefined, daily);
     }
+    recordTokens(this.cfg.label, { prompt: data.usage?.prompt_tokens, completion: data.usage?.completion_tokens, total: data.usage?.total_tokens, cached: data.usage?.prompt_tokens_details?.cached_tokens });
     const message = data.choices?.[0]?.message;
     const toolCalls: AIToolCall[] = [];
     (message?.tool_calls ?? []).forEach((call, i) => {
@@ -240,7 +248,12 @@ export class OpenAICompatibleProvider implements AIProvider {
       tools: toolCalls.length,
       ...(data.usage?.total_tokens !== undefined ? { tokens: data.usage.total_tokens } : {}),
     });
-    return { text: (message?.content ?? '').trim(), toolCalls };
+    const text = (message?.content ?? '').trim();
+    // (the model's own stated refusal, or an answer cut by the service's content filter: reported as the model's decision, never retried around)
+    const refusal = typeof message?.refusal === 'string' && message.refusal.trim() !== '' ? message.refusal.trim() : undefined;
+    const filtered = data.choices?.[0]?.finish_reason === 'content_filter';
+    if (toolCalls.length === 0 && text === '' && (refusal !== undefined || filtered)) return { text: refusal ?? '', toolCalls, blocked: refusal !== undefined ? 'the model declined' : 'the answer was stopped by a content filter' };
+    return { text, toolCalls };
   }
 }
 

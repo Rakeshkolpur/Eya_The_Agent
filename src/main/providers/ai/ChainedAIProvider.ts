@@ -2,6 +2,7 @@ import { rootLogger } from '@main/logging/logger';
 import type { AIChatMessage, AICompletion, AIProvider, AIToolSpec, CompleteOptions } from './AIProvider';
 import { NotConfiguredError, failureOf, restFor } from './failure';
 import type { FailureInfo, FailureKind } from './failure';
+import { isStopped } from '@main/agent/stopping';
 
 const log = rootLogger.child('ai.chain');
 
@@ -77,6 +78,13 @@ export class AllProvidersLimitedError extends Error {
   }
 }
 
+/**
+ * When every AI is out for the day (or has no credit) and one was asked a moment ago, they are not all asked again on every request: each refused try is
+ * a round trip, and several of them, one after another, were what a request waited for before being told what it already knew. They are looked at again
+ * this often, so that credit that was just added, or an allowance that came back sooner than expected, is noticed within this time.
+ */
+export const ALL_OUT_PROBE_MS = 30_000;
+
 function utcDay(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }
@@ -103,8 +111,12 @@ export class ChainedAIProvider implements AIProvider {
   private readonly now: () => number;
   /** A provider the user asked to be tried first (their chosen backup model), whatever the usual order. */
   private preferred: AIProvider | null = null;
+  /** When set, the only provider ever asked (the person chose "Local AI only": nothing is handed to a cloud AI). */
+  private only: AIProvider | null = null;
   private readonly listeners: Array<() => void> = [];
   private lastSignature = '';
+  /** When every provider was last asked although all of them were resting (see ALL_OUT_PROBE_MS). */
+  private lastAllOutProbe = 0;
 
   constructor(
     private readonly providers: readonly AIProvider[],
@@ -151,6 +163,12 @@ export class ChainedAIProvider implements AIProvider {
     this.notify();
   }
 
+  /** Ask only this provider (null: all of them, as usual). */
+  restrictTo(provider: AIProvider | null): void {
+    this.only = provider;
+    this.notify();
+  }
+
   /** Try this provider first (the user chose it); null puts the usual order back. */
   setPreferred(provider: AIProvider | null): void {
     this.preferred = provider;
@@ -185,6 +203,7 @@ export class ChainedAIProvider implements AIProvider {
   }
 
   private ordered(): readonly AIProvider[] {
+    if (this.only !== null && this.providers.includes(this.only)) return [this.only];
     const first = this.preferred;
     return first !== null && this.providers.includes(first) ? [first, ...this.providers.filter((p) => p !== first)] : this.providers;
   }
@@ -226,7 +245,7 @@ export class ChainedAIProvider implements AIProvider {
   async complete(
     messages: readonly AIChatMessage[],
     tools: readonly AIToolSpec[],
-    _options?: CompleteOptions,
+    options?: CompleteOptions,
   ): Promise<AICompletion> {
     this.rollDay();
     const now = this.now();
@@ -234,26 +253,59 @@ export class ChainedAIProvider implements AIProvider {
     // If every provider is resting, try them all anyway, in order: a rest is a guess, and refusing to try is worse than a failed try.
     const all = this.ordered();
     const fresh = all.filter((p) => !rested(p));
+    if (fresh.length === 0 && all.length >= 2) {
+      const kind = (p: AIProvider): string => this.restKinds.get(p.name) ?? '';
+      const spent = all.filter((p) => kind(p) === 'daily' || kind(p) === 'credit');
+      // Out: each is out of allowance or credit, or failed for some short reason (a local AI that is not running); and at least one really is out.
+      const out = spent.length > 0 && all.every((p) => ['daily', 'credit', 'other'].includes(kind(p)));
+      // (one Gemini on its own keeps its own wording and its own error: that case is asked as usual)
+      const sayable = spent.length >= 2 || (spent.length === 1 && spent[0]?.name !== 'gemini');
+      if (out && sayable && now - this.lastAllOutProbe < ALL_OUT_PROBE_MS) {
+        // Every one is out and they were all tried a moment ago: say so now, without asking each again.
+        const waits = spent.map((p) => Math.max(0, (this.rests.get(p.name) ?? now) - now));
+        const noCredit = spent.filter((p) => kind(p) === 'credit').map((p) => p.name);
+        log.info('every AI is out and was just asked: not asking again yet', { providers: all.map((p) => p.name) });
+        throw new AllProvidersLimitedError(spent.map((p) => p.name), true, Math.min(...waits), noCredit);
+      }
+      this.lastAllOutProbe = now;
+    }
     const order = fresh.length > 0 ? fresh : all;
     if (order.length < all.length) {
       log.info('skipping providers that are resting', { skipped: all.filter(rested).map((p) => p.name) });
     }
 
     let firstError: unknown;
+    let declined: Error | undefined;
     const limited: Array<{ name: string; info: FailureInfo }> = [];
     for (let i = 0; i < order.length; i += 1) {
       const p = order[i] as AIProvider;
       const another = order.slice(i + 1).some((q) => q.isReady());
       try {
         const started = Date.now();
-        const result = await p.complete(messages, tools, another ? { failFast: true } : undefined);
+        const passed: CompleteOptions | undefined =
+          another || options?.onPartial !== undefined || options?.signal !== undefined || options?.structured !== undefined
+            ? {
+                ...(another ? { failFast: true } : {}),
+                ...(options?.onPartial !== undefined ? { onPartial: options.onPartial } : {}),
+                ...(options?.signal !== undefined ? { signal: options.signal } : {}),
+                // (a structured task: the local AI needs to know, or it answers a JSON request with a chat line)
+                ...(options?.structured !== undefined ? { structured: options.structured } : {}),
+              }
+            : undefined;
+        const result = await p.complete(messages, tools, passed);
         this.count(p.name).requests += 1;
         this.persist();
         this.notify();
         log.debug('provider succeeded', { provider: p.name, ms: Date.now() - started, tools: result.toolCalls.length });
         return result;
       } catch (err) {
-        if (err instanceof NotConfiguredError) continue;
+        // Stopped by the person: no provider failed, none is rested, and none other is asked.
+        if (options?.signal?.aborted === true || isStopped(err)) throw err;
+        if (err instanceof NotConfiguredError) {
+          // (a provider that declined WITH something to tell the person: said if nobody else answers)
+          if (declined === undefined && 'userMessage' in err && typeof (err as { userMessage?: unknown }).userMessage === 'string') declined = err;
+          continue;
+        }
         firstError ??= err;
         const info = failureOf(err);
         const rest = restFor(info);
@@ -279,6 +331,9 @@ export class ChainedAIProvider implements AIProvider {
       }
     }
 
+    // Every provider that was asked failed: that is the last time they were all asked (see ALL_OUT_PROBE_MS), so the next request, a moment later,
+    // is told at once instead of asking each of them again.
+    this.lastAllOutProbe = now;
     // Providers skipped because they were resting from a limit count too: they are out as much as the ones that just failed.
     const skipped = this.providers.filter((p) => !order.includes(p) && ['daily', 'rate', 'credit'].includes(this.restKinds.get(p.name) ?? ''));
     const names = [...skipped.map((p) => p.name), ...limited.map((l) => l.name)];
@@ -296,7 +351,7 @@ export class ChainedAIProvider implements AIProvider {
       const noCredit = [...limited.filter((l) => l.info.kind === 'credit').map((l) => l.name), ...skipped.filter((p) => this.restKinds.get(p.name) === 'credit').map((p) => p.name)];
       throw new AllProvidersLimitedError(names, daily, waits.length > 0 ? Math.min(...waits) : undefined, noCredit);
     }
-    throw firstError ?? new Error('All AI providers failed');
+    throw firstError ?? declined ?? new Error('All AI providers failed');
   }
 
   private count(name: string): ProviderUsage {

@@ -37,3 +37,14 @@ export class CommunicationAccessError extends BrowserUnavailableError {
     this.name = 'CommunicationAccessError';
   }
 }
+
+/** A page would not open: the reason in plain words (see navigationErrors.ts), after any retry that was worth making. */
+export class BrowserNavigationError extends Error {
+  constructor(
+    readonly problem: { readonly kind: string; readonly message: string; readonly retryable: boolean; readonly next?: string },
+    readonly requested: string,
+  ) {
+    super(`${problem.message}${problem.next !== undefined ? ` ${problem.next}` : ''}`);
+    this.name = 'BrowserNavigationError';
+  }
+}

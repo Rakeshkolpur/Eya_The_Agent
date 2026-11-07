@@ -63,6 +63,11 @@
     { id: 4, name: 'Mum', phone: '+91 90000 11111', last: 'Call me' },
     { id: 5, name: 'Amit Kumar', phone: '+91 98111 22333', last: 'Done' },
     { id: 6, name: 'Dr. Meera Iyer', phone: '+91 97000 45678', last: 'Report attached' },
+    // Several people whose names contain "Anna": picking by "contains", or by the first result, sends it to the wrong person.
+    { id: 7, name: 'Ramesh Anna', phone: '+91 90000 22222', last: 'ok' },
+    { id: 8, name: 'Anna Reddy', phone: '+91 91111 33333', last: 'see you' },
+    { id: 9, name: 'Anna', phone: '+91 92222 44444', last: 'call me' },
+    { id: 10, name: 'Anna Kumar', phone: '+91 93333 55555', last: 'thanks' },
   ];
   const THREADS = new Map(CHATS.map((c) => [c.id, [{ from: 'them', text: c.last }]]));
   let current = null;

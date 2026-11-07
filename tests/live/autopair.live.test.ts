@@ -99,7 +99,7 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('the extension 
       expect((bridge as ChromeBridge).pairingOpen()).toBe(false);
       await waitFor(() => (bridge as ChromeBridge).isConnected('chrome'), 60_000, 'the extension to pair by itself');
       expect((bridge as ChromeBridge).pairingOpen()).toBe(false); // never opened
-      expect((bridge as ChromeBridge).info().browsers['chrome']).toMatchObject({ connected: true, paired: true, extensionVersion: '0.9.0' });
+      expect((bridge as ChromeBridge).info().browsers['chrome']).toMatchObject({ connected: true, paired: true, extensionVersion: '0.11.8' });
       expect(secrets.loadHash('chrome')).toMatch(/^[0-9a-f]{64}$/);
     }, 90_000);
 

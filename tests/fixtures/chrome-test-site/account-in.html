@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Mock shop (signed in)</title>
+<style>.acct{display:inline-block;position:relative;cursor:pointer}.acct .menu{display:none;position:absolute;top:100%;left:0;background:#fff;border:1px solid #ccc}.acct:hover .menu{display:block}</style>
+</head>
+<body>
+<!-- the shape of a shop when someone IS signed in: their name in the header with an account menu that is closed until hovered (My Profile, Orders, Wishlist, Logout); no Login button -->
+<header>
+  <a href="/">Mock Shop</a>
+  <input type="text" placeholder="Search for Products, Brands and More" aria-label="Search for Products, Brands and More">
+  <div class="acct" tabindex="0">Rakesh
+    <div class="menu">
+      <a href="/profile">My Profile</a> <a href="/orders">Orders</a> <a href="/wishlist">Wishlist</a> <a href="/logout">Logout</a>
+    </div>
+  </div>
+  <a href="#more">More</a>
+  <a href="/viewcart">Cart</a>
+</header>
+<nav>
+  <a href="/m">Mobiles</a> <a href="/f">Fashion</a> <a href="/e">Electronics</a> <a href="/h">Home</a>
+  <a href="/a">Appliances</a> <a href="/t">Travel</a> <a href="/o">Offers</a>
+</nav>
+</body>
+</html>

@@ -229,12 +229,27 @@ describe('clicking: look, choose what is really there, act, look again', () => {
     expect(result.snapshot.notes?.join(' ')).toMatch(/new tab/);
   });
 
-  it('flags a page that was still changing when it looked', async () => {
+  it('flags a page that had not finished loading when it looked, in plain words', async () => {
     bridge.on('observe', { tabId: 7, state: menuClosed });
     bridge.on('click', okReply(menuOpen, { settled: false }));
     const result = await svc.clickOnPage('Open menu');
     expect(result.ok && result.effects?.settled).toBe(false);
-    expect(result.ok && result.snapshot.notes?.join(' ')).toMatch(/still changing/);
+    expect(result.ok && result.snapshot.notes?.join(' ')).toMatch(/had not finished loading/);
+  });
+
+  it('says a loading indicator was showing when that is what held it up, so it is not taken for a page that is merely busy', async () => {
+    bridge.on('observe', { tabId: 7, state: menuClosed });
+    bridge.on('click', okReply(menuOpen, { settled: false, stillBusy: true }));
+    const result = await svc.clickOnPage('Open menu');
+    expect(result.ok && result.snapshot.notes?.join(' ')).toMatch(/loading indicator was still showing/);
+  });
+
+  it('says nothing about loading for a page that settled (a busy page with an advert or a ticker is ready)', async () => {
+    bridge.on('observe', { tabId: 7, state: menuClosed });
+    bridge.on('click', okReply(menuOpen, { settled: true }));
+    const result = await svc.clickOnPage('Open menu');
+    expect(result.ok && (result.snapshot.notes ?? []).join(' ')).not.toMatch(/loading|changing/);
+    expect(result.ok && result.effects?.settled).toBe(true);
   });
 });
 
@@ -477,5 +492,96 @@ describe('not stuck on the main page: what is shown after each click, and findin
     expect((await own.inspectPage()).environment).toBe('eya_browser');
     bridge.connected = false;
     await expect(own.inspectPage()).rejects.toThrow('custom message');
+  });
+});
+
+describe('a button that is not showing yet (a shop or food menu that fills in as it is scrolled)', () => {
+  const at = (y: number, atBottom: boolean, elements: RawEl[]) => rawState({ scroll: { y, max: 4000, atBottom } }, elements);
+  const home = { role: 'link', name: 'Home' };
+  const add = { role: 'button', name: 'ADD', near: 'Veg Biryani' };
+  const moved = (state: Record<string, unknown>) => okReply(state, { performed: { ok: true, moved: true } });
+
+  it('scrolls down to look for it and clicks it when it comes into view', async () => {
+    const top = at(0, false, [home]);
+    const lower = at(800, false, [home, add]);
+    bridge.on('observe', { tabId: 7, state: top }, { tabId: 7, state: lower });
+    bridge.on('scroll', moved(lower));
+    bridge.on('click', okReply(lower));
+    const result = await svc.clickOnPage('Add to cart — Veg Biryani');
+    expect(result.ok).toBe(true);
+    expect(bridge.calls.map((c) => c.op)).toEqual(['observe', 'scroll', 'observe', 'click']);
+    expect(bridge.calls.find((c) => c.op === 'scroll')?.args).toMatchObject({ direction: 'down' });
+    expect(bridge.calls.find((c) => c.op === 'click')?.args).toMatchObject({ name: 'ADD' });
+  });
+
+  it('looks down only a few screens, then says it is not there', async () => {
+    bridge.on('observe', { tabId: 7, state: at(0, false, [home]) });
+    bridge.on('scroll', moved(at(800, false, [home])));
+    const result = await svc.clickOnPage('Add to cart — Chicken 65');
+    expect(result).toMatchObject({ ok: false, reason: 'not_found' });
+    expect(bridge.count('scroll')).toBe(6);
+    expect(bridge.count('click')).toBe(0);
+  });
+
+  it('does not scroll when the page is already at the bottom, or when scrolling moves nothing', async () => {
+    bridge.on('observe', { tabId: 7, state: at(4000, true, [home]) });
+    expect(await svc.clickOnPage('Add to cart')).toMatchObject({ ok: false, reason: 'not_found' });
+    expect(bridge.count('scroll')).toBe(0);
+
+    bridge = new FakeBridge();
+    svc = new ChromeBrowserService(bridge);
+    bridge.on('observe', { tabId: 7, state: at(0, false, [home]) });
+    bridge.on('scroll', okReply(at(0, false, [home]), { performed: { ok: true, moved: false } }));
+    expect(await svc.clickOnPage('Add to cart')).toMatchObject({ ok: false, reason: 'not_found' });
+    expect(bridge.count('scroll')).toBe(1);
+  });
+
+  it('does not scroll at all when the button is already there', async () => {
+    const here = at(0, false, [home, add]);
+    bridge.on('observe', { tabId: 7, state: here });
+    bridge.on('click', okReply(here));
+    expect((await svc.clickOnPage('Add to cart')).ok).toBe(true);
+    expect(bridge.count('scroll')).toBe(0);
+  });
+
+  it('does not click when the same button is on the page for several items and none was named', async () => {
+    const menu = at(0, true, [home, add, { role: 'button', name: 'ADD', near: 'Masala Dosa' }]);
+    bridge.on('observe', { tabId: 7, state: menu });
+    const result = await svc.clickOnPage('Add to cart');
+    expect(result).toMatchObject({ ok: false, reason: 'ambiguous', options: ['Veg Biryani', 'Masala Dosa'] });
+    expect(bridge.count('click')).toBe(0);
+  });
+});
+
+describe('an out-of-date extension cannot tell which item a repeated button belongs to', () => {
+  class WithCapabilities extends FakeBridge {
+    constructor(private readonly caps: readonly string[]) {
+      super();
+    }
+    capabilities(): readonly string[] {
+      return this.caps;
+    }
+  }
+  const menu = rawState({}, [{ role: 'button', name: 'ADD', near: 'Veg Biryani' }, { role: 'button', name: 'ADD', near: 'Masala Dosa' }]);
+
+  it('says so (and clicks nothing) when an item is named, instead of quietly clicking the first button', async () => {
+    const old = new WithCapabilities(['observe', 'click', 'fill']);
+    old.on('observe', { tabId: 7, state: menu });
+    const result = await new ChromeBrowserService(old).clickOnPage('ADD — Masala Dosa');
+    expect(result).toMatchObject({ ok: false, reason: 'could_not' });
+    expect(result.ok === false && result.reason === 'could_not' ? result.message : '').toMatch(/out of date.*reload.*0\.11\.6/s);
+    expect(old.count('click')).toBe(0);
+  });
+
+  it('works as usual with the current extension, and when no item is named', async () => {
+    const current = new WithCapabilities(['observe', 'click', 'item_context']);
+    current.on('observe', { tabId: 7, state: menu });
+    current.on('click', okReply(menu));
+    expect((await new ChromeBrowserService(current).clickOnPage('ADD — Masala Dosa')).ok).toBe(true);
+
+    const old = new WithCapabilities(['observe', 'click']);
+    old.on('observe', { tabId: 7, state: rawState({}, [{ role: 'button', name: 'Add to cart' }]) });
+    old.on('click', okReply(rawState()));
+    expect((await new ChromeBrowserService(old).clickOnPage('Add to cart')).ok).toBe(true);
   });
 });

@@ -182,7 +182,7 @@ describe('engine: tools per request', () => {
   beforeEach(() => {
     tools = new ToolRegistry();
     ran = [];
-    for (const n of ['find_file', 'open_website', 'word_read', 'set_volume', 'describe_screen', 'remember']) {
+    for (const n of ['find_file', 'open_website', 'find_and_open_website', 'click_on_page', 'word_read', 'set_volume', 'describe_screen', 'remember']) {
       tools.register(fake(n, () => ran.push(n)));
     }
   });
@@ -208,6 +208,27 @@ describe('engine: tools per request', () => {
     expect(sent).not.toContain('set_volume');
     expect(sent).not.toContain('open_website');
     expect(ai.systems[0]).not.toContain('Navigating a website');
+  });
+
+  it('finding and opening a site is always possible, even when the request has no word that points at the web', async () => {
+    const ai = new RecordingAI([{ text: 'ok', toolCalls: [] }]);
+    await ask(engine(ai), 'find the telangana cause list for tomorrow morning');
+    expect(ai.toolNames[0]).toContain('find_and_open_website');
+  });
+
+  it('once a site has been found and opened, the tools to work on its page and the rules for them come with it, without asking for them', async () => {
+    const ai = new RecordingAI([
+      { text: '', toolCalls: [{ id: 'a', name: 'find_and_open_website', args: { keywords: 'passport renewal' } }] },
+      { text: '', toolCalls: [{ id: 'b', name: 'click_on_page', args: {} }] },
+      { text: 'Found it.', toolCalls: [] },
+    ]);
+    const result = await ask(engine(ai), 'help me renew my passport tomorrow morning');
+    expect(ai.toolNames[0]).not.toContain('click_on_page');
+    expect(ai.systems[0]).not.toContain('Acting like a capable human assistant');
+    expect(ai.toolNames[1]).toContain('click_on_page');
+    expect(ai.systems[1]).toContain('Acting like a capable human assistant');
+    expect(ran).toContain('click_on_page');
+    expect(result.spoken).toContain('Found it');
   });
 
   it('load_tools adds the group from the next step, and is not counted as a step the user asked for', async () => {
@@ -253,5 +274,24 @@ describe('engine: tools per request', () => {
     const result = await ask(engine(ai), 'banana please');
     expect(result.spoken).toContain('No such thing');
     expect(ran).toEqual([]);
+  });
+});
+
+describe('how Eya is told to behave on the web', () => {
+  const prompt = systemPrompt(new Date('2026-10-24T10:00:00Z'), new Set(['browser']));
+  it('works things out herself instead of asking, tries the address first, searches by keywords, goes on after opening, verifies, and explains a real blocker', () => {
+    expect(prompt).toContain('Do not ask for anything you can find out yourself');
+    expect(prompt).toContain('An address the user gives is tried first');
+    expect(prompt).toContain('find_and_open_website with keywords');
+    expect(prompt).toContain('Opening the site is the start, not the end');
+    expect(prompt).toContain('Say it is done only when the page or the result shows it');
+    expect(prompt).toContain('If a real blocker remains');
+    expect(prompt).toContain('Two or three different tries, then stop and explain');
+  });
+
+  it('no longer tells her to give up or ask for the address where she can find it herself', () => {
+    expect(prompt).not.toContain('ask for the address instead of guessing');
+    expect(prompt).not.toContain('do not try again by yourself for something that cannot work');
+    expect(prompt).toContain('first try other routes yourself');
   });
 });

@@ -134,6 +134,36 @@ export function isBlockedSite(url: string): boolean {
   return domain !== '' && BLOCKED.test(domain);
 }
 
+/** The brand words of the list above (the longer ones, which a misspelling can be told from by edit distance). */
+const BLOCKED_BRANDS: readonly string[] = [
+  ...new Set(
+    BLOCKED.source
+      .replace(/^\(/, '')
+      .replace(/\)$/, '')
+      .split('|')
+      .filter((alternative) => /^[a-z0-9]{7,}$/.test(alternative)),
+  ),
+];
+
+function oneEditApart(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+  return a.length < b.length ? a.slice(i) === b.slice(i + 1) : a.slice(i + 1) === b.slice(i);
+}
+
+/**
+ * Whether a site NAMED in words is one of those, even misspelled ("movieruz", "movie rulz", "movierulz telugu"): the list above matches an address,
+ * and a name that is a letter off an address on it must not get past by being mistyped. Only names of seven letters or more are compared this way.
+ */
+export function isBlockedName(name: string): boolean {
+  const flat = name.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (flat.length < 7) return false;
+  return BLOCKED_BRANDS.some((brand) => flat.includes(brand) || (flat.length <= brand.length + 1 && oneEditApart(flat, brand)));
+}
+
 /** The name of an official platform when the address is one ("Netflix", "ZEE5"), else null. */
 export function streamingPlatform(url: string): string | null {
   const d = domainOf(url);

@@ -1,5 +1,6 @@
 import type {
   ActOnPageResult,
+  BrowserItemClicker,
   AttachFileRequest,
   AttachFileResult,
   BrowserAutomationService,
@@ -31,6 +32,15 @@ export const ROWS: readonly FakeChatRow[] = [
   { name: 'Amit Kumar', phone: '+91 98111 22333', preview: 'Done' },
 ];
 
+/** A phone with several people whose names contain "Anna": the case where picking by the first result, or by "contains", sends it to the wrong person. */
+export const ANNA_ROWS: readonly FakeChatRow[] = [
+  { name: 'Ramesh Anna', phone: '+91 90000 22222', preview: 'ok' },
+  { name: 'Anna Reddy', phone: '+91 91111 33333', preview: 'see you' },
+  { name: 'Anna', phone: '+91 92222 44444', preview: 'call me' },
+  { name: 'Anna Kumar', phone: '+91 93333 55555', preview: 'thanks' },
+  { name: 'Mum', phone: '+91 90000 11111', preview: 'Call me' },
+];
+
 /** 'cut_name': like the real WhatsApp preview, which shows a long file name cut short and without its extension. */
 export type Behaviour = 'normal' | 'no_picker' | 'never_shows' | 'fails' | 'pending' | 'no_marks' | 'old_mark_only' | 'stays_in_preview' | 'cut_name';
 
@@ -39,7 +49,7 @@ export type Behaviour = 'normal' | 'no_picker' | 'never_shows' | 'fails' | 'pend
  * behaves like the mock page in tests/fixtures: a search box that filters, rows, a header, an attach step that shows a
  * preview, a Send that puts the message in the thread with a delivery mark.
  */
-export class FakeChatApp implements BrowserAutomationService, BrowserItemLister, BrowserFileAttach {
+export class FakeChatApp implements BrowserAutomationService, BrowserItemLister, BrowserItemClicker, BrowserFileAttach {
   url = 'https://web.whatsapp.com/';
   title = 'WhatsApp';
   search = '';
@@ -54,7 +64,7 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
   previewOpen = false;
   /** What is typed in the message box and not sent yet. */
   draft = '';
-  thread: Array<{ text: string; file?: string; mark: string | null }> = [];
+  thread: Array<{ text: string; file?: string; mark: string | null; hiddenFor?: number }> = [];
   /** Delivery marks of OLDER messages already in the thread. */
   oldMarks: string[] = ['read'];
   /** The page is still loading for this many more looks at it (a slow connection): no search box, no chats. */
@@ -62,21 +72,49 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
   /** The page shows the log-in QR code instead of the chats. */
   loginScreen = false;
 
+  // ---- behaviours of a real chat page, all off unless a test turns them on
+  /** The text of every chat row carries a time that changes at every look, as a real chat list's does (a new message, the minute turning). */
+  rowsDrift = false;
+  /** Clicking by a row's whole text works only if that text is exactly what the list shows NOW (the rule of a real page). */
+  strictRowText = false;
+  /** The next this-many clicks on a chat row are refused (something is drawn over it). */
+  blockedClicks = 0;
+  /** After a chat row is clicked, its header shows the name only after this many more looks at the page (a chat that opens slowly). */
+  headerAfter = 0;
+  private headerPending = 0;
+  /** After a send, the delivery mark shows only after this many more looks at the page. */
+  markAfter = 0;
+  /** How many times something was typed in the search box. */
+  searchTypes = 0;
+  /** After typing in the search box the list keeps showing the earlier results for this many looks (a search answered late). */
+  listLag = 0;
+  private lagLeft = 0;
+  private previousSearch = '';
+  /** The chat list shows no chats at all for this many looks (an app that has just been opened, still filling its list). */
+  emptyListLooks = 0;
+  /** Each chat shown twice in a search, as a chat and as a contact, with different whole text. */
+  duplicateSections = false;
+  private tick = 0;
+
   constructor(public rows: readonly FakeChatRow[] = ROWS) {}
 
   private guard(): void {
     if (this.accessOff) throw new CommunicationAccessError('WhatsApp');
   }
 
+  private rowText(r: FakeChatRow): string {
+    return `${r.name} ${r.preview} 10:${42 + (this.rowsDrift ? this.tick : 0)}`;
+  }
+
   private visibleRows(): readonly FakeChatRow[] {
-    const q = this.search.trim().toLowerCase();
+    const q = (this.lagLeft > 0 ? this.previousSearch : this.search).trim().toLowerCase();
     if (q === '') return this.rows;
     const digits = q.replace(/\D/g, '');
     return this.rows.filter((r) => r.name.toLowerCase().includes(q) || (digits !== '' && r.phone.replace(/\D/g, '').includes(digits)));
   }
 
   private marks(): string[] {
-    const own = this.thread.flatMap((m) => (m.mark === null ? [] : [m.mark]));
+    const own = this.thread.flatMap((m) => (m.mark === null || (m.hiddenFor ?? 0) > 0 ? [] : [m.mark]));
     return [...this.oldMarks, ...own].slice(-6);
   }
 
@@ -90,8 +128,8 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
     }
     return {
       url: this.url,
-      title: this.open !== null && !this.headerInHeadings ? this.title : this.open !== null ? `${this.open.name} - ${this.title}` : this.title,
-      headings: this.open !== null && this.headerInHeadings ? [this.open.name] : [],
+      title: this.open !== null && (!this.headerInHeadings || this.headerPending > 0) ? this.title : this.open !== null ? `${this.open.name} - ${this.title}` : this.title,
+      headings: this.open !== null && this.headerInHeadings && this.headerPending === 0 ? [this.open.name] : [],
       links: [],
       buttons: ['Attach', 'Send'],
       inputs: ['Search or start new chat', ...(this.open !== null ? ['Type a message'] : [])],
@@ -119,7 +157,14 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
     this.calls.push('inspect');
     const seen = this.snapshot();
     if (this.loadingFor > 0) this.loadingFor -= 1; // each look at a loading page gets it nearer to ready
+    this.settle();
     return seen;
+  }
+
+  /** Time passing as the page is looked at: a slow header appears, a late delivery mark arrives. */
+  private settle(): void {
+    if (this.headerPending > 0) this.headerPending -= 1;
+    for (const m of this.thread) if ((m.hiddenFor ?? 0) > 0) m.hiddenFor = (m.hiddenFor ?? 0) - 1;
   }
 
   async findOnPage(query: string): Promise<FindOnPageResult> {
@@ -138,10 +183,11 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
   async clickOnPage(text: string, gate?: ClickGate): Promise<ActOnPageResult> {
     this.guard();
     this.calls.push(`click:${text}`);
-    const row = this.rows.find((r) => text.startsWith(r.name));
-    if (row !== undefined) {
-      this.open = row;
-      return { ok: true, snapshot: this.snapshot() };
+    const row = this.strictRowText ? this.rows.find((r) => this.rowText(r) === text) : this.rows.find((r) => text.startsWith(r.name));
+    if (row !== undefined) return this.openRow(row);
+    if (this.strictRowText && this.rows.some((r) => text.startsWith(r.name))) {
+      // the words were those of an earlier look: the row has changed since, and is not found by them
+      return { ok: false, reason: 'not_found', snapshot: this.snapshot() };
     }
     if (text === 'Send') {
       const why = gate?.({ name: 'Send', role: 'button' }) ?? null;
@@ -156,11 +202,35 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
     return { ok: false, reason: 'not_found', snapshot: this.snapshot() };
   }
 
+  private openRow(row: FakeChatRow): ActOnPageResult {
+    if (this.blockedClicks > 0) {
+      this.blockedClicks -= 1;
+      return { ok: false, reason: 'could_not', message: 'Something is drawn over it.', snapshot: this.snapshot() };
+    }
+    this.open = row;
+    this.headerPending = this.headerAfter;
+    this.search = ''; // opening a chat clears the search
+    return { ok: true, snapshot: this.snapshot() };
+  }
+
+  /** Opens the row that has this first line, found as the page is NOW (what Eya's real clickItem does). */
+  async clickItem(want: { readonly primary?: string; readonly name?: string }): Promise<ActOnPageResult> {
+    this.guard();
+    this.calls.push(`clickItem:${want.primary ?? want.name ?? ''}`);
+    const wanted = normalizeText(want.primary ?? want.name ?? '');
+    const row = this.visibleRows().find((r) => normalizeText(r.name) === wanted);
+    return row === undefined ? { ok: false, reason: 'not_found', snapshot: this.snapshot() } : this.openRow(row);
+  }
+
   async fillOnPage(label: string, value: string, options?: FillOptions): Promise<ActOnPageResult> {
     this.guard();
     this.calls.push(`fill:${label}=${value}${options?.submit === true ? '+enter' : ''}`);
-    if (/search/i.test(label)) this.search = value;
-    else if (/message/i.test(label) && this.open !== null) this.draft = value;
+    if (/search/i.test(label)) {
+      this.previousSearch = this.search;
+      this.search = value;
+      this.searchTypes += 1;
+      this.lagLeft = this.listLag;
+    } else if (/message/i.test(label) && this.open !== null) this.draft = value;
     return { ok: true, snapshot: this.snapshot() };
   }
 
@@ -187,10 +257,18 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
     this.guard();
     this.calls.push('list');
     if (this.loadingFor > 0 || this.loginScreen) return [];
+    if (this.emptyListLooks > 0) {
+      this.emptyListLooks -= 1;
+      return [{ name: 'Chats', role: 'clickable', region: 'nav' }, { name: 'Attach', role: 'button' }];
+    }
+    this.tick += 1;
+    const rows = this.visibleRows();
+    if (this.lagLeft > 0) this.lagLeft -= 1;
     return [
       { name: 'Chats', role: 'clickable', region: 'nav' },
       { name: 'Attach', role: 'button' },
-      ...this.visibleRows().map((r): PageItem => ({ name: `${r.name} ${r.preview} 10:42`, primary: r.name, role: 'clickable' })),
+      ...rows.map((r): PageItem => ({ name: this.rowText(r), primary: r.name, role: 'clickable' })),
+      ...(this.duplicateSections ? rows.map((r): PageItem => ({ name: `${r.name} Hey there! I am using WhatsApp`, primary: r.name, role: 'clickable' })) : []),
     ];
   }
 
@@ -215,7 +293,7 @@ export class FakeChatApp implements BrowserAutomationService, BrowserItemLister,
     const text = file === undefined ? (this.draft !== '' ? this.draft : 'a typed message') : '';
     this.draft = '';
     const mark = this.behaviour === 'fails' ? 'failed to send' : this.behaviour === 'pending' ? 'pending' : this.behaviour === 'no_marks' || this.behaviour === 'old_mark_only' ? null : 'sent';
-    this.thread.push({ text, ...(file !== undefined ? { file } : {}), mark });
+    this.thread.push({ text, ...(file !== undefined ? { file } : {}), mark, ...(this.markAfter > 0 ? { hiddenFor: this.markAfter } : {}) });
     if (this.behaviour === 'no_marks') this.oldMarks = [];
     this.previewOpen = false;
   }

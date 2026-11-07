@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { describeRoute, routeBadge, shortModel } from '../src/shared/aiRoute';
+import { createChosenAiNotice, describeRoute, routeBadge, shortModel } from '../src/shared/aiRoute';
 import type { RouteEntryLike, RouteInput } from '../src/shared/aiRoute';
 import { ChainedAIProvider } from '../src/main/providers/ai/ChainedAIProvider';
 import { AIHttpError } from '../src/main/providers/ai/OpenAICompatibleProvider';
@@ -221,5 +221,58 @@ describe('the "which AI first" setting', () => {
     expect(parseAppSettings({ aiFirst: 'backup' }).aiFirst).toBe('backup');
     expect(parseAppSettings({ aiFirst: 'gemini' }).aiFirst).toBe('auto');
     expect(parseAppSettings({}).aiFirst).toBe('auto');
+  });
+});
+
+describe('the local AI in the route and the badge', () => {
+  const local = { ready: true, model: 'llama3.2:1b' };
+
+  it('says "Local AI" with its model when it is the one answering', () => {
+    const r = describeRoute(input([{ name: 'ollama', ready: true, model: 'llama3.2:1b' }, { name: 'gemini', ready: true }], { prefer: 'local', local }));
+    expect(r.using).toMatchObject({ role: 'ollama', label: 'Local AI', model: 'llama3.2:1b' });
+    expect(r.local).toEqual(local);
+    const badge = routeBadge(r);
+    expect(badge.text).toBe('Local AI connected');
+    expect(badge.sub).toBe('llama3.2:1b');
+    expect(badge.title).toMatch(/not sent to a cloud AI/);
+  });
+
+  it('says so next to the AI that answers when the local AI was chosen and is not running', () => {
+    const r = describeRoute(input([{ name: 'ollama', ready: false, model: 'llama3.2:1b' }, { name: 'gemini', ready: true }], { prefer: 'local', local: { ready: false, model: 'llama3.2:1b' } }));
+    expect(r.using?.role).toBe('gemini');
+    expect(routeBadge(r).sub).toBe('Local AI is not running');
+    // not said when it was never chosen
+    const auto = describeRoute(input([{ name: 'ollama', ready: false }, { name: 'gemini', ready: true }], { prefer: 'auto' }));
+    expect(routeBadge(auto).sub).toBe('');
+  });
+
+  it('tells the person once, with what to do, when the local AI they chose cannot answer and another does', () => {
+    const route = describeRoute(input([{ name: 'ollama', ready: false }, { name: 'gemini', ready: true }], { prefer: 'local', local: { ready: false, model: 'llama3.2:1b' } }));
+    let at = 1000;
+    const notice = createChosenAiNotice(() => route, () => at);
+    const said = notice();
+    expect(said).toMatch(/local AI isn't answering/);
+    expect(said).toMatch(/Gemini is answering/);
+    expect(said).toMatch(/Start Ollama/);
+    expect(notice()).toBeNull(); // not again straight away
+    at += 31 * 60_000;
+    expect(notice()).not.toBeNull();
+    // nothing to say when the local AI is the one answering
+    const fine = describeRoute(input([{ name: 'ollama', ready: true }], { prefer: 'local', local }));
+    expect(createChosenAiNotice(() => fine)()).toBeNull();
+  });
+
+  it('asks the local AI first or alone when the person has chosen it', async () => {
+    const local1: AIProvider = { name: 'ollama', isReady: () => true, async complete(): Promise<AICompletion> { return { text: 'local', toolCalls: [] }; } };
+    const cloud: AIProvider = { name: 'gemini', isReady: () => true, async complete(): Promise<AICompletion> { return { text: 'cloud', toolCalls: [] }; } };
+    const chain = new ChainedAIProvider([cloud, local1]);
+    chain.setPreferred(local1);
+    expect(chain.route().map((e) => e.name)).toEqual(['ollama', 'gemini']);
+    chain.restrictTo(local1);
+    expect(chain.route().map((e) => e.name)).toEqual(['ollama']);
+    expect((await chain.complete([{ role: 'user', content: 'hi' }], [])).text).toBe('local');
+    chain.restrictTo(null);
+    chain.setPreferred(null);
+    expect(chain.route().map((e) => e.name)).toEqual(['gemini', 'ollama']);
   });
 });

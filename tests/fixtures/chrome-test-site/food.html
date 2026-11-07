@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Test Food App</title>
+<style>
+  body { font-family: sans-serif; margin: 0; }
+  header { position: sticky; top: 0; background: #fff; border-bottom: 1px solid #ccc; padding: 10px 20px; }
+  .dish { display: flex; align-items: center; gap: 16px; padding: 14px 20px; border-bottom: 1px solid #eee; }
+  .info { flex: 1; }
+  .title { font-weight: bold; }
+  .meta { color: #666; font-size: 13px; }
+  .add { cursor: pointer; border: 1px solid #1a8; color: #1a8; padding: 8px 22px; font-weight: bold; border-radius: 6px; user-select: none; }
+  h2 { padding: 10px 20px; margin: 0; background: #f4f4f4; }
+  #spacer { height: 1800px; padding: 20px; color: #999; }
+</style>
+</head>
+<body>
+<header>Test Biryani House &mdash; <span id="cartline">Cart: empty</span></header>
+
+<h2>Recommended</h2>
+<div id="recommended">
+  <div class="dish"><div class="info"><div class="title">Paneer Butter Masala</div><div class="meta">&#8377;249 &middot; 4.3 (120)</div></div><div class="add" role="button" tabindex="0" data-dish="Paneer Butter Masala">ADD</div></div>
+  <div class="dish"><div class="info"><div class="title">Veg Biryani</div><div class="meta">&#8377;199 &middot; 4.1 (88)</div></div><div class="add" role="button" tabindex="0" data-dish="Veg Biryani">ADD</div></div>
+  <div class="dish"><div class="info"><div class="title">Masala Dosa</div><div class="meta">&#8377;129 &middot; 4.4 (310)</div></div><div class="add" role="button" tabindex="0" data-dish="Masala Dosa">ADD</div></div>
+  <div class="dish"><div class="info"><div class="title">Chicken Dum Biryani</div><div class="meta">&#8377;299 &middot; 4.5 (540)</div></div><div class="add" role="button" tabindex="0" data-dish="Chicken Dum Biryani">ADD</div></div>
+</div>
+
+<div id="spacer">More dishes load as you scroll down&hellip;</div>
+<div id="sentinel"></div>
+<div id="desserts"></div>
+
+<script>
+  window.cart = [];
+  function render() {
+    document.getElementById('cartline').textContent = window.cart.length === 0 ? 'Cart: empty' : 'Cart: ' + window.cart.join(', ');
+  }
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('.add');
+    if (!b) return;
+    window.cart.push(b.dataset.dish);
+    render();
+  });
+  // A menu that fills in only when you scroll near the end (as the real apps do): a section nobody can click before then.
+  let loaded = false;
+  function loadMore() {
+    if (loaded) return;
+    loaded = true;
+    setTimeout(() => {
+      const wrap = document.getElementById('desserts');
+      wrap.innerHTML = '<h2>Desserts</h2>' + ['Gulab Jamun:79:4.6', 'Chocolate Brownie:149:4.2', 'Ice Cream:99:4.0'].map((d) => {
+        const [name, price, rating] = d.split(':');
+        return '<div class="dish"><div class="info"><div class="title">' + name + '</div><div class="meta">&#8377;' + price + ' &middot; ' + rating + ' (50)</div></div><div class="add" role="button" tabindex="0" data-dish="' + name + '">ADD</div></div>';
+      }).join('');
+    }, 400);
+  }
+  new IntersectionObserver((entries) => entries.forEach((en) => en.isIntersecting && loadMore()), { rootMargin: '0px' }).observe(document.getElementById('sentinel'));
+</script>
+</body>
+</html>

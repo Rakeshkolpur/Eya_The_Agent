@@ -127,7 +127,7 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('messaging by n
     for (const t of createBrowserTools(manager, undefined, { tabs: manager, session: manager, chatGate: createChatSendGate(session, policy) })) registry.register(t);
     for (const t of createChatTools({ service: manager, policy, session, folders, names })) registry.register(t);
     const timed = { invoke: async (name: string, args: Record<string, string | number | boolean | null>) => { const t0 = Date.now(); const r = await registry.invoke(name, args); console.log('      step ' + name + ' ' + (Date.now() - t0) + ' ms'); return r; } };
-    chat = new ChatCommands({ tools: timed, contacts: book, policy, session, files: { locate: async () => ({ kind: 'one' as const, path: join(work, 'report.pdf'), name: 'report.pdf' }) } });
+    chat = new ChatCommands({ tools: timed, contacts: book, policy, session, confirmSends: 'always', fileRoute: 'chat', files: { locate: async () => ({ kind: 'one' as const, path: join(work, 'report.pdf'), name: 'report.pdf' }) } });
   }, 120_000);
 
   afterAll(async () => {
@@ -158,7 +158,7 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('messaging by n
 
   it('only the user\'s own yes sends it, and the page shows it went', async () => {
     const out = await say('yes');
-    expect(out?.spoken).toMatch(/^Sent to Rahul Sharma\. By the way, I can remember the names in your WhatsApp/);
+    expect(out?.spoken).toMatch(/^Sent to Rahul Sharma\. WhatsApp shows it as sent, not yet delivered\. By the way, I can remember the names in your WhatsApp/);
     expect(await inPage('JSON.stringify(window.__sent.map((m) => m.text))')).toBe('["On my way, 5 minutes"]');
     expect(book.count()).toBe(0); // nothing is kept until the user says yes to that too
   }, 90_000);

@@ -164,6 +164,21 @@ export class Bridge {
     if (this.status === 'connected') this.send({ t: 'event', name, data });
   }
 
+  /**
+   * An event that must not be lost (a new message in the live chat): if the connection to Eya has just dropped (the service worker was asleep, Eya was restarting), it
+   * asks for the connection and WAITS a few seconds for it before sending. Returns whether the event went. (`sendEvent` drops silently when not connected.)
+   */
+  async sendEventWhenReady(name, data, waitMs = 6000) {
+    if (this.status !== 'connected') {
+      this.ensureConnected();
+      const until = Date.now() + waitMs;
+      while (this.status !== 'connected' && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+    }
+    if (this.status !== 'connected') return false;
+    this.send({ t: 'event', name, data });
+    return true;
+  }
+
   async handle(msg) {
     switch (msg.t) {
       case 'paired':

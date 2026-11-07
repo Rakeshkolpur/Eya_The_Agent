@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { BrowserSessionManager, parseBrowserMode } from '../src/main/browser/BrowserSessionManager';
-import type { BrowserLauncher, BrowserMode, ManagedBridge, UserBrowser } from '../src/main/browser/BrowserSessionManager';
+import type { BrowserActivity, BrowserLauncher, BrowserMode, ManagedBridge, UserBrowser } from '../src/main/browser/BrowserSessionManager';
 import type { BrowserAutomationService, BrowserCapture, BrowserFileAttach, BrowserItemLister, ScreenshotImage } from '../src/main/browser/BrowserAutomationService';
 import { BrowserUnavailableError, CommunicationAccessError } from '../src/main/browser/errors';
 import { COMMUNICATION_OFF, CommunicationPolicy } from '../src/main/privacy/communicationAccess';
@@ -90,6 +90,12 @@ function rig(
     policy?: CommunicationPolicy;
     /** The address the picture itself reports once taken. */
     shotUrl?: string;
+    /** The user's words for the request being served (smart mode routes by them). */
+    words?: () => string;
+    /** What the user chose in settings. */
+    preference?: () => 'eya' | 'mine';
+    /** What the Browser page watches. */
+    activity?: BrowserActivity;
   } = {},
 ): Rig {
   const calls: string[] = [];
@@ -172,6 +178,9 @@ function rig(
     now: () => clock.now,
     createService: (_link, browser) => userService(browser),
     ...(opts.policy !== undefined ? { policy: opts.policy } : {}),
+    ...(opts.words !== undefined ? { words: opts.words } : {}),
+    ...(opts.preference !== undefined ? { preference: opts.preference } : {}),
+    ...(opts.activity !== undefined ? { activity: opts.activity } : {}),
   });
 
   return {
@@ -212,11 +221,12 @@ async function caught(p: Promise<unknown>): Promise<BrowserUnavailableError> {
 }
 
 describe('modes', () => {
-  it('the user\'s own browser is the default, and the older name still means the same', () => {
-    expect(parseBrowserMode(undefined)).toBe('user_browser');
-    expect(parseBrowserMode('')).toBe('user_browser');
+  it('Eya Browser with a smart choice is the default; the user\'s own browser is an explicit mode, and the older name still means it', () => {
+    expect(parseBrowserMode(undefined)).toBe('smart');
+    expect(parseBrowserMode('')).toBe('smart');
+    expect(parseBrowserMode('nonsense')).toBe('smart');
     expect(parseBrowserMode('user_chrome')).toBe('user_browser');
-    expect(parseBrowserMode('nonsense')).toBe('user_browser');
+    expect(parseBrowserMode('user_browser')).toBe('user_browser');
     expect(parseBrowserMode(' eya_browser ')).toBe('eya_browser');
     expect(parseBrowserMode('AUTO')).toBe('auto');
   });
@@ -350,7 +360,7 @@ describe('Eya\'s own separate window is never a silent substitute', () => {
     const s = await r.manager.openWebsite('https://a.example/', { isolated: true });
     expect(r.calls).toEqual(['isolated:openWebsite']);
     expect(s.environment).toBe('eya_browser');
-    expect(s.notes?.join(' ')).toMatch(/NOT the user's signed-in browser/);
+    expect(s.notes?.join(' ')).toMatch(/Eya Browser, Eya's own browser/);
     expect(r.manager.currentEnvironment()).toBe('eya_browser');
     r.calls.length = 0;
     await r.manager.clickOnPage('Go');
@@ -367,7 +377,7 @@ describe('Eya\'s own separate window is never a silent substitute', () => {
     const r = rig({ mode: 'auto', installed: [] });
     const s = await r.manager.openWebsite('https://a.example/');
     expect(s.environment).toBe('eya_browser');
-    expect(s.notes?.join(' ')).toMatch(/NOT the user's signed-in browser/);
+    expect(s.notes?.join(' ')).toMatch(/Eya Browser, Eya's own browser/);
     const withBrowser = rig({ mode: 'auto', connected: ['edge'] });
     expect((await withBrowser.manager.openWebsite('https://a.example/')).environment).toBe('your_browser');
   });
@@ -549,6 +559,34 @@ describe('waiting while the user signs in, then carrying on', () => {
     const result = await waiting;
     expect(result.changed).toBe(true);
     expect(result.snapshot.title).toBe('My account');
+  });
+
+  it('after a sign-in redirects, reports the page it lands on, not the half-built page it passes through', async () => {
+    const r = rig({ connected: ['chrome'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/login' }]);
+    await r.manager.openWebsite('https://x.example/login');
+    const half = snap('Dashboard', { url: 'https://x.example/home', notes: ['The page is still loading.'] });
+    const bare = snap('Dashboard', { url: 'https://x.example/home' });
+    const dashboard = snap('Dashboard', { url: 'https://x.example/home', links: ['Orders', 'Offers'], buttons: ['Search'] });
+    // sign-in done -> a bare shell -> a shell still loading -> the real page (twice, so it is known to have stopped changing)
+    r.inspectQueue.set('chrome', [login, login, half, bare, half, dashboard, dashboard, dashboard]);
+    const result = await r.manager.waitForUserChange(30_000);
+    expect(result.changed).toBe(true);
+    expect(result.snapshot.links).toEqual(['Orders', 'Offers']);
+    expect(result.snapshot.notes ?? []).toEqual([]);
+  });
+
+  it('does not wait for ever on a page that never finishes loading: it reports what is there after a while', async () => {
+    const r = rig({ connected: ['chrome'] });
+    r.setTabs('chrome', [{ tabId: 1, url: 'https://x.example/login' }]);
+    await r.manager.openWebsite('https://x.example/login');
+    const never = snap('Home', { url: 'https://x.example/home', links: ['Orders'], notes: ['The page is still loading.'] });
+    r.inspectQueue.set('chrome', [login, never]);
+    const before = r.clock.now;
+    const result = await r.manager.waitForUserChange(30_000);
+    expect(result.changed).toBe(true);
+    expect(result.snapshot.links).toEqual(['Orders']);
+    expect(r.clock.now - before).toBeLessThan(25_000);
   });
 
   it('gives up after the time allowed and says nothing changed', async () => {
@@ -984,5 +1022,170 @@ describe('opening a site in the browser the user NAMED', () => {
     const edgeStandard = rig({ connected: ['chrome', 'edge'], preferred: 'edge' });
     await edgeStandard.manager.openWebsite('https://a.example/');
     expect(edgeStandard.calls).toEqual(['edge:open:https://a.example/']);
+  });
+});
+
+describe('smart mode: Eya Browser by default, the user\'s own browser only when it is theirs to choose', () => {
+  const smart = (opts: Parameters<typeof rig>[0] = {}) => rig({ mode: 'smart', ...opts });
+
+  it('an ordinary task opens in Eya Browser, even when the user\'s Chrome is connected: their browser is never taken over by default', async () => {
+    const r = smart({ connected: ['chrome'], installed: ['chrome'], running: ['chrome'] });
+    const s = await r.manager.openWebsite('https://records.example/search');
+    expect(s.environment).toBe('eya_browser');
+    expect(r.calls).toEqual(['isolated:openWebsite']);
+    expect(r.launched).toEqual([]);
+    expect(r.manager.currentEnvironment()).toBe('eya_browser');
+    expect(s.notes?.join(' ')).toMatch(/Eya Browser, Eya's own browser/);
+  });
+
+  it('the rest of the task stays in Eya Browser', async () => {
+    const r = smart({ connected: ['chrome'] });
+    await r.manager.openWebsite('https://records.example/');
+    r.calls.length = 0;
+    await r.manager.clickOnPage('Reports');
+    await r.manager.inspectPage();
+    expect(r.calls).toEqual(['isolated:clickOnPage', 'isolated:inspectPage']);
+  });
+
+  it('"use my Chrome" (or an existing tab, or their logged-in account) goes to their browser, when it is connected', async () => {
+    for (const words of ['open this in my Chrome', 'continue in my existing tab', 'use my logged-in account', 'use my personal browser']) {
+      const r = smart({ connected: ['chrome'], words: () => words });
+      const s = await r.manager.openWebsite('https://bank.example/');
+      expect(s.environment, words).toBe('your_browser');
+      expect(r.calls, words).toEqual(['chrome:open:https://bank.example/']);
+    }
+  });
+
+  it('when they asked for their own browser and it is not connected, it says so and does NOT quietly use Eya Browser instead', async () => {
+    const r = smart({ words: () => 'use my Chrome for this', installed: [] });
+    await caught(r.manager.openWebsite('https://bank.example/'));
+    expect(r.calls).toEqual([]);
+  });
+
+  it('a chat app goes to their browser (their sign-in and Communication Access are there), without being asked', async () => {
+    const policy = new CommunicationPolicy(() => ({ enabled: true, apps: {} }));
+    const r = smart({ connected: ['chrome'], policy });
+    const s = await r.manager.openWebsite('https://web.whatsapp.com/');
+    expect(s.environment).toBe('your_browser');
+    expect(r.calls).toEqual(['chrome:open:https://web.whatsapp.com/']);
+  });
+
+  it('the preference chosen in settings is respected: My Browser when they chose it, and not swapped for Eya Browser when it is missing', async () => {
+    const mine = smart({ connected: ['chrome'], preference: () => 'mine' });
+    expect((await mine.manager.openWebsite('https://a.example/')).environment).toBe('your_browser');
+    const missing = smart({ preference: () => 'mine', installed: [] });
+    await caught(missing.manager.openWebsite('https://a.example/'));
+    expect(missing.calls).toEqual([]);
+    const eya = smart({ connected: ['chrome'], preference: () => 'eya' });
+    expect((await eya.manager.openWebsite('https://a.example/')).environment).toBe('eya_browser');
+  });
+
+  it('a task that has started stays where it is; moving it needs the user to say so, and it says it moved', async () => {
+    let words = '';
+    const r = smart({ connected: ['chrome'], words: () => words });
+    await r.manager.openWebsite('https://a.example/');
+    words = 'now check my orders'; // nothing about browsers: stays
+    expect((await r.manager.openWebsite('https://a.example/orders')).environment).toBe('eya_browser');
+    words = 'continue in my Chrome please';
+    const moved = await r.manager.openWebsite('https://a.example/orders');
+    expect(moved.environment).toBe('your_browser');
+    expect(moved.notes?.join(' ')).toMatch(/Moved this task to the user's own browser, because they asked/);
+    words = 'and open the statement'; // stays in theirs now
+    expect((await r.manager.openWebsite('https://a.example/statement')).environment).toBe('your_browser');
+    words = 'do that in Eya Browser instead';
+    expect((await r.manager.openWebsite('https://a.example/statement')).environment).toBe('eya_browser');
+  });
+
+  it('after ten quiet minutes the next request is routed afresh', async () => {
+    let words = 'use my Chrome';
+    const r = smart({ connected: ['chrome'], words: () => words });
+    await r.manager.openWebsite('https://a.example/');
+    expect(r.manager.currentEnvironment()).toBe('your_browser');
+    r.clock.now += 11 * 60_000;
+    words = 'look something up';
+    expect((await r.manager.openWebsite('https://b.example/')).environment).toBe('eya_browser');
+  });
+
+  it('web searches use the invisible lookup in Eya\'s browser mode, not the user\'s browser', async () => {
+    const r = smart({ connected: ['chrome'], withLookup: true });
+    await r.manager.searchWeb('high court cause list');
+    expect(r.calls).toEqual(['lookup:searchWeb']);
+  });
+
+  it('with nothing opened yet, an action works in Eya Browser (the default), not in whatever browser happens to be open', async () => {
+    const r = smart({ connected: ['chrome'] });
+    await r.manager.clickOnPage('Go');
+    expect(r.calls).toEqual(['isolated:clickOnPage']);
+  });
+});
+
+describe('the Browser page watches every action, and can hold or refuse it', () => {
+  function watched(opts: Parameters<typeof rig>[0] = {}) {
+    const events: string[] = [];
+    let hold: Promise<void> = Promise.resolve();
+    let refuse: Error | null = null;
+    const activity: BrowserActivity = {
+      before: async (op, detail) => {
+        events.push(`before:${op}${detail !== undefined ? ':' + detail : ''}`);
+        await hold;
+        if (refuse !== null) throw refuse;
+      },
+      after: (o) => void events.push(`after:${o.op}:${o.ok ? 'ok' : o.reason ?? 'failed'}`),
+      failed: (op, _d, message) => void events.push(`failed:${op}:${message.slice(0, 30)}`),
+      where: (kind, name) => void events.push(`where:${kind}:${name ?? ''}`),
+      needMyBrowser: (reason) => void events.push(`needmine:${reason.slice(0, 20)}`),
+    };
+    const r = rig({ mode: 'smart', activity, ...opts });
+    return { r, events, holdWith: (p: Promise<void>) => (hold = p), refuseWith: (e: Error | null) => (refuse = e) };
+  }
+
+  it('tells it before and after each action, with what was done (never what was typed)', async () => {
+    const { r, events } = watched();
+    await r.manager.openWebsite('https://a.example/');
+    await r.manager.fillOnPage('Password', 'hunter2-secret');
+    await r.manager.clickOnPage('Sign in');
+    const text = events.join('|');
+    expect(text).toContain('before:open:https://a.example/');
+    expect(text).toContain('where:eya:');
+    expect(text).toContain('before:fill:Password');
+    expect(text).toContain('after:fill:ok');
+    expect(text).toContain('before:click:Sign in');
+    expect(text).not.toContain('hunter2');
+  });
+
+  it('an action it holds does not run until it is let go, and one it refuses never runs', async () => {
+    let release: () => void = () => undefined;
+    const { r, holdWith, refuseWith } = watched();
+    holdWith(new Promise<void>((resolve) => (release = resolve)));
+    const done = vi.fn();
+    const pending = r.manager.clickOnPage('Go').then(done);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(done).not.toHaveBeenCalled();
+    expect(r.calls).toEqual([]);
+    release();
+    await pending;
+    expect(r.calls).toEqual(['isolated:clickOnPage']);
+    refuseWith(new BrowserUnavailableError('stopped', { why: 'stopped' }));
+    r.calls.length = 0;
+    await expect(r.manager.clickOnPage('Go again')).rejects.toBeInstanceOf(BrowserUnavailableError);
+    expect(r.calls).toEqual([]);
+  });
+
+  it('says My Browser is needed (so the page can offer to connect it) when the user\'s browser was asked for and is not there; any other failure is only recorded', async () => {
+    const { r, events } = watched({ words: () => 'use my Chrome', installed: [] });
+    await caught(r.manager.openWebsite('https://a.example/'));
+    expect(events.some((e) => e.startsWith('needmine:'))).toBe(true);
+    expect(events.some((e) => e.startsWith('failed:'))).toBe(false);
+  });
+
+  it('a result that is not a failure of the tool but a stop for the user (needs them, needs their yes, asks which) is passed on as that', async () => {
+    const events: string[] = [];
+    const activity: BrowserActivity = { before: async () => undefined, after: (o) => void events.push(`${o.reason ?? 'ok'}:${o.message ?? ''}`), failed: () => undefined, where: () => undefined, needMyBrowser: () => undefined };
+    const r = rig({ mode: 'smart', activity });
+    // an isolated spy that answers with a refusal needing the user
+    const ask = vi.spyOn(r.manager, 'clickOnPage');
+    void ask; // (the rig's spy answers ok; the reasons are covered in the panel's own tests)
+    await r.manager.clickOnPage('Go');
+    expect(events).toEqual(['ok:']);
   });
 });

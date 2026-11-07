@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Test Store: Wireless Mouse</title>
+<style>body { font-family: sans-serif; margin: 20px; } button { font-size: 15px; padding: 8px 14px; margin: 4px 6px 4px 0; } .card { display: inline-block; border: 1px solid #ddd; padding: 10px; margin: 8px; width: 180px; vertical-align: top; }</style>
+</head>
+<body>
+<h1>Wireless Mouse M185</h1>
+<p>&#8377;499 &middot; 4.2 &#9733; &middot; In stock</p>
+<div>
+  <button type="button" id="bag">Add to bag</button>
+  <button type="button" id="wish">Add to wishlist</button>
+  <button type="button" id="addr">Add address</button>
+</div>
+<p id="state">Bag: empty</p>
+<script>
+  window.bag = [];
+  document.getElementById('bag').onclick = () => { window.bag.push('Wireless Mouse M185'); document.getElementById('state').textContent = 'Bag: ' + window.bag.join(', '); };
+  document.getElementById('wish').onclick = () => { window.__wished = true; };
+  document.getElementById('addr').onclick = () => { window.__addr = true; };
+</script>
+
+<h2>You may also like</h2>
+<div class="card"><b>Keyboard K120</b><br>&#8377;349<br><button type="button" class="more" data-n="Keyboard K120">Add to bag</button></div>
+<div class="card"><b>USB Hub 4 Port</b><br>&#8377;599<br><button type="button" class="more" data-n="USB Hub 4 Port">Add to bag</button></div>
+<script>
+  document.querySelectorAll('.more').forEach((b) => b.addEventListener('click', () => { window.bag.push(b.dataset.n); document.getElementById('state').textContent = 'Bag: ' + window.bag.join(', '); }));
+</script>
+</body>
+</html>

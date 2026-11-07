@@ -65,14 +65,13 @@ export function createResearchTool(deps: ResearchToolDeps): Tool {
       description:
         'Research a question across the whole open internet like a careful person: many differently-worded searches, the best pages read, leads followed, and any documents found are checked to be real PDFs. ' +
         'Use it for: "find me <case/Act/report> and the related PDF" (kind documents), "what is / explain / latest on <topic>" needing real sources (kind answer), and "I want <film/song>" (kind media: finds where it can be watched or heard legally, and free public-domain copies; it never searches pirate sites). ' +
-        'It takes up to a minute; say a few words first. For kind documents or media you MUST first ask the user "Do you know a website where this is available? If you tell me I will look there first." ' +
-        'If they name a site pass it as site; if they say no, pass no_site true. Without one of the two the first call only returns the question to ask. ' +
+        'It takes up to a minute; say a few words first. Do not ask the user which site to use: just call it. If the user named a site, pass it as site (it is looked at first); otherwise the whole internet is searched. ' +
         'If a named site does not have it, call again with no_site true to search everywhere. It uses no AI itself, so it does not use up the AI allowance.',
       args: {
         question: { type: 'string', required: true, description: "What the user wants, in their own words (the case name, the topic, the film or song)." },
         kind: { type: 'string', enum: KINDS, description: 'documents = the user wants a file (PDF) of something; media = a film, song or video; answer (default) = a question to be answered.' },
         site: { type: 'string', description: 'A website or address the user told you to look at first, e.g. "indiankanoon.org".' },
-        no_site: { type: 'boolean', description: 'True once the user said they do not know a site (or it was not on the site they named): search the whole internet.' },
+        no_site: { type: 'boolean', description: 'True when the site the user named did not have it: search the whole internet (this is also what happens when no site is given).' },
         thorough: { type: 'boolean', description: 'True for a deeper, longer search (up to about 100 seconds). Use when the first search found too little or the user asked for it deeply.' },
       },
     },
@@ -86,25 +85,13 @@ export function createResearchTool(deps: ResearchToolDeps): Tool {
       const parsedSite = siteRestriction(siteArg);
       const noSite = args['no_site'] === true;
 
-      // First ask the person whether they already know where it is: their site is looked in first, and a document from the place they trust
-      // is worth more than anything a search finds. Only when they say no does the whole internet get searched.
-      if ((kind === 'documents' || kind === 'media') && parsedSite === null && !noSite) {
-        const what = kind === 'documents' ? 'this document' : 'this';
-        const bad = siteArg !== undefined ? ` I couldn't make a web address out of "${siteArg}".` : '';
-        return {
-          ok: true,
-          summary: 'ask the user first',
-          data: {
-            askUser: true,
-            question: `Do you know a website where ${what} is available? If you tell me, I'll look there first. If not, I'll search the whole internet for it.${bad}`,
-            then: 'Ask exactly that, wait for the answer, then call deep_research again: with site set to the website they name, or with no_site true if they say no.',
-          },
-        };
-      }
+      // No asking first: a site the person named is looked at first, and otherwise the whole internet is searched. Words given as a "site" that are not an
+      // address ("ecourts") are not lost: they join the question.
+      const wording = parsedSite === null && siteArg !== undefined ? `${question} ${siteArg}` : question;
 
       try {
         const report = await deps.researcher.research(
-          { question, kind, ...(parsedSite !== null && !noSite ? { site: siteArg as string } : {}), ...(args['thorough'] === true ? { thorough: true } : {}) },
+          { question: wording, kind, ...(parsedSite !== null && !noSite ? { site: siteArg as string } : {}), ...(args['thorough'] === true ? { thorough: true } : {}) },
           deps.progress,
         );
         const found = report.documents.length + report.sources.length + (report.watch?.length ?? 0) + (report.freeCopies?.length ?? 0);

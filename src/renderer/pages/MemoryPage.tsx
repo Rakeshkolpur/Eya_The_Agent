@@ -54,7 +54,7 @@ export function MemoryPage({ c, go }: { c: EyaControl; go: (page: AppPage) => vo
               type="button"
               className="btn primary full"
               onClick={() => {
-                void c.submit('save this as a routine');
+                void c.submit('save this as a routine', undefined, { agent: true });
                 go('chat');
               }}
               title="Save the task Eya just did as a routine"

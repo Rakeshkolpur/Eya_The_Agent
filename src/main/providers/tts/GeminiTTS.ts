@@ -128,7 +128,7 @@ export class GeminiTTS {
     this.cfg = {
       apiKey: process.env['EYA_GEMINI_API_KEY'] ?? '',
       models: envModels.length > 0 ? envModels : DEFAULT_MODELS,
-      baseUrl: DEFAULT_BASE_URL,
+      baseUrl: process.env['EYA_GEMINI_BASE_URL']?.trim() || DEFAULT_BASE_URL,
       firstChunkTimeoutMs: 2500,
       totalTimeoutMs: 45_000,
       ...overrides,

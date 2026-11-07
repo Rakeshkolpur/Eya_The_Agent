@@ -65,7 +65,8 @@ export const QUICK_COMMAND_TOOL = {
     'find or open a file, send a file to someone ("send the latest pdf to Akka", "send it to Uber"), download a link, or to remember or forget their ' +
     'chat names, or to watch their writing or check a document ("watch my writing", "check this document", "fix it", "ignore it"), or a common ' +
     'Microsoft Word action ("add page numbers", "insert a table of contents", "update the index", "page break", "bold this", "centre this", ' +
-    '"undo that", "save the document", "go to page 10", "next page", "scroll down", "fill the running index"), or what Eya is keeping going in the background ' +
+    '"undo that", "save the document", "go to page 10", "next page", "scroll down", "fill the running index"), or to start, pause, resume or stop a LIVE CHAT in WhatsApp ("do live chat with <name or number>", "live chat now go", "I opened that chat, you can do now", "pause the live chat", "stop live chat", "turn on auto reply" — a live chat is Eya replying in a chat for the user as the messages come in: it is NOT a call and NOT a single message), or, while a live chat is running, to answer the person in it with what the user says ("tell her I will call at 6", "tell him I am busy", "let them know I am coming", "reply: ok done" — pass exactly what the user said, so it is sent in that chat), ' +
+    'or what Eya is keeping going in the background ' +
     '("cancel the task", "stop all tasks", "never mind", "what are you working on", "continue"), or teaching and using a reference document ("learn this document ' +
     'as my writ petition", "what have you learned", "format this like my writ petition"). It does the whole job. Returns handled: true with ' +
     'what to say, or handled: false when the request is not one of these (then use your other tools as usual). If what it says is a ' +

@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import { IpcChannels } from '../shared/ipcContract';
 import type {
   AudioRequest,
@@ -19,9 +19,12 @@ import type {
   WakeDetection,
 } from '../shared/ipcContract';
 import type { AgentRequest, AgentUpdate, OrbState } from '../shared/types';
+import type { PluginsSnapshot } from '../shared/plugins';
+import type { LiveChatView } from '../shared/liveChat';
 
 const bridge: EyaBridge = {
   submit: (request: AgentRequest) => ipcRenderer.invoke(IpcChannels.submitAgentRequest, request),
+  stopAll: () => ipcRenderer.invoke(IpcChannels.stopRequests),
   submitAudio: (request: AudioRequest) => ipcRenderer.invoke(IpcChannels.submitAudioRequest, request),
   onAgentUpdate: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, u: AgentUpdate) => cb(u);
@@ -83,6 +86,20 @@ const bridge: EyaBridge = {
     ipcRenderer.on(IpcChannels.communicationAccessChanged, listener);
     return () => ipcRenderer.off(IpcChannels.communicationAccessChanged, listener);
   },
+  getPlugins: () => ipcRenderer.invoke(IpcChannels.getPlugins),
+  changePlugin: (change) => ipcRenderer.invoke(IpcChannels.changePlugin, change),
+  onPluginsChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, s: PluginsSnapshot) => cb(s);
+    ipcRenderer.on(IpcChannels.pluginsChanged, listener);
+    return () => ipcRenderer.off(IpcChannels.pluginsChanged, listener);
+  },
+  getLiveChat: () => ipcRenderer.invoke(IpcChannels.getLiveChat),
+  liveChatAction: (request) => ipcRenderer.invoke(IpcChannels.liveChatAction, request),
+  onLiveChatChanged: (cb) => {
+    const listener = (_e: Electron.IpcRendererEvent, v: LiveChatView) => cb(v);
+    ipcRenderer.on(IpcChannels.liveChatChanged, listener);
+    return () => ipcRenderer.off(IpcChannels.liveChatChanged, listener);
+  },
   getMemory: () => ipcRenderer.invoke(IpcChannels.memoryGet),
   actOnMemory: (action) => ipcRenderer.invoke(IpcChannels.memoryAct, action),
   onMemoryChanged: (cb) => {
@@ -96,6 +113,7 @@ const bridge: EyaBridge = {
     return () => ipcRenderer.off(IpcChannels.memorySuggestion, listener);
   },
   setWindowMode: (mode) => ipcRenderer.send(IpcChannels.windowSetMode, mode),
+  toggleMaximize: () => ipcRenderer.send(IpcChannels.windowMaximize),
   getWindowMode: () => ipcRenderer.invoke(IpcChannels.windowGetMode),
   onWindowMode: (cb) => {
     const listener = (_e: Electron.IpcRendererEvent, s: WindowModeState) => cb(s);
@@ -123,6 +141,46 @@ const bridge: EyaBridge = {
   getGeminiKey: () => ipcRenderer.invoke(IpcChannels.geminiKeyGet),
   setGeminiKey: (key) => ipcRenderer.invoke(IpcChannels.geminiKeySet, key),
   clearGeminiKey: () => ipcRenderer.invoke(IpcChannels.geminiKeyClear),
+  getGeminiKeys: () => ipcRenderer.invoke(IpcChannels.geminiKeysGet),
+  addGeminiKeys: (input) => ipcRenderer.invoke(IpcChannels.geminiKeysAdd, input),
+  removeGeminiKeyEntry: (id) => ipcRenderer.invoke(IpcChannels.geminiKeysRemove, id),
+  testGeminiKeyEntry: (id) => ipcRenderer.invoke(IpcChannels.geminiKeysTest, id),
+  onGeminiKeys: (listener) => {
+    const handler = (_evt: unknown, status: Parameters<typeof listener>[0]): void => listener(status);
+    ipcRenderer.on(IpcChannels.geminiKeysChanged, handler);
+    return () => ipcRenderer.off(IpcChannels.geminiKeysChanged, handler);
+  },
+  reportLiveTrouble: () => ipcRenderer.invoke(IpcChannels.liveTrouble),
+  getBrowserPanel: () => ipcRenderer.invoke(IpcChannels.browserPanelGet),
+  actOnBrowserPanel: (action) => ipcRenderer.invoke(IpcChannels.browserPanelAct, action),
+  onBrowserPanel: (listener) => {
+    const handler = (_evt: unknown, state: Parameters<typeof listener>[0]): void => listener(state);
+    ipcRenderer.on(IpcChannels.browserPanelChanged, handler);
+    return () => ipcRenderer.off(IpcChannels.browserPanelChanged, handler);
+  },
+  setBrowserView: (bounds) => ipcRenderer.send(IpcChannels.browserView, bounds),
+  saveAttachment: (name, bytes) => ipcRenderer.invoke(IpcChannels.attachmentSave, name, bytes),
+  pathForFile: (file) => {
+    try {
+      return webUtils.getPathForFile(file);
+    } catch {
+      return '';
+    }
+  },
+  listChats: () => ipcRenderer.invoke(IpcChannels.chatsList),
+  getChat: (id) => ipcRenderer.invoke(IpcChannels.chatsGet, id),
+  saveChat: (chat) => ipcRenderer.invoke(IpcChannels.chatsSave, chat),
+  renameChat: (id, title) => ipcRenderer.invoke(IpcChannels.chatsRename, id, title),
+  deleteChat: (id) => ipcRenderer.invoke(IpcChannels.chatsDelete, id),
+  clearChats: () => ipcRenderer.invoke(IpcChannels.chatsClear),
+  switchChat: (chat) => ipcRenderer.invoke(IpcChannels.chatsSwitch, chat),
+  onChats: (listener) => {
+    const handler = (_evt: unknown, chats: Parameters<typeof listener>[0]): void => listener(chats);
+    ipcRenderer.on(IpcChannels.chatsChanged, handler);
+    return () => ipcRenderer.off(IpcChannels.chatsChanged, handler);
+  },
+  getLocalAi: () => ipcRenderer.invoke(IpcChannels.localAiGet),
+  setLocalModel: (model) => ipcRenderer.invoke(IpcChannels.localAiSetModel, model),
   getBackupAi: () => ipcRenderer.invoke(IpcChannels.backupAiGet),
   setBackupAi: (input) => ipcRenderer.invoke(IpcChannels.backupAiSet, input),
   clearBackupAi: (id) => ipcRenderer.invoke(IpcChannels.backupAiClear, id),

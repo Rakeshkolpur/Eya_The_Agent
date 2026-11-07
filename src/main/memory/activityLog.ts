@@ -22,14 +22,14 @@ export interface ActivityInput {
   readonly label?: string;
 }
 
-const CHAT_TOOLS = new Set(['find_chat', 'attach_file', 'verify_sent', 'learn_chat_names']);
+const CHAT_TOOLS = new Set(['find_chat', 'find_chat_files', 'live_chat', 'attach_file', 'share_file_to_chat', 'verify_sent', 'learn_chat_names']);
 const FILE_TOOLS = new Set([
   'analyze_document', 'read_file', 'open_file', 'open_folder', 'create_folder', 'copy_file', 'move_file', 'rename_file', 'delete_file', 'delete_folder',
   'find_file', 'find_folder', 'zip_folder', 'close_file', 'download_file', 'get_recycle_bin_count', 'get_recycle_bin_items', 'find_recycle_bin_item',
   'restore_recycle_bin_item', 'restore_all_recycle_bin_items', 'permanently_delete_recycle_bin_item', 'empty_recycle_bin',
 ]);
 const WEB_TOOLS = new Set([
-  'open_website', 'open_url', 'click_on_page', 'fill_on_page', 'inspect_page', 'find_on_page', 'read_page', 'scroll_page', 'go_back', 'go_forward',
+  'open_website', 'find_and_open_website', 'download_from_site', 'open_url', 'click_on_page', 'fill_on_page', 'inspect_page', 'find_on_page', 'read_page', 'scroll_page', 'go_back', 'go_forward',
   'reload_page', 'list_browser_tabs', 'switch_browser_tab', 'close_browser_tab', 'web_search', 'wait_for_user_in_browser', 'connect_chrome',
 ]);
 /** Managing memory, and asking about settings, is not something Eya "did": it never makes an entry on its own. */

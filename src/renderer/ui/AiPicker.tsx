@@ -13,10 +13,12 @@ export function AiPicker({ c, whileLoading = 'Connecting…', className = '' }: 
   const route = c.aiRoute;
   const badge = routeBadge(route, whileLoading);
   const backups = route?.backups ?? [];
-  const canPick = backups.some((b) => b.models.length > 0);
+  // (The local AI is always on the list, so there is always something to pick.)
+  const canPick = true;
   // The one the user chose is the first backup, and only while "the backup first" is on.
   const chosen = route !== null && route.prefer === 'backup' ? backups[0] : undefined;
-  const value = chosen !== undefined && chosen.model !== null ? `m:${chosen.id}|${chosen.model}` : 'auto';
+  const value = route !== null && (route.prefer === 'local' || route.prefer === 'local-only') ? route.prefer : chosen !== undefined && chosen.model !== null ? `m:${chosen.id}|${chosen.model}` : 'auto';
+  const localModel = shortModel(route?.local.model ?? '') || 'llama3.2:1b';
 
   return (
     <label className={`ai-badge ai-picker ${canPick ? 'pickable' : ''} ${className}`.trim()} title={canPick ? `${badge.title} Click to choose the model.` : badge.title}>
@@ -32,8 +34,8 @@ export function AiPicker({ c, whileLoading = 'Connecting…', className = '' }: 
           aria-label="Which AI Eya uses"
           onChange={(e) => {
             const v = e.target.value;
-            if (v === 'auto') {
-              void c.chooseAi('auto');
+            if (v === 'auto' || v === 'local' || v === 'local-only') {
+              void c.chooseAi(v);
               return;
             }
             const cut = v.indexOf('|');
@@ -41,6 +43,10 @@ export function AiPicker({ c, whileLoading = 'Connecting…', className = '' }: 
           }}
         >
           <option value="auto">{route.gemini === 'no-key' ? 'Automatic' : 'Automatic — Gemini first, then the backups'}</option>
+          <optgroup label="On this PC (Ollama, no key)">
+            <option value="local">{`Local AI first — ${localModel}, a cloud AI helps with hard requests`}</option>
+            <option value="local-only">{`Local AI only — ${localModel}, no cloud AI is asked`}</option>
+          </optgroup>
           {backups.map((b) => (
             <optgroup key={b.id} label={`${b.label} — asked first when chosen`}>
               {b.models.map((m) => (

@@ -2,7 +2,14 @@ import type { PerformanceInfo, PerformanceSetting } from './performance';
 import type { AgentRequest, AgentResult, AgentUpdate, OrbState } from './types';
 import type { BackupAiProvider } from './backupAi';
 import type { AiRouteStatus } from './aiRoute';
+import type { EyaLanguage } from './language';
+import type { LocalAiStatus } from './localAi';
+import type { BrowserViewBounds, BrowserKind, BrowserPanelAction, BrowserPanelResult, BrowserPanelState } from './browserPanel';
+import type { GeminiKeysInput, GeminiKeysResult, GeminiKeysStatus } from './geminiKeys';
 import type { TaskAction, TaskSay, TasksSnapshot } from './tasks';
+import type { PluginChange, PluginChangeResult, PluginsSnapshot } from './plugins';
+import type { LiveChatRequest, LiveChatResult, LiveChatView } from './liveChat';
+import type { ChatSummary, StoredChat } from './chats';
 
 export const IpcChannels = {
   submitAgentRequest: 'eya:agent:submit',
@@ -29,6 +36,12 @@ export const IpcChannels = {
   getCommunicationAccess: 'eya:comm:get',
   setCommunicationAccess: 'eya:comm:set',
   communicationAccessChanged: 'eya:comm:changed',
+  getPlugins: 'eya:plugins:get',
+  changePlugin: 'eya:plugins:change',
+  pluginsChanged: 'eya:plugins:changed',
+  getLiveChat: 'eya:livechat:get',
+  liveChatAction: 'eya:livechat:action',
+  liveChatChanged: 'eya:livechat:changed',
   memoryGet: 'eya:memory:get',
   memoryAct: 'eya:memory:act',
   memoryChanged: 'eya:memory:changed',
@@ -37,6 +50,7 @@ export const IpcChannels = {
   windowGetMode: 'eya:window:getMode',
   windowMode: 'eya:window:mode',
   windowDrag: 'eya:window:drag',
+  windowMaximize: 'eya:window:maximize',
   windowMenu: 'eya:window:menu',
   settingsGet: 'eya:settings:get',
   settingsSet: 'eya:settings:set',
@@ -49,11 +63,33 @@ export const IpcChannels = {
   geminiKeyGet: 'eya:geminikey:get',
   geminiKeySet: 'eya:geminikey:set',
   geminiKeyClear: 'eya:geminikey:clear',
+  geminiKeysGet: 'eya:geminikeys:get',
+  geminiKeysAdd: 'eya:geminikeys:add',
+  geminiKeysRemove: 'eya:geminikeys:remove',
+  geminiKeysTest: 'eya:geminikeys:test',
+  geminiKeysChanged: 'eya:geminikeys:changed',
+  liveTrouble: 'eya:live:trouble',
+  stopRequests: 'eya:agent:stop',
+  browserPanelGet: 'eya:browserpanel:get',
+  browserPanelAct: 'eya:browserpanel:act',
+  browserPanelChanged: 'eya:browserpanel:changed',
+  browserView: 'eya:browserpanel:view',
   backupAiGet: 'eya:backupai:get',
   backupAiSet: 'eya:backupai:set',
   backupAiClear: 'eya:backupai:clear',
   backupAiTest: 'eya:backupai:test',
   aiUsageGet: 'eya:aiusage:get',
+  attachmentSave: 'eya:attachment:save',
+  chatsList: 'eya:chats:list',
+  chatsGet: 'eya:chats:get',
+  chatsSave: 'eya:chats:save',
+  chatsRename: 'eya:chats:rename',
+  chatsDelete: 'eya:chats:delete',
+  chatsClear: 'eya:chats:clear',
+  chatsSwitch: 'eya:chats:switch',
+  chatsChanged: 'eya:chats:changed',
+  localAiGet: 'eya:localai:get',
+  localAiSetModel: 'eya:localai:model',
   backupAiSetModel: 'eya:backupai:setmodel',
   aiRouteGet: 'eya:airoute:get',
   aiRoute: 'eya:airoute',
@@ -193,6 +229,8 @@ export type WindowAnchor = 'bottom-right' | 'bottom-left' | 'top-right' | 'top-l
 export interface WindowModeState {
   readonly mode: WindowMode;
   readonly anchor: WindowAnchor;
+  /** The full app fills the screen (the maximize button was pressed and not yet pressed again). */
+  readonly maximized?: boolean;
   /** Which screen of the full app to show (set when something opens the app on a particular screen, like the tray's Chats item). */
   readonly page?: string;
 }
@@ -205,10 +243,24 @@ export interface AppSettings {
   readonly tapToTalk: boolean;
   /** Keep a list of what Eya did (titles only, on this PC) for the Recent screen. */
   readonly keepHistory: boolean;
+  /** Keep the conversations (what was typed and said, and the answers) on this PC so they can be opened again from the sidebar. */
+  readonly keepChats: boolean;
   /** How hard Eya works: automatic (matched to this laptop) or a level the user picked. Applies the next time Eya starts. */
   readonly performance: PerformanceSetting;
   /** Which AI is asked first: Gemini and then the backup when Gemini is out (auto), or the backup first (the user's choice). */
-  readonly aiFirst: 'auto' | 'backup';
+  readonly aiFirst: 'auto' | 'backup' | 'local' | 'local-only';
+  /** The model Eya asks Ollama for (the local AI). */
+  readonly localModel: string;
+  /** The language every AI is told to answer in (English unless the person chooses another or "same as I speak"). */
+  readonly language: EyaLanguage;
+  /** The browser Eya works in unless the user asks for the other: Eya Browser (her own, the default) or My Browser (their Chrome or Edge). */
+  readonly browser: BrowserKind;
+  /** The country a phone number without a country code belongs to (two-letter code; India until the person chooses another). */
+  readonly country: string;
+  /** When Eya cannot find a button on a page in the person's own Chrome or Edge, she looks at the browser window herself (a picture read by Gemini, never saved) instead of asking to share the screen. */
+  readonly autoScreenLook: boolean;
+  /** Several live chats may run at once (they take turns in the one WhatsApp page). Off: one live chat at a time. */
+  readonly multiLiveChats: boolean;
 }
 
 export interface AppInfo {
@@ -217,6 +269,8 @@ export interface AppInfo {
   readonly packaged: boolean;
   /** Where the memory database lives. */
   readonly memoryPath: string;
+  /** The Windows user's name, for the greeting on Home. */
+  readonly userName: string;
   /** Whether Eya starts when Windows does; null when that cannot be offered. */
   readonly startWithWindows: boolean | null;
   /** The performance level running, what this laptop would pick, and what is chosen. */
@@ -528,6 +582,8 @@ export interface MemoryActionResult {
 
 export interface EyaBridge {
   submit(request: AgentRequest): Promise<AgentResult>;
+  /** Stop: ends every request that is being worked on, on the spot. Resolves to how many there were. */
+  stopAll(): Promise<number>;
   submitAudio(request: AudioRequest): Promise<AgentResult>;
   onAgentUpdate(cb: (update: AgentUpdate) => void): () => void;
   onSetOrbState(cb: (state: OrbState) => void): () => void;
@@ -554,6 +610,14 @@ export interface EyaBridge {
   getCommunicationAccess(): Promise<CommunicationAccessState>;
   setCommunicationAccess(change: CommunicationAccessChange): Promise<CommunicationAccessState>;
   onCommunicationAccessChanged(cb: (state: CommunicationAccessState) => void): () => void;
+  /** Plugins: what is installed, connected and allowed. Only this panel can change it — no tool, voice command or web page can. */
+  getPlugins(): Promise<PluginsSnapshot>;
+  changePlugin(change: PluginChange): Promise<PluginChangeResult>;
+  onPluginsChanged(cb: (snapshot: PluginsSnapshot) => void): () => void;
+  /** The Live Chat Companion: the one chat being watched, its drafts and controls. Only this page can approve or send a reply or switch automatic replies on. */
+  getLiveChat(): Promise<LiveChatView>;
+  liveChatAction(request: LiveChatRequest): Promise<LiveChatResult>;
+  onLiveChatChanged(cb: (view: LiveChatView) => void): () => void;
   /** What Eya remembers and the routines she has saved (kept in a local database on this PC). */
   getMemory(): Promise<MemorySnapshot>;
   actOnMemory(action: MemoryAction): Promise<MemoryActionResult>;
@@ -562,6 +626,8 @@ export interface EyaBridge {
   onMemorySuggestion(cb: (text: string) => void): () => void;
   /** Eya's window: bubble, quick assistant, or the full app. The main process owns the geometry and tells the page what it did. */
   setWindowMode(mode: WindowMode): void;
+  /** The full app: fill the screen, or go back to its usual size and place. */
+  toggleMaximize(): void;
   getWindowMode(): Promise<WindowModeState>;
   onWindowMode(cb: (state: WindowModeState) => void): () => void;
   /** The bubble is being dragged (the main process follows the pointer and settles it against an edge on release). */
@@ -581,6 +647,41 @@ export interface EyaBridge {
   getGeminiKey(): Promise<GeminiKeyStatus>;
   setGeminiKey(key: string): Promise<GeminiKeyResult>;
   clearGeminiKey(): Promise<GeminiKeyResult>;
+  /** The extra Gemini keys (family, friends) used one after another after the person's own: the list, with how each key stands. */
+  getGeminiKeys(): Promise<GeminiKeysStatus>;
+  /** Adds one key with a name, or several pasted one to a line. Each is checked with Google first. */
+  addGeminiKeys(input: GeminiKeysInput): Promise<GeminiKeysResult>;
+  removeGeminiKeyEntry(id: string): Promise<GeminiKeysResult>;
+  /** Asks one key a tiny question and says how it stands. */
+  testGeminiKeyEntry(id: string): Promise<GeminiKeysResult>;
+  onGeminiKeys(listener: (status: GeminiKeysStatus) => void): () => void;
+  /** The live voice stopped or could not start on the key it had: the next conversation starts on another. True when another key is free to try now. */
+  reportLiveTrouble(): Promise<boolean>;
+  /** The Browser page: where the task is working, what it is doing, what it has done, and the user's controls over it. */
+  getBrowserPanel(): Promise<BrowserPanelState>;
+  actOnBrowserPanel(action: BrowserPanelAction): Promise<BrowserPanelResult>;
+  onBrowserPanel(listener: (state: BrowserPanelState) => void): () => void;
+  /** Eya Browser is drawn by the app itself on top of the Browser page: this says where (null when the page is not showing it). */
+  setBrowserView(bounds: BrowserViewBounds | null): void;
+  /** The local AI (Ollama): looks at it now and says whether it is running and has the model, with what to do if not. */
+  /** Keeps a file that has no place on disk (a pasted picture) so it can be read; the answer is where it was kept. */
+  saveAttachment(name: string, bytes: ArrayBuffer): Promise<{ readonly ok: boolean; readonly path?: string; readonly error?: string }>;
+  /** Where a file the person picked or dropped is on disk ('' when it is not a file on disk). */
+  pathForFile(file: File): string;
+  /** The kept conversations (the chat history), newest first; empty while keeping them is switched off. */
+  listChats(): Promise<ChatSummary[]>;
+  getChat(id: string): Promise<StoredChat | null>;
+  /** Keeps (or updates) the conversation on this PC; null when keeping chats is off or it is not a conversation. */
+  saveChat(chat: unknown): Promise<ChatSummary | null>;
+  renameChat(id: string, title: string): Promise<boolean>;
+  deleteChat(id: string): Promise<boolean>;
+  /** Deletes every kept conversation; the number deleted. */
+  clearChats(): Promise<number>;
+  /** A new chat (null) or an opened one: the assistant's memory of the talk so far follows. */
+  switchChat(chat: unknown): Promise<void>;
+  onChats(listener: (chats: ChatSummary[]) => void): () => void;
+  getLocalAi(): Promise<LocalAiStatus>;
+  setLocalModel(model: string): Promise<LocalAiStatus>;
   getBackupAi(): Promise<BackupAiStatus>;
   setBackupAi(input: BackupAiInput): Promise<BackupAiResult>;
   /** Remove one backup AI by its id, or every saved one when no id is given. */

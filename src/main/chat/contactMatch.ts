@@ -7,6 +7,8 @@
  * so and nothing is guessed. A single strong match is used; several are shown for the user to choose.
  */
 
+import { foldDigits, spokenNumbersToDigits } from './phoneNumbers';
+
 export interface ChatCandidate {
   /** The chat's name as the app shows it (a contact's name, or a bare phone number for someone not saved). */
   readonly label: string;
@@ -15,6 +17,13 @@ export interface ChatCandidate {
 }
 
 export type MatchStrength = 'exact' | 'strong' | 'partial' | 'fuzzy';
+
+/**
+ * What a match rests on. Only some of these identify somebody: a name that is exactly what was said, or a whole phone number. A name that merely
+ * CONTAINS what was said ("Ramesh Anna", "Anna Reddy" for "Anna"), the same words in another order, a close spelling or the end of a number is a
+ * likely match, never a verified one — and a likely match is said to be one when the person is asked to go ahead.
+ */
+export type MatchEvidence = 'exact name' | 'full phone number' | 'same words' | 'part of the name' | 'close spelling' | 'part of the number';
 
 export interface ChatMatch<T extends ChatCandidate = ChatCandidate> {
   readonly candidate: T;
@@ -25,6 +34,10 @@ export interface ChatMatch<T extends ChatCandidate = ChatCandidate> {
   readonly score: number;
   /** The last digits of the number, when one was visible. */
   readonly phoneEnding?: string;
+  /** What this match rests on (see MatchEvidence). */
+  readonly evidence: MatchEvidence;
+  /** True only when the evidence identifies the chat (an exact name, a whole phone number): a likely match is not an identity. */
+  readonly verified: boolean;
 }
 
 export type ChatResolution<T extends ChatCandidate = ChatCandidate> =
@@ -60,9 +73,10 @@ export interface ParsedChatQuery {
 
 /** Splits what the user said into name words and digits ("ending in 432", "starts with 98765", "+91 98765 00432"). */
 export function parseChatQuery(query: string): ParsedChatQuery {
-  const raw = query.normalize('NFKC');
+  // (digits said out loud or written in another script are digits; and the "4" of "last 4 digits" is a count, not a digit of the number)
+  const raw = foldDigits(spokenNumbersToDigits(query));
   const lower = raw.toLowerCase();
-  const digits = (raw.match(/\d/g) ?? []).join('');
+  const digits = (raw.replace(/\b(?:last|first|final)\s+(?:\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten)\s+digits?\b/gi, ' ').match(/\d/g) ?? []).join('');
   let mode: DigitMode | null = null;
   if (digits.length > 0) {
     if (/\b(ending|ends?|ended|last)\b/.test(lower)) mode = 'ends';
@@ -164,7 +178,12 @@ function judge<T extends ChatCandidate>(q: ParsedChatQuery, candidate: T): ChatM
   const tokens = label.split(' ').filter((t) => t.length > 0);
   const runs = digitRuns(`${candidate.label} ${candidate.detail ?? ''}`);
   const ending = phoneEnding(`${candidate.label} ${candidate.detail ?? ''}`) ?? undefined;
-  const withEnding = (m: Omit<ChatMatch<T>, 'phoneEnding'>): ChatMatch<T> => ({ ...m, ...(ending !== undefined ? { phoneEnding: ending } : {}) });
+  const withEnding = (m: Omit<ChatMatch<T>, 'phoneEnding' | 'evidence' | 'verified'> & { readonly evidence?: MatchEvidence }): ChatMatch<T> => {
+    const evidence: MatchEvidence =
+      m.evidence ??
+      (m.reason === 'phone number' ? (q.digits.length >= 10 && m.strength === 'strong' ? 'full phone number' : 'part of the number') : m.strength === 'exact' ? 'exact name' : m.strength === 'strong' ? 'same words' : m.strength === 'fuzzy' ? 'close spelling' : 'part of the name');
+    return { ...m, evidence, verified: evidence === 'exact name' || evidence === 'full phone number', ...(ending !== undefined ? { phoneEnding: ending } : {}) };
+  };
 
   let namePart: { strength: MatchStrength; score: number; reason: ChatMatch['reason'] } | null = null;
   if (q.names.length > 0) {
@@ -247,7 +266,7 @@ export function resolveChat<T extends ChatCandidate>(query: string, candidates: 
 
 /** Words that are controls of a chat app, never somebody's name. */
 const CONTROL_NAME =
-  /^(send|attach|search|new chat|menu|status|channels?|communit(?:y|ies)|settings|profile|log ?out|archived?|filter|unread|all|groups?|mute|call|video call|voice call|emoji|gif|stickers?|camera|photos?(?: videos?)?|document|contact|poll|more|back|close|cancel|ok|chats?|calls?|reels?|explore|home|notifications?|messages?|requests?|inbox|primary|general|new message|add|info|details|type a message|write a message)$/;
+  /^(send|attach|search|new chat|menu|status|channels?|communit(?:y|ies)|settings|profile|log ?out|archived?|filter|unread|all|groups?|mute|call|video call|voice call|emoji|gif|stickers?|camera|photos?(?: videos?)?|document|contact|poll|more|back|close|cancel|ok|chats?|calls?|reels?|explore|home|notifications?|messages?|requests?|inbox|primary|general|new message|add|info|details|type a message|write a message|meta ai|ask meta ai|go to (?:calls|status|channels|communities|community|chats|settings|menu|updates)|invite (?:a )?friends?|new (?:call|group|community|contact|broadcast|chat)|learn more|select chats|download whatsapp(?: for windows)?|get whatsapp|get the app|use whatsapp on your phone|your chats|starred messages|linked devices|(?:\d+ )?(?:unread|new) messages?|(?:messages(?: and calls)? are )?end to end encrypted(?: click to learn more)?|click to learn more)$/;
 
 export function looksLikeControl(name: string): boolean {
   return CONTROL_NAME.test(normalizeText(name));

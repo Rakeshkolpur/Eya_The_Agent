@@ -190,6 +190,19 @@ export class ContactBook {
     return dominant(rows, (r) => r.use_count)?.name ?? null;
   }
 
+  /**
+   * The chats opened most recently and when (names and times only: the same two things the book already keeps), newest first — for "the person I messaged
+   * yesterday". Empty when the person never agreed to the book keeping anything.
+   */
+  recentUses(app: string, limit = 20): Array<{ readonly name: string; readonly at: number }> {
+    if (this.learning() !== 'on') return [];
+    const rows = this.db.all<{ name: string; last_used: string | null }>('SELECT name, last_used FROM contacts WHERE app = ? AND last_used IS NOT NULL ORDER BY last_used DESC LIMIT ?', [app, limit]);
+    return rows.flatMap((r) => {
+      const at = Date.parse(r.last_used ?? '');
+      return Number.isFinite(at) ? [{ name: r.name, at }] : [];
+    });
+  }
+
   // ----------------------------------------------------------------------------------------- reading
   countFor(app: string): number {
     return this.db.get<{ n: number }>('SELECT count(*) AS n FROM contacts WHERE app = ?', [app])?.n ?? 0;

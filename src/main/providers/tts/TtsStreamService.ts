@@ -3,7 +3,7 @@ import type { WebContents } from 'electron';
 import { IpcChannels } from '@shared/ipcContract';
 import type { TTSStreamRequest, TTSStreamStartResult } from '@shared/ipcContract';
 import { rootLogger } from '@main/logging/logger';
-import type { GeminiTTS } from './GeminiTTS';
+import type { SpeechBackend } from '@main/config/geminiKeyPool';
 import type { OpenAITTS } from './OpenAITTS';
 
 const log = rootLogger.child('tts.stream');
@@ -18,7 +18,7 @@ export class TtsStreamService {
   private counter = 0;
 
   constructor(
-    private readonly tts: GeminiTTS,
+    private readonly tts: SpeechBackend,
     private readonly getSender: () => WebContents | null,
     private readonly openai?: OpenAITTS,
   ) {}

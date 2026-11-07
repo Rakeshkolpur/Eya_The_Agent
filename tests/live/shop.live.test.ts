@@ -1,5 +1,5 @@
 /**
- * Live integration test of ordering and booking: the real extension (0.9.0) in a real Chrome, on a small shop (search, results, cart,
+ * Live integration test of ordering and booking: the real extension (0.11.8) in a real Chrome, on a small shop (search, results, cart,
  * checkout with cash on delivery or a card, order placed) and a cinema booking page (seats, confirm). Driven through the browser tools the
  * model uses.
  *
@@ -74,8 +74,8 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('Ordering and b
 
   const text = (js: string) => userEval(DEBUG_PORT, undefined, js);
 
-  it('the extension offers the payment-step detection (version 0.9.0)', () => {
-    expect(bridge.info().browsers['chrome']?.extensionVersion).toBe('0.9.0');
+  it('the extension offers the payment-step detection (version 0.11.8)', () => {
+    expect(bridge.info().browsers['chrome']?.extensionVersion).toBe('0.11.8');
   });
 
   it('searching, choosing the right item and adding it to the cart go through without asking anything', async () => {
@@ -87,8 +87,13 @@ describe.skipIf(!live || findBrowserExe('chrome') === undefined)('Ordering and b
     // the cotton one (the user asked for cotton), not the first or the cheapest
     const adds = await tool['find_on_page']!.execute({ query: 'Add to cart' });
     expect(adds.ok).toBe(true);
-    expect((await tool['click_on_page']!.execute({ text: 'Add to cart' })).ok).toBe(true);
-    expect(await text("document.getElementById('cartline').textContent")).toMatch(/In your cart: Red (cotton|polyester) shirt/);
+    // three shirts, one "Add to cart" each: it does not pick the first by itself, it asks which
+    const unsure = await tool['click_on_page']!.execute({ text: 'Add to cart' });
+    expect(unsure.ok).toBe(false);
+    expect(unsure.summary).toBe('which one?');
+    expect(String(unsure.error)).toMatch(/Red cotton shirt/);
+    expect((await tool['click_on_page']!.execute({ text: 'Add to cart', near: 'Red cotton shirt' })).ok).toBe(true);
+    expect(await text("document.getElementById('cartline').textContent")).toMatch(/In your cart: Red cotton shirt/);
     expect((await tool['click_on_page']!.execute({ text: 'Checkout' })).ok).toBe(true);
   }, 90_000);
 

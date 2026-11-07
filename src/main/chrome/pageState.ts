@@ -49,6 +49,8 @@ export interface PageElement {
   readonly hidden?: boolean;
   /** For a hidden item: the visible menu title it lives under. */
   readonly menu?: string;
+  /** For a button that the page repeats for every item (every dish's "ADD"): the item it belongs to. */
+  readonly near?: string;
 }
 
 export interface PageState {
@@ -101,6 +103,7 @@ function normalizeElement(raw: unknown): PageElement | null {
     inViewport: r['inViewport'] === true,
     ...(r['hidden'] === true ? { hidden: true } : {}),
     ...(typeof r['menu'] === 'string' && r['menu'] !== '' ? { menu: r['menu'].slice(0, 40) } : {}),
+    ...(typeof r['near'] === 'string' && r['near'] !== '' ? { near: r['near'].slice(0, 80) } : {}),
   };
 }
 
@@ -115,6 +118,7 @@ function normalizeTable(raw: unknown): SnapshotTable | null {
     headers,
     rows,
     totalRows: typeof t['totalRows'] === 'number' ? t['totalRows'] : rows.length,
+    ...(typeof t['dataRows'] === 'number' && Number.isFinite(t['dataRows']) && t['dataRows'] >= 0 ? { dataRows: Math.floor(t['dataRows']) } : {}),
   };
 }
 
@@ -153,16 +157,194 @@ export function normalizePageState(raw: unknown): PageState {
 
 const ACTIVATABLE: ReadonlySet<ElementRole> = new Set(['link', 'button', 'menuitem', 'tab', 'option', 'clickable', 'checkbox', 'radio', 'switch']);
 
-/** The element a click on "this text" should land on — enabled ones first, exact text before partial, what is on screen before what is not. */
-export function findClickTarget(state: PageState, text: string): PageElement | null {
+const NEAR_SEPARATOR = ' — ';
+
+/** "ADD — Paneer Tikka" → the button's words and the item it belongs to. Without the separator, only the words. */
+export function splitNear(text: string): { readonly text: string; readonly near: string } {
+  const at = text.indexOf(NEAR_SEPARATOR);
+  return at === -1 ? { text: text.trim(), near: '' } : { text: text.slice(0, at).trim(), near: text.slice(at + NEAR_SEPARATOR.length).trim() };
+}
+
+/** The other way: a button's name with the item it belongs to, as the page snapshot lists it. */
+export function withNear(name: string, near?: string): string {
+  return near !== undefined && near !== '' ? name + NEAR_SEPARATOR + near : name;
+}
+
+const ADD_BUTTON = /^(?:\+\s*)?add(?:\s+item)?(?:\s+to\s+(?:the\s+)?(?:cart|bag|basket|trolley|order))?(?:\s*\+)?$|^\+$/i;
+const BUY_BUTTON = /^buy\s+(?:it\s+)?now$/i;
+const squash = (s: string): string => s.trim().replace(/\s+/g, ' ');
+
+/** Asking to put something in the cart, bag or basket, however a shop words it ("Add to cart", "Add to bag", "ADD", "Buy now"). */
+export function isAddRequest(text: string): boolean {
+  const t = squash(text);
+  return ADD_BUTTON.test(t) || BUY_BUTTON.test(t);
+}
+
+const NEAR_FILLER: ReadonlySet<string> = new Set(['the', 'a', 'an', 'of', 'and', 'with', 'for', 'to']);
+const keyOf = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/** Whether a button's item is the one asked for: one name contains the other, or most of the asked-for words are in it. */
+function nearMatches(near: string, wanted: string): boolean {
+  const a = keyOf(near);
+  const b = keyOf(wanted);
+  if (a === '' || b === '') return false;
+  if (a.includes(b) || b.includes(a)) return true;
+  const have = new Set(a.split(' '));
+  const need = b.split(' ').filter((t) => !NEAR_FILLER.has(t));
+  return need.length > 0 && need.filter((t) => have.has(t)).length / need.length >= 0.75;
+}
+
+export type ClickChoice =
+  | { readonly kind: 'target'; readonly element: PageElement }
+  /** The same button is on the page for several items and the request did not say which: the items, so the right one can be named. */
+  | { readonly kind: 'ambiguous'; readonly options: readonly string[]; readonly name: string }
+  | { readonly kind: 'none' };
+
+/** The letters and digits of a text and nothing else: "Cause List", "cause-list" and "CauseList" are the same. */
+const compact = (s: string): string => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+const MEANING_FILLER: ReadonlySet<string> = new Set(['the', 'a', 'an', 'on', 'of', 'to', 'button', 'link', 'tab', 'menu', 'option', 'page', 'section', 'icon', 'please']);
+const meaningWords = (s: string): string[] => keyOf(s).split(' ').filter((t) => t !== '' && !MEANING_FILLER.has(t));
+
+/** What a control IS for, when sites word it differently: the words a person may use for one thing, grouped. */
+const CONCEPTS: ReadonlyArray<readonly [string, RegExp]> = [
+  ['login', /^(?:log ?in|sign ?in|log ?on|member login|user login)$/],
+  ['logout', /^(?:log ?out|sign ?out|log ?off)$/],
+  ['register', /^(?:register|sign ?up|create (?:an? )?account|join(?: now| us)?|new user)$/],
+  ['cart', /^(?:cart|my cart|view cart|basket|my basket|bag|my bag|shopping (?:cart|bag)|trolley)$/],
+  ['contact', /^(?:contact|contact us|contact info|reach us|get in touch)$/],
+  ['help', /^(?:help|help ?(?:centre|center)|support|customer (?:care|support|service)|faqs?)$/],
+  ['home', /^(?:home|home ?page|main page|back to home)$/],
+  ['next', /^(?:next|continue|proceed|next step)$/],
+  ['previous', /^(?:back|previous|go back)$/],
+  ['search', /^(?:search|find|search now|go)$/],
+  ['about', /^(?:about|about us|who we are)$/],
+];
+const conceptOf = (s: string): string | null => {
+  const k = keyOf(s);
+  return CONCEPTS.find(([, re]) => re.test(k))?.[0] ?? null;
+};
+const hrefPath = (href: string): string => {
+  try {
+    return new URL(href, 'http://x.invalid').pathname;
+  } catch {
+    return href.split(/[?#]/)[0] ?? '';
+  }
+};
+
+/**
+ * The control that MEANS what was asked for, when no control carries those exact words: the same letters however the spaces and hyphens fall ("cause list"
+ * for "CauseList"), all the words in any order ("list of cause" for "Cause List"), the same purpose under another name ("sign in" for "Log in", "basket" for
+ * "Cart"), or an address that says it (/causelist for "cause list"). Each step is used only when it points at exactly ONE control: a meaning shared by two is
+ * never a reason to pick one of them.
+ */
+function findByMeaning(candidates: readonly PageElement[], text: string): PageElement | null {
+  const only = (hits: readonly PageElement[]): PageElement | null => (hits.length === 1 ? (hits[0] ?? null) : null);
+  const qc = compact(text);
+  if (qc.length >= 4) {
+    const same = only(candidates.filter((e) => compact(e.name) === qc));
+    if (same !== null) return same;
+    const containing = candidates.filter((e) => compact(e.name).includes(qc));
+    const shortest = Math.min(...containing.map((e) => compact(e.name).length));
+    const closest = only(containing.filter((e) => compact(e.name).length === shortest));
+    if (closest !== null) return closest;
+  }
+  const wanted = meaningWords(text);
+  if (wanted.length >= 2) {
+    const all = only(candidates.filter((e) => {
+      const have = new Set(meaningWords(e.name));
+      return wanted.every((w) => have.has(w));
+    }));
+    if (all !== null) return all;
+  }
+  const purpose = conceptOf(text);
+  if (purpose !== null) {
+    const same = only(candidates.filter((e) => conceptOf(e.primary ?? e.name) === purpose));
+    if (same !== null) return same;
+  }
+  if (qc.length >= 5) {
+    const byAddress = only(candidates.filter((e) => e.href !== undefined && compact(hrefPath(e.href)).includes(qc)));
+    if (byAddress !== null) return byAddress;
+  }
+  return null;
+}
+
+function pickByWords(candidates: readonly PageElement[], text: string): PageElement | null {
+  const index = findBestTextMatchIndex(text, candidates.map((e) => e.name));
+  if (index !== null) return candidates[index] ?? null;
+  // "Add to cart" on a page whose button says "ADD" (or "Add to bag", or "+"): the same thing in a shop's other words.
+  if (isAddRequest(text)) {
+    const buy = BUY_BUTTON.test(squash(text));
+    const add = candidates.find((c) => ADD_BUTTON.test(squash(c.name)));
+    const buyNow = candidates.find((c) => BUY_BUTTON.test(squash(c.name)));
+    return (buy ? (buyNow ?? add) : (add ?? buyNow)) ?? null;
+  }
+  return findByMeaning(candidates, text);
+}
+
+/**
+ * What a click on "this text" should do: land on an element (enabled ones first, exact text before partial, what is on screen before what is
+ * not, "Add to cart" also finding "ADD"), land on the one belonging to a named item ("ADD — Paneer Tikka"), or — when the page has the same
+ * button for several items and none was named — say so instead of quietly choosing the first.
+ */
+export function chooseClickTarget(state: PageState, rawText: string): ClickChoice {
+  const { text, near } = splitNear(rawText);
   const pool = state.elements.filter((e) => ACTIVATABLE.has(e.role) && e.name !== '');
   const enabled = pool.filter((e) => e.disabled !== true);
   // What is showing wins over an identically-named link that only a closed menu is holding.
   for (const candidates of [enabled.filter((e) => e.hidden !== true), enabled, pool]) {
-    const index = findBestTextMatchIndex(text, candidates.map((e) => e.name));
-    if (index !== null) return candidates[index] ?? null;
+    let scoped = near === '' ? candidates : candidates.filter((e) => e.near !== undefined && nearMatches(e.near, near));
+    // An item named exactly beats one whose name merely contains the words ("Veg Biryani" over "Veg Biryani Special").
+    const exact = near === '' ? [] : scoped.filter((e) => keyOf(e.near ?? '') === keyOf(near));
+    if (exact.length > 0) scoped = exact;
+    const hit = pickByWords(scoped, text);
+    if (hit === null) continue;
+    // Only for the buttons that repeat once per item in a list of dishes or products (ADD, Add to cart, Buy): another repeated button, such as the
+    // Send of a chat (one in the message box, one in a file preview), is not a choice between items and is clicked as it always was.
+    if (hit.near !== undefined && isAddRequest(text)) {
+      // The same button for several items and the words did not settle which one: do not guess, name the items.
+      const same = scoped.filter((e) => e.near !== undefined && keyOf(e.name) === keyOf(hit.name));
+      const items = [...new Set(same.map((e) => e.near as string))];
+      if (items.length > 1) return { kind: 'ambiguous', options: items.slice(0, 12), name: hit.name };
+    }
+    return { kind: 'target', element: hit };
   }
-  return null;
+  return { kind: 'none' };
+}
+
+export type ListItemChoice = { readonly kind: 'target'; readonly element: PageElement } | { readonly kind: 'none' };
+
+/**
+ * The row of a list (a chat, a search result) whose first line is this, in the page as it is NOW: what is showing before what is not, a row of
+ * the list before the app's own menus, the first of several that carry the same first line (the same chat shown in two sections of a search).
+ */
+export function findListItem(state: PageState, want: { readonly primary?: string; readonly name?: string; readonly region?: string; readonly role?: string }): ListItemChoice {
+  const wanted = keyOf(want.primary ?? want.name ?? '');
+  if (wanted === '') return { kind: 'none' };
+  // A tick box is not a row to open, whatever its name (unless a tick box is what is asked for); and when a region is asked for (a popup's rows), only
+  // that region's rows are looked at.
+  const pool = state.elements.filter(
+    (e) =>
+      ACTIVATABLE.has(e.role) &&
+      (want.role === undefined ? e.role !== 'checkbox' : e.role === want.role) &&
+      e.name !== '' &&
+      e.hidden !== true &&
+      e.disabled !== true &&
+      e.region !== 'nav' &&
+      e.region !== 'footer' &&
+      (want.region === undefined || e.region === want.region),
+  );
+  // (a tick box's name is the whole row's: its first line is what a person calls it)
+  const byFirstLine = pool.filter((e) => keyOf(e.primary ?? e.name) === wanted || (want.role === 'checkbox' && keyOf(e.name).startsWith(`${wanted} `)));
+  const byWholeText = want.name === undefined ? [] : pool.filter((e) => keyOf(e.name) === keyOf(want.name ?? ''));
+  const found = byFirstLine.length > 0 ? byFirstLine : byWholeText;
+  const best = found.find((e) => e.inViewport) ?? found[0];
+  return best === undefined ? { kind: 'none' } : { kind: 'target', element: best };
+}
+
+/** The element a click on "this text" should land on, or null (also when it would be a guess between several items). */
+export function findClickTarget(state: PageState, text: string): PageElement | null {
+  const choice = chooseClickTarget(state, text);
+  return choice.kind === 'target' ? choice.element : null;
 }
 
 /** The field a fill on "this label" should land on. Unlabelled fields cannot be addressed by a person's words, so they are not candidates. */
@@ -178,6 +360,8 @@ export interface FoundItem {
   /** Where on the page it is, in words: showing now, further down, or inside a closed menu. */
   readonly where: string;
   readonly href?: string;
+  /** For a button the page repeats for every item: the item this one belongs to. */
+  readonly near?: string;
 }
 
 export interface FindResult {
@@ -217,7 +401,7 @@ export function findInPage(state: PageState, query: string): FindResult {
     else if (tokens.length > 0 && tokens.every((t) => href.includes(t))) score = 20;
     if (score === 0) return;
     scored.push({
-      item: { name: e.name, role: e.role, where: whereIs(e), ...(e.href !== undefined && e.href !== '' ? { href: e.href } : {}) },
+      item: { name: e.name, role: e.role, where: whereIs(e), ...(e.near !== undefined ? { near: e.near } : {}), ...(e.href !== undefined && e.href !== '' ? { href: e.href } : {}) },
       score: score + (e.hidden === true ? 0 : 5),
       order,
     });
@@ -289,7 +473,7 @@ export interface SnapshotOptions {
 export function stateToSnapshot(state: PageState, extras: SnapshotOptions = {}): PageSnapshot {
   const named = (roles: readonly ElementRole[]) => state.elements.filter((e) => roles.includes(e.role) && e.name !== '');
   const shown = named(LINK_ROLES).filter((e) => e.hidden !== true);
-  const pageLinks = shown.filter((e) => !SITE_FRAME_REGIONS.has(e.region ?? '')).map((e) => e.name);
+  const pageLinks = shown.filter((e) => !SITE_FRAME_REGIONS.has(e.region ?? '')).map((e) => withNear(e.name, e.near));
   const navLinks = navigationNames(state);
 
   const collapsed: Record<string, string[]> = {};
@@ -297,7 +481,7 @@ export function stateToSnapshot(state: PageState, extras: SnapshotOptions = {}):
     (collapsed[e.menu ?? 'other menus'] ??= []).push(e.name);
   }
 
-  const buttons = named(['button', 'checkbox', 'radio', 'switch', 'option']).filter((e) => e.hidden !== true).map((e) => e.name);
+  const buttons = named(['button', 'checkbox', 'radio', 'switch', 'option']).filter((e) => e.hidden !== true).map((e) => withNear(e.name, e.near));
   const inputs = state.elements.filter((e) => (e.role === 'input' || e.role === 'select') && e.name !== '').map((e) => e.name);
 
   const prev = extras.previousNavigation;

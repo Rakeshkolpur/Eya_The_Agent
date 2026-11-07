@@ -118,6 +118,7 @@ function rig(
     idleMs?: number;
     keepOpen?: () => boolean;
     keepOpenMs?: number;
+    afterWorkMs?: number;
     slowToolMs?: number;
     runTool?: ConversationDeps['runTool'];
     maxReconnects?: number;
@@ -164,6 +165,7 @@ function rig(
       idleMs: opts.idleMs ?? 60_000,
       ...(opts.keepOpen !== undefined ? { keepOpen: opts.keepOpen } : {}),
       ...(opts.keepOpenMs !== undefined ? { keepOpenMs: opts.keepOpenMs } : {}),
+      ...(opts.afterWorkMs !== undefined ? { afterWorkMs: opts.afterWorkMs } : {}),
       ...(opts.slowToolMs !== undefined ? { slowToolMs: opts.slowToolMs } : {}),
       echoTailMs: 250,
       now: () => clock.t,
@@ -545,13 +547,62 @@ describe('ending a conversation', () => {
     expect(r.ended.map(([why]) => why)).toEqual(['idle']);
   });
 
-  it('is not ended for being quiet while Eya is keeping a task for the person, and ends once there is none', async () => {
+  it('is not ended for being quiet while Eya is keeping a task for the person, and ends once there is none (after a short grace)', async () => {
     let task = true;
-    const r = await started({ idleMs: 20, keepOpen: () => task });
+    const r = await started({ idleMs: 20, keepOpen: () => task, afterWorkMs: 1_000 });
     await new Promise((res) => setTimeout(res, 120));
     expect(r.conv.active).toBe(true); // quiet for several times the idle time, but a task is waiting
     expect(r.ended).toEqual([]);
     task = false; // it was finished and told
+    r.clock.t += 2_000; // and the person stayed quiet for longer than the grace
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.ended.map(([why]) => why)).toEqual(['idle']);
+  });
+
+  it('a person who is silent for MINUTES while Eya works is not left with an offline Eya: no limit of ten minutes any more', async () => {
+    const r = await started({ idleMs: 20, keepOpen: () => true });
+    for (const minutes of [2, 3, 10, 11, 30, 90]) {
+      r.clock.t += minutes * 60_000;
+      await new Promise((res) => setTimeout(res, 60));
+      expect(r.conv.active, `${minutes} more minutes of quiet while she works`).toBe(true);
+    }
+    expect(r.ended).toEqual([]);
+  });
+
+  it('work that goes on for hours is taken to be stuck, not working, and does end it', async () => {
+    const r = await started({ idleMs: 20, keepOpen: () => true });
+    await new Promise((res) => setTimeout(res, 60));
+    r.clock.t += 4 * 60 * 60_000;
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.ended.map(([why]) => why)).toEqual(['idle']);
+  });
+
+  it('after the work ended she waits (two minutes by default) for the person who was busy, and only then ends', async () => {
+    let task = true;
+    const r = await started({ idleMs: 20, keepOpen: () => task });
+    await new Promise((res) => setTimeout(res, 60));
+    task = false;
+    await new Promise((res) => setTimeout(res, 60)); // the timer notices the work has ended
+    r.clock.t += 60_000; // one quiet minute after it ended
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.conv.active).toBe(true);
+    r.clock.t += 90_000; // past the two minutes
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.ended.map(([why]) => why)).toEqual(['idle']);
+  });
+
+  it('a tool that is still running keeps it open however long it takes, and the quiet time counts from when it finished', async () => {
+    let release: (v: string) => void = () => undefined;
+    const r = await started({ idleMs: 20, afterWorkMs: 1_000, runTool: () => new Promise<string>((res) => { release = res; }) });
+    r.session.emit({ type: 'toolCall', calls: [{ id: 'c1', name: 'deep_research', args: {} }] });
+    await new Promise((res) => setTimeout(res, 60));
+    r.clock.t += 30 * 60_000; // half an hour of a quiet person while the tool runs
+    await new Promise((res) => setTimeout(res, 80));
+    expect(r.conv.active).toBe(true);
+    release(JSON.stringify({ ok: true }));
+    await new Promise((res) => setTimeout(res, 60));
+    expect(r.conv.active).toBe(true); // the result has just gone back: it is not quiet yet
+    r.clock.t += 5_000;
     await new Promise((res) => setTimeout(res, 80));
     expect(r.ended.map(([why]) => why)).toEqual(['idle']);
   });

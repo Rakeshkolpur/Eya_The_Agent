@@ -1,12 +1,16 @@
 import { describe, it, expect } from 'vitest';
 import {
+  chooseClickTarget,
   findClickTarget,
   findFillTarget,
   findInPage,
+  isAddRequest,
   navigationNames,
   normalizePageState,
   readChunk,
+  splitNear,
   stateToSnapshot,
+  withNear,
 } from '../src/main/chrome/pageState';
 import { redactUrl } from '../src/main/browser/redactUrl';
 import type { PageElement, PageState } from '../src/main/chrome/pageState';
@@ -83,6 +87,13 @@ describe('normalizePageState: nothing the page influences is trusted for shape o
     expect(s.tables).toEqual([{ headers: ['A'], rows: [['1'], ['2']], totalRows: 9 }]);
     expect(s.scroll).toEqual({ y: 10, max: 100, atBottom: false });
     expect(s.notes).toEqual(['n1', 'n2']);
+  });
+
+  it('carries the number of data rows that the page script counted, and nothing else in its place', () => {
+    const s = normalizePageState({ tables: [{ headers: ['S.No', 'Case'], rows: [['1', 'WP 1/2026']], totalRows: 9, dataRows: 8 }, { headers: ['A'], rows: [['1']], totalRows: 2, dataRows: 'many' }, { headers: ['B'], rows: [['1']], totalRows: 2, dataRows: -3 }] });
+    expect(s.tables?.[0]).toMatchObject({ totalRows: 9, dataRows: 8 });
+    expect(s.tables?.[1]).not.toHaveProperty('dataRows');
+    expect(s.tables?.[2]).not.toHaveProperty('dataRows');
   });
 });
 
@@ -361,3 +372,109 @@ describe('addresses the model is shown never carry credentials', () => {
   });
 });
 
+
+describe('shops and food apps: the same button under every item', () => {
+  const dish = (name: string, button = 'ADD') => [el({ role: 'link', name }), el({ id: `e1.${name}.btn`, role: 'button', name: button, near: name })];
+  const menu = state({ elements: [...dish('Paneer Butter Masala'), ...dish('Veg Biryani'), ...dish('Masala Dosa')] });
+
+  it('names the item a repeated button belongs to when it is listed, so the right one can be asked for', () => {
+    const snapshot = stateToSnapshot(menu);
+    expect(snapshot.buttons).toEqual(['ADD — Paneer Butter Masala', 'ADD — Veg Biryani', 'ADD — Masala Dosa']);
+  });
+
+  it('clicks the ADD of the dish that was asked for, however it is worded', () => {
+    expect(findClickTarget(menu, 'ADD — Veg Biryani')?.near).toBe('Veg Biryani');
+    expect(findClickTarget(menu, 'Add to cart — masala dosa')?.near).toBe('Masala Dosa');
+    expect(findClickTarget(menu, 'ADD — Paneer Butter')?.near).toBe('Paneer Butter Masala'); // part of the name is enough
+    expect(findClickTarget(menu, 'ADD — Chicken 65')).toBeNull(); // not on the page: nothing is clicked in its place
+  });
+
+  it('does not guess when several items have the button and none was named: it says which items', () => {
+    const choice = chooseClickTarget(menu, 'Add to cart');
+    expect(choice).toMatchObject({ kind: 'ambiguous', options: ['Paneer Butter Masala', 'Veg Biryani', 'Masala Dosa'] });
+    expect(findClickTarget(menu, 'ADD')).toBeNull();
+  });
+
+  it('"Add to cart" finds the button whatever the shop calls it', () => {
+    for (const label of ['ADD', 'Add', 'Add to bag', 'ADD TO BAG', 'Add to basket', 'Add +', '+', 'Add item']) {
+      const page = state({ elements: [el({ role: 'link', name: 'Blue shirt' }), el({ role: 'button', name: label })] });
+      expect(findClickTarget(page, 'Add to cart')?.name, label).toBe(label);
+    }
+    const buy = state({ elements: [el({ role: 'button', name: 'Add to cart' }), el({ role: 'button', name: 'Buy now' })] });
+    expect(findClickTarget(buy, 'Buy now')?.name).toBe('Buy now');
+    expect(findClickTarget(buy, 'Add to cart')?.name).toBe('Add to cart');
+  });
+
+  it('does not take "Add address" or "Add to wishlist" for the cart button', () => {
+    const page = state({ elements: [el({ role: 'button', name: 'Add address' }), el({ role: 'button', name: 'Add to wishlist' }), el({ role: 'button', name: 'Sign in' })] });
+    expect(findClickTarget(page, 'Add to cart')).toBeNull();
+  });
+
+  it('one button for the page is just clicked, with or without the item named', () => {
+    const one = state({ elements: [el({ role: 'button', name: 'Add to cart' })] });
+    expect(findClickTarget(one, 'Add to cart')?.name).toBe('Add to cart');
+    expect(chooseClickTarget(one, 'Add to cart').kind).toBe('target');
+  });
+
+  it('a product page with its own button and a row of other products: asks which, and the product named gets its own', () => {
+    const page = state({
+      elements: [
+        el({ role: 'button', name: 'Add to cart', near: 'Wireless Mouse M185' }),
+        el({ id: 'x1', role: 'button', name: 'Add to cart', near: 'Keyboard K120' }),
+        el({ id: 'x2', role: 'button', name: 'Add to cart', near: 'USB Hub 4 Port' }),
+      ],
+    });
+    expect(chooseClickTarget(page, 'Add to cart').kind).toBe('ambiguous');
+    expect(findClickTarget(page, 'Add to cart — Wireless Mouse')?.near).toBe('Wireless Mouse M185');
+  });
+
+  it('keeps an item name that the extension sent, and ignores anything that is not text', () => {
+    const s = normalizePageState({ url: 'https://x/', title: 't', elements: [{ id: 'e1.0', role: 'button', name: 'ADD', near: 'Veg Biryani', inViewport: true }, { id: 'e1.1', role: 'button', name: 'ADD', near: 7, inViewport: true }] });
+    expect(s.elements[0]?.near).toBe('Veg Biryani');
+    expect(s.elements[1]?.near).toBeUndefined();
+    expect(splitNear('ADD — Veg Biryani')).toEqual({ text: 'ADD', near: 'Veg Biryani' });
+    expect(withNear('ADD', 'Veg Biryani')).toBe('ADD — Veg Biryani');
+    expect(withNear('ADD')).toBe('ADD');
+    expect(isAddRequest('Add to cart')).toBe(true);
+    expect(isAddRequest('Add address')).toBe(false);
+  });
+
+  it('shows the item beside each match when looking for a word on the page', () => {
+    const found = findInPage(menu, 'ADD');
+    expect(found.matches.filter((m) => m.role === 'button').map((m) => m.near)).toEqual(['Paneer Butter Masala', 'Veg Biryani', 'Masala Dosa']);
+  });
+});
+
+describe('naming the item: close is not the same as right', () => {
+  const dishes = state({
+    elements: ['Chicken Dum Biryani', 'Veg Biryani', 'Veg Biryani Special', 'Paneer Tikka'].map((n) => el({ id: 'e1.' + n, role: 'button', name: 'ADD', near: n })),
+  });
+
+  it('a dish that is not on the menu is not swapped for one that shares a word with it', () => {
+    expect(findClickTarget(dishes, 'ADD — Chicken 65')).toBeNull();
+    expect(findClickTarget(dishes, 'ADD — Paneer Butter Masala')).toBeNull();
+  });
+
+  it('the dish named exactly wins over a longer name that contains it', () => {
+    expect(findClickTarget(dishes, 'ADD — Veg Biryani')?.near).toBe('Veg Biryani');
+  });
+
+  it('a word that fits several dishes asks which, instead of picking one', () => {
+    expect(chooseClickTarget(dishes, 'ADD — Biryani')).toMatchObject({ kind: 'ambiguous', options: ['Chicken Dum Biryani', 'Veg Biryani', 'Veg Biryani Special'] });
+  });
+
+  it('the Send of a chat is not a choice between items: the Send of the message box and the Send of a file preview are clicked, not asked about', () => {
+    // (the page names which part each button belongs to, as it does for dishes; only ADD / Add to cart / Buy buttons are asked about)
+    const chat = state({ elements: [el({ role: 'button', name: 'Send', near: 'file' }), el({ role: 'button', name: 'Send', near: 'Rahul Sharma' }), el({ role: 'button', name: 'Attach' })] });
+    expect(chooseClickTarget(chat, 'Send').kind).toBe('target');
+    expect(findClickTarget(chat, 'Send')?.name).toBe('Send');
+    expect(chooseClickTarget(chat, 'Send — file').kind).toBe('target');
+    // and the dishes still are asked about
+    expect(chooseClickTarget(dishes, 'ADD').kind).toBe('ambiguous');
+  });
+
+  it('most of the words being there is enough, in any order', () => {
+    expect(findClickTarget(dishes, 'ADD — dum biryani chicken')?.near).toBe('Chicken Dum Biryani');
+    expect(findClickTarget(dishes, 'ADD — the Paneer Tikka')?.near).toBe('Paneer Tikka');
+  });
+});

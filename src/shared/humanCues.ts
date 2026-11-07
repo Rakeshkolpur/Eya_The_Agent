@@ -70,6 +70,7 @@ function familyOf(tool: string | undefined): Family {
     case '':
       return 'generic';
     case 'open_website':
+    case 'find_and_open_website':
     case 'open_url':
       return 'web';
     case 'web_search':
@@ -93,11 +94,13 @@ function familyOf(tool: string | undefined): Family {
     case 'analyze_document':
       return 'files';
     case 'find_chat':
+    case 'find_chat_files':
     case 'attach_file':
     case 'verify_sent':
     case 'quick_command':
       return 'chat';
     case 'download_file':
+    case 'download_from_site':
       return 'download';
     case 'play_on_youtube':
     case 'skip_ads':

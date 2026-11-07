@@ -60,13 +60,17 @@ describe("listItems: what can be clicked, for Eya's own code", () => {
           { id: 'e1.2', role: 'link', name: 'Hidden', hidden: true, inViewport: false },
           { id: 'e1.3', role: 'button', name: 'Attach', inViewport: true },
           { id: 'e1.4', role: 'checkbox', name: 'Mute', inViewport: true },
+          { id: 'e1.5', role: 'checkbox', name: 'Anna', checked: true, region: 'dialog', inViewport: true },
         ],
       }),
     });
     const items = await new ChromeBrowserService(bridge).listItems();
+    // (a tick box is listed with whether it is ticked, only so that a choice made in a chat picker can be read back; it is never a row to open)
     expect(items).toEqual([
       { name: 'Rahul Sharma ok 10:42', primary: 'Rahul Sharma', role: 'clickable', region: 'main' },
       { name: 'Attach', role: 'button' },
+      { name: 'Mute', role: 'checkbox' },
+      { name: 'Anna', role: 'checkbox', region: 'dialog', checked: true },
     ]);
   });
 });

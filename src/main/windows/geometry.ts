@@ -34,7 +34,7 @@ export const EDGE_MARGIN = 6;
 /** The quick assistant panel's window. */
 export const ASSISTANT_WINDOW: Size = { width: 380, height: 600 };
 /** The full app window at its largest; on a small screen it shrinks to fit. */
-export const APP_WINDOW: Size = { width: 1120, height: 720 };
+export const APP_WINDOW: Size = { width: 1360, height: 860 };
 const APP_SCREEN_MARGIN = 24;
 
 const clamp = (n: number, lo: number, hi: number): number => Math.min(Math.max(n, lo), Math.max(lo, hi));
@@ -98,6 +98,24 @@ export function appBounds(area: Rect, size: Size = APP_WINDOW): Rect {
   const width = Math.min(size.width, area.width - APP_SCREEN_MARGIN * 2);
   const height = Math.min(size.height, area.height - APP_SCREEN_MARGIN * 2);
   return { x: Math.round(area.x + (area.width - width) / 2), y: Math.round(area.y + (area.height - height) / 2), width, height };
+}
+
+export interface MaximizeState {
+  readonly maximized: boolean;
+  /** Where the window was before it was maximized, to go back to. */
+  readonly restore: Rect | null;
+}
+
+/**
+ * What the maximize button does: fill the whole work area of the screen the window is on (everything but the taskbar), remembering where it was;
+ * pressed again, go back to that place (kept on the screen if the screen has changed since), or to the usual place if nothing was remembered.
+ */
+export function toggledMaximize(state: MaximizeState, current: Rect, area: Rect): { readonly state: MaximizeState; readonly bounds: Rect } {
+  if (state.maximized) {
+    const back = state.restore !== null ? clampRect(state.restore, area) : appBounds(area);
+    return { state: { maximized: false, restore: null }, bounds: back };
+  }
+  return { state: { maximized: true, restore: current }, bounds: { ...area } };
 }
 
 /** One step of the settling animation: how far along (0..1) eased out, from one rectangle's position to another's. */

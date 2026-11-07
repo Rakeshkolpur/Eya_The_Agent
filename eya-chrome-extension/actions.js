@@ -62,7 +62,11 @@ export async function observeTab(tabId) {
       return restrictedState(tabId, 'This is a chat app and Communication Access is off, so Eya did not look at anything in it.');
     }
     const message = String(err?.message ?? err);
-    if (/cannot access|extensions gallery|cannot be scripted|chrome-error|showing error page|not allowed/i.test(message)) {
+    // The browser's own "this site can't be reached" page: the address was not reached at all, which is a failure to open it, not a protected page.
+    if (/showing error page|chrome-error|edge-error/i.test(message)) {
+      return restrictedState(tabId, "The browser is showing its own error page: the site could not be reached.");
+    }
+    if (/cannot access|extensions gallery|cannot be scripted|not allowed/i.test(message)) {
       return restrictedState(tabId, 'This is a browser-internal or protected page that extensions are not allowed to read.');
     }
     throw err;
@@ -99,11 +103,16 @@ export async function settleTab(tabId, sinceMs, quick = false) {
  * `options.downloads === false`: this action cannot start a download (typing in a box, scrolling), so do not wait to see whether one
  * did — that wait is up to 2.2 s, and used to be paid after every single click and fill.
  */
+let lastActionStartedAt = null;
+
 export async function runAction(requestedTabId, perform, options = {}) {
   const quick = options.quick === true;
   const watchDownloads = !quick && options.downloads !== false;
   const tabId = await resolveTabId(requestedTabId);
   const startedAt = Date.now();
+  // (a download that began after the previous action stopped waiting is reported now, once)
+  const downloadsFrom = lastActionStartedAt === null ? startedAt : Math.min(startedAt, lastActionStartedAt);
+  lastActionStartedAt = startedAt;
 
   let performed;
   try {
@@ -140,7 +149,9 @@ export async function runAction(requestedTabId, perform, options = {}) {
     break;
   }
 
-  const download = watchDownloads ? await awaitDownload(startedAt) : null;
+  // A click or address that looks like it fetches a file waits for the download to begin; any other one only looks (see awaitDownload).
+  const downloadLikely = performed?.likelyDownload === true || options.downloadLikely === true;
+  const download = watchDownloads ? await awaitDownload(downloadsFrom, { startWaitMs: downloadLikely ? 2200 : 250 }) : null;
   const state = await observeTab(activeTabId);
   return {
     performed,

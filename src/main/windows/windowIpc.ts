@@ -1,3 +1,4 @@
+import { userInfo } from 'node:os';
 import { app, ipcMain } from 'electron';
 import { IpcChannels } from '@shared/ipcContract';
 import type { ActivityAction, ActivitySnapshot, SettingsPatch, SettingsSnapshot, WindowMode } from '@shared/ipcContract';
@@ -26,10 +27,20 @@ export interface WindowIpcDeps {
   readonly send: (channel: string, payload: unknown) => void;
 }
 
+/** The Windows account's name with a capital letter ("rakesh" -> "Rakesh"), for "Good morning, Rakesh". Empty when it cannot be read. */
+function windowsUserName(): string {
+  try {
+    const n = userInfo().username.trim();
+    return n === '' ? '' : n.charAt(0).toUpperCase() + n.slice(1);
+  } catch {
+    return '';
+  }
+}
+
 export function settingsSnapshot(deps: Pick<WindowIpcDeps, 'settings' | 'memoryPath' | 'startWithWindows' | 'performance'>): SettingsSnapshot {
   return {
     settings: deps.settings.get(),
-    info: { version: app.getVersion(), packaged: app.isPackaged, memoryPath: deps.memoryPath, startWithWindows: deps.startWithWindows.get(), performance: deps.performance() },
+    info: { version: app.getVersion(), packaged: app.isPackaged, memoryPath: deps.memoryPath, userName: windowsUserName(), startWithWindows: deps.startWithWindows.get(), performance: deps.performance() },
   };
 }
 
@@ -38,6 +49,7 @@ export function registerWindowIpc(deps: WindowIpcDeps): void {
   ipcMain.on(IpcChannels.windowSetMode, (_evt, mode: unknown) => {
     if (typeof mode === 'string' && (MODES as readonly string[]).includes(mode)) orb.setMode(mode as WindowMode);
   });
+  ipcMain.on(IpcChannels.windowMaximize, () => orb.toggleMaximize());
   ipcMain.handle(IpcChannels.windowGetMode, () => orb.getModeState());
   ipcMain.on(IpcChannels.windowDrag, (_evt, phase: unknown) => {
     if (phase === 'start') orb.beginDrag();

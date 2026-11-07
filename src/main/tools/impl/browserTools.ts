@@ -3,7 +3,8 @@ import type { ActOnPageResult, BrowserAutomationService, BrowserTabControl, Clic
 import { challengeMessage, isBlockingChallenge } from '@main/browser/challenges';
 import { codeWasSaid, currentUserWords } from '@main/security/userWords';
 import { checkoutFacts } from '@main/browser/checkoutFacts';
-import { BrowserUnavailableError, CommunicationAccessError } from '@main/browser/errors';
+import { signInFields } from '@main/browser/signInState';
+import { BrowserNavigationError, BrowserUnavailableError, CommunicationAccessError } from '@main/browser/errors';
 import { LoopGuard, pageFingerprint } from '@main/browser/loopGuard';
 import type { ActionEffects, DownloadInfo } from '@main/browser/pageEffects';
 import type { PageContext } from '@main/browser/sensitiveActions';
@@ -59,7 +60,7 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function snapshotFields(s: PageSnapshot): Record<string, unknown> {
+export function snapshotFields(s: PageSnapshot): Record<string, unknown> {
   return {
     url: s.url,
     title: s.title,
@@ -74,6 +75,8 @@ function snapshotFields(s: PageSnapshot): Record<string, unknown> {
     // Real links that only a closed (hover / click-to-open) menu is holding, by menu.
     ...(s.collapsedMenus !== undefined ? { linksInsideClosedMenus: s.collapsedMenus } : {}),
     ...(s.dialogs.length > 0 ? { dialogs: s.dialogs } : {}),
+    // Whether the person is signed in on this page, from what the page shows (said only when it can be told): the model never has to guess, and never asks someone who is signed in to sign in.
+    ...signInFields(s),
     ...(s.visibleText !== undefined ? { visibleText: s.visibleText } : {}),
     ...(s.tables !== undefined ? { tables: s.tables } : {}),
     ...(s.focused !== undefined && s.focused !== '' ? { focused: s.focused } : {}),
@@ -110,7 +113,7 @@ function effectsFields(effects: ActionEffects | undefined): Record<string, unkno
 }
 
 /** A fresh look at the page, every time — the only state a tool result is ever built from. */
-function currentPageData(
+export function currentPageData(
   action: string,
   target: string | null,
   change: PageChange,
@@ -126,6 +129,16 @@ function currentPageData(
     currentPage: snapshotFields(snapshot),
     ...extra,
   };
+}
+
+/**
+ * A click after which the page is exactly as it was has not been SHOWN to have done anything. It is said so (and flagged), and never reported as a plain
+ * success: a "clicked it" that changed nothing is how a task goes on for ever on a control that did not work.
+ */
+function nothingChanged(action: string, before: PageSnapshot | null, result: Extract<ActOnPageResult, { ok: true }>, downloaded: string): boolean {
+  if (action !== 'click' || before === null || downloaded !== '') return false;
+  const change = changeBetween(before, result.snapshot, result.effects);
+  return !change.stateChanged && !change.navigated;
 }
 
 function changeBetween(before: PageSnapshot | null, after: PageSnapshot, effects?: ActionEffects): PageChange {
@@ -184,6 +197,10 @@ export function unavailable(err: BrowserUnavailableError): ToolResult {
     // Not "the browser is gone": a privacy switch is off. Say which app, and that nothing was looked at.
     return { ok: false, summary: 'communication access is off', error: err.message, data: { communicationAccess: 'off', app: err.app, nothingWasRead: true } };
   }
+  if (err.detail.why === 'stopped') {
+    // The user pressed Stop (or left the task paused for ages): not a broken browser, and not something to work around.
+    return { ok: false, summary: 'stopped by the user', error: err.message, data: { stoppedByUser: true } };
+  }
   return {
     ok: false,
     summary: err.detail.why === 'needs_reload' ? 'extension needs a reload' : 'browser not connected',
@@ -198,6 +215,19 @@ export function unavailable(err: BrowserUnavailableError): ToolResult {
 
 function failure(summary: string, prefix: string, err: unknown): ToolResult {
   if (err instanceof BrowserUnavailableError) return unavailable(err);
+  // A page that would not open: the reason in plain words (a name that does not exist, a refused connection, a timeout…), and whether trying again can help.
+  if (err instanceof BrowserNavigationError) {
+    return {
+      ok: false,
+      summary: 'page did not open',
+      error: err.message,
+      data: {
+        navigation: { requested: err.requested, problem: err.problem.kind, canRetry: err.problem.retryable },
+        // Not the end of the task: the right address can be worked out.
+        next: 'Do not stop here and do not ask the user for the address: call find_and_open_website with this address as url and the site\'s name, which tries again if it was a hiccup, finds the current address and checks the page. Tell the user only if that fails too.',
+      },
+    };
+  }
   return { ok: false, summary, error: `${prefix}: ${describeError(err)}` };
 }
 
@@ -231,19 +261,18 @@ export function createBrowserTools(
         "and fill_on_page. If you don't already know a site's exact official URL (e.g. for \"the High Court of " +
         'Telangana\" or \"my bank\"), use web_search first to find and confirm it, then call this with that exact ' +
         'URL — never invent one, and never treat opening a site as the same thing as searching for it. This always ' +
-        "happens in the user's OWN browser — Chrome, unless they name Edge — reusing a tab they already have open on that site there if there is " +
-        "one, else a new tab — so their sign-ins are already there. If their browser is not connected " +
-        'the result says why and what to do (usually: call connect_chrome); in that case do NOT retry with isolated. ' +
-        "isolated: true opens Eya's own separate window instead, which starts signed out of everything — only ever set it " +
-        'after the user has said that is fine.',
+        "happens in Eya Browser (Eya's own browser, with sign-ins of its own that stay) unless the user asked for their own browser, chose it in settings, or the page is a chat app: " +
+        'Eya decides, so never choose it yourself and never ask the user which browser. The result says where it opened, where it really ended up (redirects, ' +
+        'including to another site), what the site answered, and — if it could not open — why, in plain words. If the user\'s own browser is needed but not connected, ' +
+        'the result says why and what to do (usually: call connect_chrome).',
       args: {
         url: { type: 'string', required: true, description: 'The exact http(s) address to open, e.g. from a web_search result.' },
-        isolated: { type: 'boolean', description: "Open in Eya's own separate, signed-out window instead of the user's browser. Only after the user agreed to that." },
+        isolated: { type: 'boolean', description: "Leave it out. (It forces Eya Browser even when the user asked for their own; Eya already chooses by itself.)" },
         browser: {
           type: 'string',
           enum: ['chrome', 'edge'],
           description:
-            'Leave it out and Eya uses Chrome. Set it whenever the user names a browser ("in Edge", "on Chrome") — and on every page of the same request, so a ' +
+            'Leave it out unless the user names their own browser ("in my Edge", "on my Chrome") — then set it, on every page of the same request, so a ' +
             'task stays in the browser they asked for.',
         },
       },
@@ -394,6 +423,15 @@ export function createBrowserTools(
           error: action === 'fill' ? `No field matching "${text}" is visible on the current page.` : `"${text}" isn't visible on the current page.`,
           data: currentPageData(action, text, idle, result.snapshot),
         };
+      case 'ambiguous':
+        return {
+          ok: false,
+          summary: 'which one?',
+          error:
+            'Nothing was clicked. The page has the same "' + result.name + '" button for several items: ' + result.options.join('; ') + '. ' +
+            'Work out which item the user means (ask them if it is not clear), then call click_on_page again with the same text and near set to that item\'s name.',
+          data: { ...currentPageData(action, text, idle, result.snapshot), choices: result.options },
+        };
       case 'needs_confirmation':
         if (question !== undefined) {
           // A send in a chat app: the question names who it goes to, and is put to the user word for word.
@@ -445,8 +483,8 @@ export function createBrowserTools(
     return applyChallenge(
       {
         ok: true,
-        summary: `${summary}${downloaded}`,
-        data: currentPageData(action, target, changeBetween(before, result.snapshot, result.effects), result.snapshot, extra),
+        summary: `${summary}${downloaded}${nothingChanged(action, before, result, downloaded) ? " — but nothing on the page changed, so it may not have done anything" : ""}`,
+        data: currentPageData(action, target, changeBetween(before, result.snapshot, result.effects), result.snapshot, nothingChanged(action, before, result, downloaded) ? { ...extra, nothingChanged: true } : extra),
       },
       result.snapshot,
     );
@@ -457,7 +495,7 @@ export function createBrowserTools(
       name: 'click_on_page',
       status: 'Clicking that…',
       description:
-        'Click a link, button, tab, checkbox or menu item that is actually visible on the web page that is currently open, ' +
+        'Click a link, button, tab, checkbox or menu item on the web page that is currently open (if it is not showing, the page is scrolled to look for it), ' +
         'by its visible text (e.g. "Cause List", "Sent", "My Orders", "Sign in", "Search"). Use this to navigate WITHIN a ' +
         'website that is already open — never web_search or open_url for that: those search the internet or load an ' +
         'unrelated page, not the thing the user is pointing at on the page in front of them. If nothing on the page ' +
@@ -469,13 +507,17 @@ export function createBrowserTools(
         'account setting is NOT done on the first call: you get a question to put to the user, and only after they ' +
         'clearly say yes do you call again with confirm: true.',
       args: {
-        text: { type: 'string', required: true, description: 'The visible text of the link, button or menu item to click.' },
+        text: { type: 'string', required: true, description: 'The visible text of the link, button or menu item to click. For adding to a cart, "Add to cart" will do whatever the shop calls it (ADD, Add to bag, +).' },
+        near: { type: 'string', description: 'When the page has the same button for many items ("ADD" under every dish, "Add to cart" under every product): the name of the item you want, e.g. "Paneer Butter Masala". The page snapshot lists such buttons as "ADD — Paneer Butter Masala".' },
         confirm: { type: 'boolean', description: 'Set true ONLY after the user has clearly agreed to this exact action when asked.' },
       },
     },
     async execute(args): Promise<ToolResult> {
-      const text = stringArg(args, 'text');
-      if (text === undefined) return { ok: false, summary: 'no text', error: 'Text to click is required.' };
+      const words = stringArg(args, 'text');
+      if (words === undefined) return { ok: false, summary: 'no text', error: 'Text to click is required.' };
+      // (Which item a repeated button belongs to travels with the words: "ADD — Paneer Butter Masala".)
+      const near = stringArg(args, 'near');
+      const text = near !== undefined && near !== '' && !words.includes(' — ') ? `${words} — ${near}` : words;
       const before = await lookBefore(service);
       const fingerprint = before !== null ? pageFingerprint(before) : null;
       if (before !== null && fingerprint !== null && guard.isLoop(fingerprint, 'click', text)) {
@@ -484,13 +526,26 @@ export function createBrowserTools(
       const context = contextOf(before);
       let question: string | undefined;
       let sendCovered = false; // this click is the send the user already said yes to
+      let wrongChatQuestion: string | undefined; // this click was refused because the chat that is open is not the one chosen
+      let notAllowed: string | undefined; // this click was refused because the plugin for this chat app may not send (no yes can change that)
+      const chatGate = options.chatGate;
       const gate: ClickGate | undefined =
         args['confirm'] === true
-          ? undefined
+          ? chatGate === undefined
+            ? undefined
+            : // The user's yes does not cover a Send in the wrong chat: if the chat that is open is not the one that was chosen, nothing is sent.
+              (t) => {
+                const wrong = chatGate.forWrongChat(before, t);
+                if (wrong === null) return null;
+                if (wrong.blocked !== undefined) notAllowed = wrong.blocked;
+                else wrongChatQuestion = wrong.question;
+                return wrong.reason;
+              }
           : (t) => {
               const chat = options.chatGate?.forClick(before, t) ?? null;
               if (chat !== null) {
-                if (chat.reason !== null) question = chat.question;
+                if (chat.blocked !== undefined) notAllowed = chat.blocked;
+                else if (chat.reason !== null) question = chat.question;
                 else sendCovered = true;
                 return chat.reason; // null: the user already agreed to exactly this send
               }
@@ -508,6 +563,14 @@ export function createBrowserTools(
       }
       // Asking the user is not an attempt that "went nowhere", so it does not count towards the loop limit.
       if (result.ok || (result.reason !== 'needs_confirmation' && result.reason !== 'needs_user')) record();
+      // Not allowed at all (the plugin for this app may not send): a refusal, not a question — nothing is sent, and the AI is told it cannot be asked for.
+      if (!result.ok && notAllowed !== undefined && result.reason === 'needs_confirmation') {
+        return { ok: false, summary: 'not allowed', error: `${notAllowed} This is the person's choice to change; tell them, and do not try another way.`, data: { status: 'plugin_blocked', pluginBlocked: true, forPerson: notAllowed, ...currentPageData('click', text, { stateChanged: false, navigated: false }, result.snapshot) } };
+      }
+      // Not a question for the user to say yes to (that was their yes, and it was for a different chat): nothing is sent, and the model is told so.
+      if (!result.ok && wrongChatQuestion !== undefined && result.reason === 'needs_confirmation') {
+        return { ok: false, summary: 'wrong chat', error: wrongChatQuestion, data: { status: 'wrong_chat', ...currentPageData('click', text, { stateChanged: false, navigated: false }, result.snapshot) } };
+      }
       if (!result.ok) return declined(result, 'click', text, 'click', question);
       if (sendCovered) options.chatGate?.consumed(); // that yes is used up: the next send asks again
       return succeeded('click', text, `clicked "${text}"`, before, result);
@@ -549,6 +612,9 @@ export function createBrowserTools(
       }
       if (submit && args['confirm'] !== true) {
         const chat = options.chatGate?.forSubmit(before, label) ?? null;
+        if (chat?.blocked !== undefined) {
+          return { ok: false, summary: 'not allowed', error: `Nothing was typed. ${chat.blocked} This is the person's choice to change; tell them, and do not try another way.`, data: { status: 'plugin_blocked', pluginBlocked: true, forPerson: chat.blocked } };
+        }
         if (chat !== null && chat.reason !== null) {
           return {
             ok: false,
@@ -589,6 +655,7 @@ export function createBrowserTools(
         }
       }
       if (submit && options.chatGate?.forSubmit(before, label)?.reason === null) options.chatGate.consumed();
+      else options.chatGate?.typed?.(before, label, value);
       return succeeded('fill', label, `filled "${label}"${submit ? ' and pressed Enter' : ''}`, before, result);
     },
   };

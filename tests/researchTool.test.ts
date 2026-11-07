@@ -33,25 +33,24 @@ function runner(report: ResearchReport): { runner: ResearchRunner; requests: Arr
 const doc = { title: 'Kesavananda Bharati judgment', url: 'https://www.sci.gov.in/a.pdf', domain: 'sci.gov.in', sizeBytes: 3_145_728, verified: true, from: 'sci.gov.in', trust: 95 };
 const source = { title: 'The case', url: 'https://www.sci.gov.in/case', domain: 'sci.gov.in', siteKind: 'official' as const, trust: 95, why: 'official site · mentions 3 of 3 key words', excerpts: ['one', 'two', 'three'] };
 
-describe('deep_research: asks first', () => {
-  it('for documents, the first call researches nothing and hands back the question to ask', async () => {
-    const r = runner(emptyReport());
+describe('deep_research: does not ask which site, it goes and looks', () => {
+  it('for documents, the first call researches at once, across the whole internet', async () => {
+    const r = runner(emptyReport({ documents: [doc] }));
     const tool = createResearchTool({ researcher: r.runner });
     const result = await tool.execute({ question: 'Kesavananda Bharati case', kind: 'documents' });
     expect(result.ok).toBe(true);
-    expect(result.summary).toBe('ask the user first');
-    expect((result.data as { askUser?: boolean }).askUser).toBe(true);
-    expect(String((result.data as { question?: string }).question)).toMatch(/Do you know a website/);
-    expect(r.requests).toHaveLength(0);
+    expect(result.summary).not.toBe('ask the user first');
+    expect(r.requests).toHaveLength(1);
+    expect(r.requests[0]).toMatchObject({ kind: 'documents' });
+    expect(r.requests[0]).not.toHaveProperty('site');
   });
 
   it('for films and songs too', async () => {
     const r = runner(emptyReport({ kind: 'media' }));
-    const result = await createResearchTool({ researcher: r.runner }).execute({ question: 'Kesari', kind: 'media' });
-    expect(result.summary).toBe('ask the user first');
-    expect(r.requests).toHaveLength(0);
+    await createResearchTool({ researcher: r.runner }).execute({ question: 'Kesari', kind: 'media' });
+    expect(r.requests).toHaveLength(1);
+    expect(r.requests[0]).toMatchObject({ kind: 'media', question: 'Kesari' });
   });
-
   it('a named site goes in as the site to look at first', async () => {
     const r = runner(emptyReport({ documents: [doc], sources: [source] }));
     const result = await createResearchTool({ researcher: r.runner }).execute({ question: 'Kesavananda Bharati case', kind: 'documents', site: 'indiankanoon.org' });
@@ -59,14 +58,13 @@ describe('deep_research: asks first', () => {
     expect(r.requests[0]).toMatchObject({ kind: 'documents', site: 'indiankanoon.org' });
   });
 
-  it('something that is not a web address is asked about again, not searched', async () => {
-    const r = runner(emptyReport());
-    const result = await createResearchTool({ researcher: r.runner }).execute({ question: 'x case', kind: 'documents', site: 'ecourts' });
-    expect(result.summary).toBe('ask the user first');
-    expect(String((result.data as { question?: string }).question)).toMatch(/couldn't make a web address/);
-    expect(r.requests).toHaveLength(0);
+  it('words given as a site that are not a web address are not lost: they join the question, and the whole internet is searched', async () => {
+    const r = runner(emptyReport({ documents: [doc] }));
+    await createResearchTool({ researcher: r.runner }).execute({ question: 'x case', kind: 'documents', site: 'ecourts' });
+    expect(r.requests).toHaveLength(1);
+    expect(r.requests[0]).toMatchObject({ question: 'x case ecourts' });
+    expect(r.requests[0]).not.toHaveProperty('site');
   });
-
   it('"no site" searches the whole internet, without a site restriction', async () => {
     const r = runner(emptyReport({ documents: [doc] }));
     const result = await createResearchTool({ researcher: r.runner }).execute({ question: 'Kesavananda Bharati case', kind: 'documents', no_site: true, thorough: true });

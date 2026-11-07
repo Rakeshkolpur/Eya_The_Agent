@@ -23,7 +23,7 @@ function put(rel: string, modified = new Date('2026-05-01T12:00:00Z')): string {
   return path;
 }
 
-async function commands(extra: { clipboard?: string; now?: Date; built?: boolean; exists?: (p: string) => Promise<boolean> } = {}): Promise<LocalCommands> {
+async function commands(extra: { clipboard?: string; now?: Date; built?: boolean; exists?: (p: string) => Promise<boolean>; probe?: (url: string) => Promise<boolean> } = {}): Promise<LocalCommands> {
   index = new FileIndex({ roots: [root], watch: null, rescanEveryMs: 0 });
   if (extra.built !== false) await index.build();
   return new LocalCommands({
@@ -40,6 +40,7 @@ async function commands(extra: { clipboard?: string; now?: Date; built?: boolean
     ...(extra.clipboard !== undefined ? { clipboardText: () => extra.clipboard ?? '' } : {}),
     ...(extra.now !== undefined ? { now: () => extra.now as Date } : {}),
     ...(extra.exists !== undefined ? { exists: extra.exists } : {}),
+    ...(extra.probe !== undefined ? { probe: extra.probe } : {}),
   });
 }
 
@@ -61,6 +62,34 @@ beforeEach(() => {
 afterEach(() => {
   index?.stop();
   rmSync(root, { recursive: true, force: true });
+});
+
+describe('an address the person typed', () => {
+  it('is tried first: one that answers is opened at once, as before', async () => {
+    const probed: string[] = [];
+    const local = await commands({ probe: async (u) => (probed.push(u), true) });
+    const done = await local.tryHandle('open example.org/reports');
+    expect(probed).toEqual(['https://example.org/reports']);
+    expect(calls).toEqual([{ name: 'open_url', args: { url: 'https://example.org/reports' } }]);
+    expect(done).toMatchObject({ ok: true, intent: 'open_site' });
+  });
+
+  it('one that is dead, gone or out of date is not opened blindly: the assistant takes it and works out the right address', async () => {
+    const local = await commands({ probe: async () => false });
+    expect(await local.tryHandle('open old-example.com')).toBeNull();
+    expect(await local.tryHandle('open https://old-example.com/reports')).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it('the well-known sites open at once without being looked at first, and without a check at all everything opens as before', async () => {
+    let looked = 0;
+    const local = await commands({ probe: async () => (looked++, false) });
+    const done = await local.tryHandle('open youtube');
+    expect(looked).toBe(0);
+    expect(done).toMatchObject({ ok: true, spoken: 'Opening YouTube.' });
+    const plain = await commands();
+    expect(await plain.tryHandle('open example.org')).toMatchObject({ ok: true });
+  });
 });
 
 describe('websites', () => {

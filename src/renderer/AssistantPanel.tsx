@@ -57,7 +57,7 @@ export function AssistantPanel({ c }: { c: EyaControl }): React.ReactElement {
   const send = (): void => {
     const text = input;
     setInput('');
-    void c.submit(text);
+    void c.submit(text, undefined, { agent: true });
   };
 
   return (

@@ -46,12 +46,15 @@ export interface ConversationDeps {
   /** Ends the conversation after this long with nothing happening. */
   idleMs?: number;
   /**
-   * True while Eya is keeping a task for the person (it is waiting on a slow page, or on their answer): the conversation is not ended for
-   * being quiet then, so she can tell them how it went. It still ends after `keepOpenMs` of that.
+   * True while Eya is working on something for the person (a request she is carrying out, a task she is keeping, a page she is waiting on, an answer she is
+   * waiting for): the person may be silent then, busy with their own work, and the conversation is not ended for being quiet — however long it takes — so she can
+   * tell them how it went. Only `keepOpenMs` (hours) stops that, for a task that is stuck rather than working.
    */
   keepOpen?: () => boolean;
-  /** The longest a quiet conversation is kept open for a task (default 10 minutes). */
+  /** The longest a quiet conversation is kept open for work that never finishes (default 3 hours: a stuck task, not a working one). */
   keepOpenMs?: number;
+  /** How long a quiet conversation stays open after the work ended, so she can say how it went and the person, who was busy, can answer (default 2 minutes). */
+  afterWorkMs?: number;
   /** How long after Eya stops speaking the microphone stays muted (her voice fading in the room). */
   echoTailMs?: number;
   /** How long a tool may run before onSlowTool fires. */
@@ -120,6 +123,8 @@ export class LiveConversation {
   private toolsRunning = 0;
   /** When the conversation was first kept open past its quiet time for a task (null when it is not being). */
   private heldSince: number | null = null;
+  /** The last time Eya was seen to be working (a tool running, a task kept, speaking), for the grace after it ends. */
+  private lastBusyAt: number | null = null;
   private unsubscribers: Array<() => void> = [];
   /** Model -> when it stops being tried last. Loaded on first use from the store, if there is one. */
   private triedLastUntil: Map<string, number> | null = null;
@@ -160,6 +165,7 @@ export class LiveConversation {
     this.saidText = '';
     this.lastSpoke = null;
     this.toolsRunning = 0;
+    this.lastBusyAt = null;
     this.reconnectTimes = [];
     this.cancelled.clear();
     this.batcher.reset();
@@ -463,19 +469,26 @@ export class LiveConversation {
     if (!this.isActive) return;
     const idleMs = this.deps.idleMs ?? 30_000;
     this.idleTimer = setTimeout(() => {
+      const now = this.now();
       // Mid-speech or mid-task is not idle.
       if (this.speaking || this.toolsRunning > 0) {
+        if (this.toolsRunning > 0) this.lastBusyAt = now; // (speaking is not "work": the grace after work is for a task that has just ended)
         this.resetIdle();
         return;
       }
-      // A task Eya is keeping for the person is not "nothing happening": stay open (for a while) so she can tell them how it went.
+      // Work Eya is doing for the person is not "nothing happening", however quiet they are: stay open so she can tell them how it went. (Only work that goes on for
+      // hours is taken to be stuck.)
       if (this.deps.keepOpen?.() === true) {
-        const now = this.now();
+        this.lastBusyAt = now;
         this.heldSince ??= now;
-        if (now - this.heldSince < (this.deps.keepOpenMs ?? 10 * 60_000)) {
+        if (now - this.heldSince < (this.deps.keepOpenMs ?? 3 * 60 * 60_000)) {
           this.armIdle();
           return;
         }
+      } else if (this.lastBusyAt !== null && now - this.lastBusyAt < (this.deps.afterWorkMs ?? 2 * 60_000)) {
+        // The work has just ended: she says how it went and waits a little for the person, who may be busy with their own work, to answer.
+        this.armIdle();
+        return;
       }
       this.stop('idle');
     }, idleMs);

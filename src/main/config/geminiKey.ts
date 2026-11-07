@@ -1,3 +1,4 @@
+import { extractKey, keyHint, looksLikeGeminiKey, whyNotAKey } from '@shared/geminiKeys';
 import type { GeminiKeyResult, GeminiKeyStatus } from '@shared/ipcContract';
 
 /**
@@ -28,16 +29,7 @@ export interface KeyFiles {
 
 export type KeyCheck = 'valid' | 'invalid' | 'unreachable';
 
-const KEY_PATTERN = /^[A-Za-z0-9_-]{20,100}$/;
-
-export function looksLikeGeminiKey(text: string): boolean {
-  return KEY_PATTERN.test(text);
-}
-
-/** "…abcd": enough to recognise, nothing that could be used. */
-export function keyHint(key: string): string {
-  return `…${key.slice(-4)}`;
-}
+export { keyHint, looksLikeGeminiKey };
 
 export class GeminiKeyStore {
   constructor(
@@ -130,13 +122,13 @@ export class GeminiKeyService {
   }
 
   async set(raw: unknown): Promise<GeminiKeyResult> {
-    const key = typeof raw === 'string' ? raw.trim() : '';
+    // (What was pasted may carry quotes, a name or invisible characters from wherever it was copied: the key is taken out of it.)
+    const pasted = typeof raw === 'string' ? raw : '';
+    const key = extractKey(pasted) ?? '';
     if (!this.deps.store.canSave) {
       return this.result(false, "Windows can't protect a saved key on this account, so I haven't saved it. You can put it in a .env file instead.");
     }
-    if (!looksLikeGeminiKey(key)) {
-      return this.result(false, "That doesn't look like a Gemini key (it's 30-ish letters and numbers, often starting with AIza). Nothing was saved.");
-    }
+    if (key === '') return this.result(false, whyNotAKey(pasted));
     let note = '';
     if (this.deps.check !== undefined) {
       const verdict = await this.deps.check(key).catch((): KeyCheck => 'unreachable');
@@ -163,7 +155,8 @@ export class GeminiKeyService {
 /** Asks Google whether a key is accepted (a cheap request that lists one model). Never throws. */
 export async function checkGeminiKey(key: string, fetchFn: typeof fetch = fetch, timeoutMs = 8000): Promise<KeyCheck> {
   try {
-    const response = await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models?pageSize=1&key=${encodeURIComponent(key)}`, {
+    const base = process.env['EYA_GEMINI_BASE_URL']?.trim() || 'https://generativelanguage.googleapis.com/v1beta';
+    const response = await fetchFn(`${base}/models?pageSize=1&key=${encodeURIComponent(key)}`, {
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (response.ok) return 'valid';
