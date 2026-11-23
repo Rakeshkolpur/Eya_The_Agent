@@ -1,0 +1,6 @@
+{
+  "name": "eya-chrome-extension",
+  "private": true,
+  "type": "module",
+  "description": "Plain JavaScript on purpose: this folder is loaded as-is via 'Load unpacked', with no build step."
+}

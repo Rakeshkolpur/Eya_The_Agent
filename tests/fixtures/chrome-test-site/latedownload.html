@@ -1,0 +1,17 @@
+<!doctype html><html><head><title>Late download</title></head><body><main><h1>Late download</h1>
+<button id="go">Generate</button> <button id="other">Next</button>
+<p id="out">idle</p></main>
+<script>
+  // "Generate" starts a file only after a while (a server building a report): a plain click must not wait for it, and the next action reports it, once.
+  document.getElementById('go').onclick = () => {
+    document.getElementById('out').textContent = 'working';
+    setTimeout(() => {
+      const a = document.createElement('a');
+      a.href = '/report.txt';
+      a.download = 'late-report.txt';
+      document.body.appendChild(a);
+      a.click();
+    }, 1600);
+  };
+  document.getElementById('other').onclick = () => { document.getElementById('out').textContent = 'next'; };
+</script></body></html>

@@ -1,0 +1,605 @@
+import { describe, it, expect, beforeEach } from 'vitest';
+import {
+  AgentEngine,
+  contextHintText,
+  describeAIFailure,
+  looksLikeChatter,
+  refsFromToolResult,
+  toolResultForModel,
+} from '../src/main/agent/AgentEngine';
+import type { Transcriber } from '../src/main/agent/AgentEngine';
+import { IntentRouter } from '../src/main/agent/IntentRouter';
+import { ResponseComposer } from '../src/main/agent/ResponseComposer';
+import { ToolRegistry } from '../src/main/tools/ToolRegistry';
+import { ConversationContext } from '../src/main/context/ConversationContext';
+import type { AIChatMessage, AICompletion, AIProvider, AIToolCall } from '../src/main/providers/ai/AIProvider';
+import type { TTSProvider } from '../src/main/providers/tts/TTSProvider';
+import type { Tool, ToolArgs, ToolResult } from '../src/main/tools/types';
+import type { AgentUpdate } from '../src/shared/types';
+
+const call = (name: string, args: Record<string, unknown> = {}): AIToolCall => ({
+  id: `id_${name}_${Math.random().toString(36).slice(2, 6)}`,
+  name,
+  args,
+});
+const step = (toolCalls: AIToolCall[], text = ''): AICompletion => ({ text, toolCalls });
+const say = (text: string): AICompletion => ({ text, toolCalls: [] });
+
+class ScriptedAI implements AIProvider {
+  readonly name = 'scripted';
+  readonly seen: AIChatMessage[][] = [];
+  constructor(private readonly script: Array<AICompletion | Error>) {}
+  isReady(): boolean {
+    return true;
+  }
+  async complete(messages: readonly AIChatMessage[]): Promise<AICompletion> {
+    this.seen.push([...messages]);
+    const next = this.script.shift();
+    if (next === undefined) throw new Error('script exhausted');
+    if (next instanceof Error) throw next;
+    return next;
+  }
+}
+
+class FakeTTS implements TTSProvider {
+  readonly name = 'fake';
+  readonly spoken: string[] = [];
+  readonly prefetched: string[] = [];
+  init = async (): Promise<void> => undefined;
+  speak = async (text: string): Promise<void> => {
+    this.spoken.push(text);
+  };
+  prefetch = (text: string): void => {
+    this.prefetched.push(text);
+  };
+  stop = (): void => undefined;
+  isReady = (): boolean => true;
+  dispose = async (): Promise<void> => undefined;
+}
+
+let tools: ToolRegistry;
+let toolLog: Array<{ name: string; args: ToolArgs }>;
+let tts: FakeTTS;
+let updates: AgentUpdate[];
+
+function fakeTool(name: string, respond: (args: ToolArgs) => ToolResult, schemaArgs: Tool['schema']['args'] = {}): Tool {
+  return {
+    schema: { name, description: name, args: schemaArgs, status: `running ${name}` },
+    async execute(args) {
+      toolLog.push({ name, args });
+      return respond(args);
+    },
+  };
+}
+
+function engineWith(ai: AIProvider | undefined, gemini?: Transcriber): AgentEngine {
+  return new AgentEngine({
+    router: new IntentRouter(),
+    tools,
+    composer: new ResponseComposer(),
+    tts,
+    context: new ConversationContext(),
+    ...(ai !== undefined ? { ai } : {}),
+    ...(gemini !== undefined ? { gemini } : {}),
+    now: () => new Date('2026-09-28T10:00:00Z'),
+  });
+}
+
+function transcriber(outcome: string | Error, hasKey = true): Transcriber {
+  return {
+    hasKey: () => hasKey,
+    transcribe: async () => {
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    },
+  };
+}
+
+const runAudio = (engine: AgentEngine, live: boolean) =>
+  engine.handleAudio(
+    { requestId: 'v1', audioBase64: 'AAAA', mimeType: 'audio/wav', ...(live ? { live: true } : {}) },
+    (u) => updates.push(u),
+  );
+
+const run = (engine: AgentEngine, text: string, live = false) =>
+  engine.handle(
+    { requestId: 'r1', text, source: live ? 'voice' : 'text', ...(live ? { live: true } : {}) },
+    (u) => updates.push(u),
+  );
+
+beforeEach(() => {
+  tools = new ToolRegistry();
+  toolLog = [];
+  tts = new FakeTTS();
+  updates = [];
+  tools.register(
+    fakeTool(
+      'find_file',
+      () => ({ ok: true, summary: 'found 1 file', data: { files: [{ path: 'C:\\Users\\me\\Downloads\\order.pdf' }] } }),
+      { extension: { type: 'string' } },
+    ),
+  );
+  tools.register(
+    fakeTool(
+      'analyze_document',
+      (a) => ({ ok: true, summary: 'read it', data: { answer: `case 42 for ${String(a['path'])}` } }),
+      { path: { type: 'string', required: true }, question: { type: 'string', required: true } },
+    ),
+  );
+  tools.register(
+    fakeTool('web_search', () => ({ ok: true, summary: 'searched', data: { answer: 'hearing moved to the 12th' } }), {
+      query: { type: 'string', required: true },
+    }),
+  );
+  tools.register(fakeTool('open_application', () => ({ ok: true, summary: 'open', data: { app: 'notepad' } }), { name: { type: 'string', required: true } }));
+});
+
+describe('multi-step tasks', () => {
+  it('chains tools, feeding each result into the next model call', async () => {
+    const ai = new ScriptedAI([
+      step([call('find_file', { extension: 'pdf' })]),
+      step([call('analyze_document', { path: 'C:\\Users\\me\\Downloads\\order.pdf', question: 'summary' })]),
+      step([call('web_search', { query: 'case 42 hearing' })]),
+      say('Your latest order is case 42, and the hearing moved to the twelfth.'),
+    ]);
+    const result = await run(engineWith(ai), 'find my latest pdf, read it and check the web for updates');
+
+    expect(result.ok).toBe(true);
+    expect(toolLog.map((t) => t.name)).toEqual(['find_file', 'analyze_document', 'web_search']);
+    expect(ai.seen).toHaveLength(4);
+
+    // The second call must contain the model's own call and the tool's answer, by name.
+    const second = ai.seen[1] ?? [];
+    const assistant = second.find((m) => m.role === 'assistant' && m.toolCalls !== undefined);
+    expect(assistant?.toolCalls?.[0]?.name).toBe('find_file');
+    const toolMsg = second.find((m) => m.role === 'tool');
+    expect(toolMsg?.name).toBe('find_file');
+    expect(toolMsg?.content).toContain('order.pdf');
+
+    // The final call sees all three results.
+    expect((ai.seen[3] ?? []).filter((m) => m.role === 'tool').map((m) => m.name)).toEqual([
+      'find_file',
+      'analyze_document',
+      'web_search',
+    ]);
+    expect(result.spoken).toBe('Your latest order is case 42, and the hearing moved to the twelfth.');
+  });
+
+  it('tells you before the reply, in a human way, that a longer task is under way', async () => {
+    const ai = new ScriptedAI([
+      step([call('find_file')]),
+      step([call('analyze_document', { path: 'p', question: 'q' })]),
+      step([call('web_search', { query: 'x' })]),
+      say('All done.'),
+    ]);
+    await run(engineWith(ai), 'do the long thing');
+    // One short, human line about what she is doing next (not the machine's "Working on it."), then the answer.
+    expect(tts.spoken).toHaveLength(2);
+    expect(tts.spoken[0]).toMatch(/PC|file|files|document|one moment|give me a second|on it|let me/i);
+    expect(tts.spoken[0]).not.toBe('Working on it.');
+    expect(tts.spoken[1]).toBe('All done.');
+  });
+
+  it('stays quiet until the answer when one round is enough', async () => {
+    const ai = new ScriptedAI([step([call('find_file')]), say('You have one PDF.')]);
+    await run(engineWith(ai), 'how many pdfs do I have');
+    expect(tts.spoken).toEqual(['You have one PDF.']);
+  });
+
+  it('runs several tool calls the model asks for in the same turn', async () => {
+    const ai = new ScriptedAI([
+      step([call('find_file'), call('web_search', { query: 'x' })]),
+      say('Both done.'),
+    ]);
+    await run(engineWith(ai), 'do two things');
+    expect(toolLog.map((t) => t.name)).toEqual(['find_file', 'web_search']);
+    const tail = (ai.seen[1] ?? []).filter((m) => m.role === 'tool');
+    expect(tail).toHaveLength(2);
+  });
+
+  it('shows what it is doing while each tool runs', async () => {
+    const ai = new ScriptedAI([step([call('find_file')]), say('ok')]);
+    await run(engineWith(ai), 'go');
+    expect(updates.some((u) => u.state === 'working' && u.message === 'running find_file')).toBe(true);
+  });
+
+  it('gives the model the date and remembers the recent conversation', async () => {
+    const ai = new ScriptedAI([say('Sure.'), say('Sure.')]);
+    const engine = engineWith(ai);
+    await run(engine, 'what day is it');
+    await run(engine, 'and the one after');
+    const system = ai.seen[0]?.[0];
+    expect(system?.role).toBe('system');
+    expect(system?.content).toContain('September 2026');
+    const second = ai.seen[1] ?? [];
+    expect(second.some((m) => m.role === 'user' && m.content === 'what day is it')).toBe(true);
+    expect(second.some((m) => m.role === 'assistant' && m.content === 'Sure.')).toBe(true);
+  });
+});
+
+describe('when things go wrong', () => {
+  it('lets the model recover from a failed tool', async () => {
+    tools.register(fakeTool('flaky', () => ({ ok: false, summary: 'failed', error: 'no such folder' })));
+    const ai = new ScriptedAI([
+      step([call('flaky')]),
+      step([call('find_file')]),
+      say('I found it another way.'),
+    ]);
+    const result = await run(engineWith(ai), 'try hard');
+    expect(result.ok).toBe(true);
+    const failedResult = (ai.seen[1] ?? []).find((m) => m.role === 'tool');
+    expect(failedResult?.content).toContain('no such folder');
+  });
+
+  it('feeds validation errors back instead of running a tool with bad arguments', async () => {
+    const ai = new ScriptedAI([
+      step([call('analyze_document', { path: 'p' })]), // question missing
+      say('I need to know what to look for.'),
+    ]);
+    await run(engineWith(ai), 'read it');
+    expect(toolLog).toEqual([]);
+    const fed = (ai.seen[1] ?? []).find((m) => m.role === 'tool');
+    expect(fed?.content).toMatch(/question/);
+  });
+
+  it('feeds back an unknown tool name rather than crashing', async () => {
+    const ai = new ScriptedAI([step([call('format_disk')]), say('I cannot do that.')]);
+    const result = await run(engineWith(ai), 'do something odd');
+    expect(result.spoken).toBe('I cannot do that.');
+    expect((ai.seen[1] ?? []).find((m) => m.role === 'tool')?.content).toMatch(/No such tool/);
+  });
+
+  it('stops after the step limit and says so', async () => {
+    const endless = Array.from({ length: 20 }, () => step([call('find_file')]));
+    const ai = new ScriptedAI(endless);
+    const result = await run(engineWith(ai), 'loop forever');
+    expect(ai.seen).toHaveLength(16);
+    expect(result.ok).toBe(false);
+    expect(result.spoken).toMatch(/more steps/);
+  });
+
+  it('reports a dead model at the start honestly', async () => {
+    const ai = new ScriptedAI([new Error('network down')]);
+    const result = await run(engineWith(ai), 'hello there friend');
+    expect(result.ok).toBe(false);
+    expect(result.spoken).toBe("I couldn't reach the language model.");
+  });
+
+  it('says what actually went wrong if the model drops out partway', async () => {
+    const ai = new ScriptedAI([step([call('find_file')]), new Error('gemini http 429: quota exceeded')]);
+    const result = await run(engineWith(ai), 'find things');
+    expect(result.ok).toBe(false);
+    expect(result.spoken).toMatch(/usage limit/);
+  });
+
+  it('describes the failure honestly, not as a lost connection', () => {
+    expect(describeAIFailure(new Error('gemini http 429: You exceeded your current quota'))).toMatch(/usage limit/);
+    expect(describeAIFailure(new Error('gemini http 503: This model is currently experiencing high demand'))).toMatch(/overloaded/);
+    expect(describeAIFailure(new Error('gemini http 500: internal'))).toMatch(/overloaded/);
+    expect(describeAIFailure(new TypeError('fetch failed'))).toBe("I couldn't reach the language model.");
+  });
+
+  it('speaks the honest reason when the model is rate limited from the start', async () => {
+    const ai = new ScriptedAI([new Error('gemini http 429: quota exceeded')]);
+    const result = await run(engineWith(ai), 'hello there friend');
+    expect(result.spoken).toMatch(/usage limit/);
+  });
+
+  it('answers plainly when there is no model at all', async () => {
+    const result = await run(engineWith(undefined), 'what is the meaning of life');
+    expect(result.spoken).toBe("I don't know how to do that yet.");
+  });
+});
+
+describe('speech', () => {
+  it('cleans markdown and links out of what is spoken', async () => {
+    const ai = new ScriptedAI([say('**Good news!** See [the court](https://court.example/x) for `details`.')]);
+    const result = await run(engineWith(ai), 'any news');
+    expect(result.spoken).toBe('Good news! See the court for details.');
+    expect(tts.spoken).toEqual([result.spoken]);
+  });
+
+  it('falls back to a short line if the model says nothing', async () => {
+    const ai = new ScriptedAI([say('')]);
+    expect((await run(engineWith(ai), 'hmm what now')).spoken).toBe('Done.');
+  });
+});
+
+describe('the instant path and always-on listening', () => {
+  it('never calls the model for a simple app command, and prefetches the reply', async () => {
+    const ai = new ScriptedAI([]);
+    const result = await run(engineWith(ai), 'Hey Eya, please open Notepad');
+    expect(ai.seen).toHaveLength(0);
+    expect(toolLog).toEqual([{ name: 'open_application', args: { name: 'notepad' } }]);
+    expect(result.spoken).toBe('Done.');
+    expect(tts.prefetched).toEqual(['Done.']);
+  });
+
+  it('ignores long chatter without spending a model call', async () => {
+    const ai = new ScriptedAI([]);
+    const chatter = 'so anyway this stethoscope can tell me my heart health in exactly sixty seconds which is really cool';
+    const result = await run(engineWith(ai), chatter, true);
+    expect(ai.seen).toHaveLength(0);
+    expect(result.spoken).toBe('');
+    expect(tts.spoken).toEqual([]);
+  });
+
+  it('drops obvious conversation without a model call, but not real requests', async () => {
+    const ai = new ScriptedAI([]);
+    const engine = engineWith(ai);
+    const chatter = [
+      "I'm going to show you how to make a simple, easy, and delicious breakfast.",
+      "it's really nice to meet you all today",
+      'so anyway that was pretty good',
+    ];
+    for (const text of chatter) {
+      const result = await run(engine, text, true);
+      expect(result.error, text).toBe('ignored');
+    }
+    expect(ai.seen).toHaveLength(0);
+
+    expect(looksLikeChatter('Find my latest PDF in Downloads')).toBe(false);
+    expect(looksLikeChatter('Hey Eya, open Chrome')).toBe(false);
+    expect(looksLikeChatter('what is the weather today')).toBe(false);
+    expect(looksLikeChatter('Can you read my latest pdf')).toBe(false);
+    expect(looksLikeChatter("I'd like you to open the calculator")).toBe(false);
+    expect(looksLikeChatter("I'm looking for my resume")).toBe(false);
+    expect(looksLikeChatter('I need to find my invoice')).toBe(false);
+    expect(looksLikeChatter('')).toBe(false);
+  });
+
+  it('typed input is never treated as chatter', async () => {
+    const ai = new ScriptedAI([say('Sure.')]);
+    const result = await run(engineWith(ai), "I'm curious what day it is");
+    expect(result.spoken).toBe('Sure.');
+  });
+
+  it('stays silent when a short live phrase turns out not to be a command', async () => {
+    const ai = new ScriptedAI([say('I am doing well, thanks for asking!')]);
+    const result = await run(engineWith(ai), 'how are you doing', true);
+    expect(result.error).toBe('ignored');
+    expect(tts.spoken).toEqual([]);
+  });
+
+  it('still carries out a live command that needs tools', async () => {
+    const ai = new ScriptedAI([step([call('find_file')]), say('You have one PDF.')]);
+    const result = await run(engineWith(ai), 'how many pdfs are in my downloads', true);
+    expect(result.spoken).toBe('You have one PDF.');
+  });
+
+  it('answers a typed question even though live chatter would be ignored', async () => {
+    const ai = new ScriptedAI([say('I am doing well, thanks for asking!')]);
+    const result = await run(engineWith(ai), 'how are you doing');
+    expect(result.spoken).toBe('I am doing well, thanks for asking!');
+  });
+});
+
+describe('voice input', () => {
+  it('turns speech into text and carries out the command', async () => {
+    const result = await runAudio(engineWith(undefined, transcriber('Open Notepad')), true);
+    expect(toolLog).toEqual([{ name: 'open_application', args: { name: 'notepad' } }]);
+    expect(result.spoken).toBe('Done.');
+  });
+
+  it('says the daily limit is spent in words, not silence, for a typed-mic press', async () => {
+    const err = new Error('gemini daily quota exhausted (429) for gemini-3.6-flash');
+    const result = await runAudio(engineWith(undefined, transcriber(err)), false);
+    expect(result.spoken).toMatch(/today's free Gemini limit/);
+    expect(tts.spoken).toEqual([result.spoken]);
+  });
+
+  it('shows the limit on screen but never speaks it during always-on listening', async () => {
+    const err = new Error('gemini daily quota exhausted (429) for gemini-3.6-flash');
+    const result = await runAudio(engineWith(undefined, transcriber(err)), true);
+    expect(result.spoken).toMatch(/today's free Gemini limit/);
+    expect(tts.spoken).toEqual([]);
+    expect(updates.some((u) => u.message?.includes("today's free Gemini limit"))).toBe(true);
+  });
+
+  it('stays completely quiet on always-on failures that are not about limits', async () => {
+    const result = await runAudio(engineWith(undefined, transcriber(new Error('audio decode failed'))), true);
+    expect(result.spoken).toBe('');
+    expect(tts.spoken).toEqual([]);
+  });
+
+  it('handles an empty transcript: silent when live, polite when not', async () => {
+    const live = await runAudio(engineWith(undefined, transcriber('')), true);
+    expect(live.spoken).toBe('');
+    expect(tts.spoken).toEqual([]);
+    const pressed = await runAudio(engineWith(undefined, transcriber('')), false);
+    expect(pressed.spoken).toBe("I didn't catch that.");
+  });
+
+  it('does not act without a key, and says why only when asked directly', async () => {
+    const live = await runAudio(engineWith(undefined, transcriber('open notepad', false)), true);
+    expect(live.spoken).toBe('');
+    expect(toolLog).toEqual([]);
+    const pressed = await runAudio(engineWith(undefined, transcriber('open notepad', false)), false);
+    expect(pressed.spoken).toMatch(/Gemini key/);
+  });
+});
+
+describe('limit wording: always says when it comes back', () => {
+  // 2 Oct 2026, 16:34 UTC. Measured against the real API: a spent daily limit answered "wait 26755 s", which ends at 00:00 UTC.
+  const now = new Date('2026-10-02T16:34:04Z');
+  const timeWords = /(at|around) .+ (today|tomorrow|on \w+)/;
+
+  it('the daily limit says when it comes back by the wait Google itself stated, not "tomorrow"', () => {
+    const err = Object.assign(new Error('gemini daily quota exhausted (429) for every model'), { retryAfterMs: 26_755_000 });
+    const said = describeAIFailure(err, now);
+    expect(said).toMatch(/used up today's free Gemini limit/);
+    expect(said).toMatch(/comes back at .+ (today|tomorrow)/);
+    expect(said).toMatch(/billing/);
+    expect(said).not.toMatch(/resets tomorrow/);
+  });
+
+  it('the daily limit with no stated wait still names a time, as "around"', () => {
+    const said = describeAIFailure(new Error('gemini daily quota exhausted (429) for x'), now);
+    expect(said).toMatch(/comes back around .+ (today|tomorrow)/);
+  });
+
+  it('a per-minute limit uses the wait Google named', () => {
+    const err = Object.assign(new Error('gemini http 429: slow down'), { retryAfterMs: 34_000 });
+    expect(describeAIFailure(err, now)).toBe("I've hit Gemini's usage limit for a moment. Try again in about 34 seconds.");
+    const long = Object.assign(new Error('gemini http 429: slow down'), { retryAfterMs: 200_000 });
+    expect(describeAIFailure(long, now)).toMatch(/about 4 minutes/);
+  });
+
+  it('a limit with no stated wait gives both honest possibilities, with the daily time', () => {
+    const said = describeAIFailure(new Error('gemini http 429: slow down'), now);
+    expect(said).toMatch(/about a minute/);
+    expect(said).toMatch(new RegExp('daily limit, which comes back ' + timeWords.source));
+  });
+
+  it('the other failures are unchanged', () => {
+    expect(describeAIFailure(new Error('gemini http 503: high demand'), now)).toMatch(/overloaded/);
+    expect(describeAIFailure(new TypeError('fetch failed'), now)).toBe("I couldn't reach the language model.");
+  });
+});
+
+describe('toolResultForModel', () => {
+  it('keeps small results whole', () => {
+    const json = JSON.parse(toolResultForModel({ ok: true, summary: 's', data: { a: 1 } })) as Record<string, unknown>;
+    expect(json).toEqual({ ok: true, summary: 's', data: { a: 1 } });
+  });
+
+  it('shrinks huge results into valid JSON with a truncation marker', () => {
+    const json = JSON.parse(toolResultForModel({ ok: true, summary: 's', data: { blob: 'x'.repeat(50_000) } })) as {
+      data: { truncated: boolean; preview: string };
+    };
+    expect(json.data.truncated).toBe(true);
+    expect(json.data.preview.length).toBeLessThanOrEqual(12_000);
+  });
+});
+
+describe('refsFromToolResult', () => {
+  it('remembers a path a tool returned directly, as a file by default', () => {
+    expect(refsFromToolResult('rename_file', { ok: true, summary: 's', data: { path: 'C:\\a\\b.txt' } })).toEqual([
+      { kind: 'file', value: 'C:\\a\\b.txt' },
+    ]);
+  });
+
+  it('remembers create_folder/open_folder/delete_folder results as a folder, not a file', () => {
+    for (const name of ['create_folder', 'open_folder', 'delete_folder']) {
+      expect(refsFromToolResult(name, { ok: true, summary: 's', data: { path: 'C:\\a\\Cases' } }), name).toEqual([
+        { kind: 'folder', value: 'C:\\a\\Cases' },
+      ]);
+    }
+  });
+
+  it('remembers every match from a find_file-style result, newest first, for "the second one"', () => {
+    const refs = refsFromToolResult('find_file', {
+      ok: true,
+      summary: 'found 2',
+      data: { files: [{ path: 'C:\\a\\new.pdf', name: 'new.pdf' }, { path: 'C:\\a\\old.pdf', name: 'old.pdf' }] },
+    });
+    expect(refs).toEqual([
+      { kind: 'file', value: 'C:\\a\\new.pdf', meta: { index: 0, name: 'new.pdf' } },
+      { kind: 'file', value: 'C:\\a\\old.pdf', meta: { index: 1, name: 'old.pdf' } },
+    ]);
+  });
+
+  it('caps how many search results it remembers', () => {
+    const files = Array.from({ length: 25 }, (_, i) => ({ path: `C:\\a\\f${i}.pdf` }));
+    const refs = refsFromToolResult('find_file', { ok: true, summary: 'found 25', data: { files } });
+    expect(refs.length).toBeLessThanOrEqual(10);
+  });
+
+  it('returns nothing for a failed result, or one with no path-like data', () => {
+    expect(refsFromToolResult('delete_file', { ok: false, summary: 'needs confirmation', data: { path: 'x' } })).toEqual([]);
+    expect(refsFromToolResult('open_application', { ok: true, summary: 'opened' })).toEqual([]);
+    expect(refsFromToolResult('web_search', { ok: true, summary: 's', data: { answer: 'x' } })).toEqual([]);
+  });
+});
+
+describe('contextHintText', () => {
+  it('says nothing when the conversation has touched no file or folder', () => {
+    expect(contextHintText(new ConversationContext())).toBeUndefined();
+  });
+
+  it('names the most recently touched file and folder, for resolving "it"/"that file"', () => {
+    const ctx = new ConversationContext();
+    ctx.push({ at: 1, userText: 'find my pdf', ok: true, refs: [{ kind: 'file', value: 'C:\\a\\order.pdf' }] });
+    ctx.push({ at: 2, userText: 'make a folder', ok: true, refs: [{ kind: 'folder', value: 'C:\\a\\Cases' }] });
+    const hint = contextHintText(ctx);
+    expect(hint).toContain('C:\\a\\order.pdf');
+    expect(hint).toContain('C:\\a\\Cases');
+  });
+
+  it('never puts the hint in what gets spoken', async () => {
+    const ai = new ScriptedAI([step([call('find_file', { extension: 'pdf' })]), say('I found your file.')]);
+    const engine = engineWith(ai);
+    const first = await run(engine, 'find my pdf');
+    expect(first.spoken).not.toContain('C:\\Users\\me\\Downloads\\order.pdf');
+  });
+
+  it('lists every recent match numbered, so "the second one" or "the cause list one" can resolve', () => {
+    const ctx = new ConversationContext();
+    ctx.push({
+      at: 1,
+      userText: 'find my pdfs',
+      ok: true,
+      refs: [
+        { kind: 'file', value: 'C:\\a\\CauseList.pdf', meta: { index: 0, name: 'CauseList.pdf' } },
+        { kind: 'file', value: 'C:\\a\\Order.pdf', meta: { index: 1, name: 'Order.pdf' } },
+      ],
+    });
+    const hint = contextHintText(ctx);
+    expect(hint).toContain('1. CauseList.pdf — C:\\a\\CauseList.pdf');
+    expect(hint).toContain('2. Order.pdf — C:\\a\\Order.pdf');
+  });
+
+  it('a later search overrides the previous one, not appends to it', () => {
+    const ctx = new ConversationContext();
+    ctx.push({ at: 1, userText: 'find pdfs', ok: true, refs: [{ kind: 'file', value: 'C:\\a\\old.pdf', meta: { index: 0 } }] });
+    ctx.push({ at: 2, userText: 'find word docs', ok: true, refs: [{ kind: 'file', value: 'C:\\a\\new.docx', meta: { index: 0 } }] });
+    const hint = contextHintText(ctx);
+    expect(hint).toContain('new.docx');
+    expect(hint).not.toContain('old.pdf');
+  });
+});
+
+describe('context flows into the next request', () => {
+  it('lets a later "copy it to desktop"-style request see the earlier file path', async () => {
+    const copyLog: ToolArgs[] = [];
+    tools.register(
+      fakeTool(
+        'copy_file',
+        (a) => {
+          copyLog.push(a);
+          return { ok: true, summary: 'copied', data: { path: 'C:\\Desktop\\order.pdf' } };
+        },
+        { sourcePath: { type: 'string' }, destinationFolder: { type: 'string' } },
+      ),
+    );
+    const context = new ConversationContext();
+    const engine = new AgentEngine({
+      router: new IntentRouter(),
+      tools,
+      composer: new ResponseComposer(),
+      tts,
+      context,
+      now: () => new Date('2026-09-28T10:00:00Z'),
+      ai: new ScriptedAI([step([call('find_file', { extension: 'pdf' })]), say('Found it.')]),
+    });
+    await engine.handle({ requestId: 'r1', text: 'find my latest pdf', source: 'text' }, (u) => updates.push(u));
+
+    const secondAi = new ScriptedAI([
+      step([call('copy_file', { sourcePath: 'C:\\Users\\me\\Downloads\\order.pdf', destinationFolder: 'desktop' })]),
+      say('Copied it to your Desktop.'),
+    ]);
+    const engine2 = new AgentEngine({
+      router: new IntentRouter(),
+      tools,
+      composer: new ResponseComposer(),
+      tts,
+      context,
+      now: () => new Date('2026-09-28T10:00:00Z'),
+      ai: secondAi,
+    });
+    await engine2.handle({ requestId: 'r2', text: 'copy it to my desktop', source: 'text' }, (u) => updates.push(u));
+
+    expect(secondAi.seen[0]?.[0]?.content).toContain('C:\\Users\\me\\Downloads\\order.pdf');
+    expect(copyLog).toEqual([{ sourcePath: 'C:\\Users\\me\\Downloads\\order.pdf', destinationFolder: 'desktop' }]);
+  });
+});

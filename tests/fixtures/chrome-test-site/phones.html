@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Mock Phone Shop</title>
+<style>
+  body { font-family: sans-serif; margin: 0; }
+  .row { display: flex; gap: 12px; padding: 8px 16px; align-items: center; }
+  .card { display: block; padding: 10px 16px; border-bottom: 1px solid #ddd; color: #111; text-decoration: none; }
+  .tile { border: 1px solid #ccc; padding: 8px 12px; cursor: pointer; }
+  /* Flipkart's shape: plain divs, no role, cursor auto, the words on a painted box */
+  .box { display: flex; align-items: center; justify-content: center; padding: 6px 16px; height: 44px; width: 260px; color: #fff; background-image: linear-gradient(90deg, rgb(40, 116, 240), rgb(60, 140, 255)); }
+  .wrap { position: relative; width: 200px; height: 44px; }
+  .layer { position: absolute; inset: 0; background: rgb(255, 224, 16); }
+  .wrap > .words { position: relative; padding: 12px 16px; color: #000; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header class="row"><a href="#home">Mock Phones</a><input id="q" type="text" placeholder="Search for Products, Brands and More" aria-label="Search for Products, Brands and More"><a href="#login">Login</a></header>
+
+<section id="results" hidden>
+  <a class="card" href="#p-boltt">Add to Compare BOLTT ACE 5G (Sky Blue, 128 GB) 3.9 2,885 Ratings &amp; 787 Reviews 6 GB RAM | 128 GB ROM</a>
+  <a class="card" href="#p-guard">Currently unavailable Dasiana Front and Back Screen Guard for POCO M6 PRO 5G Scratch Resistant</a>
+  <a class="card" href="#p-m7pro">Add to Compare POCO M7 Pro 5G (Lavender Frost, 128 GB) 4.3 38,576 Ratings &amp; 3,320 Reviews 6 GB RAM | 128 GB ROM</a>
+  <a class="card" href="#p-m7pro8">Add to Compare POCO M7 Pro 5G (Lavender Frost, 256 GB) 4.3 14,674 Ratings &amp; 1,338 Reviews 8 GB RAM | 256 GB ROM</a>
+</section>
+
+<section id="product" hidden>
+  <h1 id="ptitle"></h1>
+  <div id="loading" class="row">Loading content…</div>
+  <div id="pbody" hidden>
+    <div class="row"><div class="tile" id="v128">128 GB + 6 GB ₹14,999</div><div class="tile" id="v256">256 GB + 8 GB ₹16,999</div></div>
+    <div class="row"><div class="box"><div id="buyat">Buy at ₹14,249</div></div></div>
+    <div id="offers" hidden>Apply offers for maximum savings</div>
+    <div class="row" id="now-wrap"><div class="wrap"><div class="layer"></div><div class="words"><div id="buynow">Buy now</div></div></div></div>
+  </div>
+</section>
+
+<section id="addr" hidden>
+  <h2>Delivery Address</h2>
+  <p>Rakesh HOME 9876543210</p>
+  <p>H.No 1-2, Main Road, Makthal, Narayanpet - 509208</p>
+  <button id="dhere" type="button">Deliver Here</button>
+</section>
+<section id="summ" hidden>
+  <h2>Order Summary</h2>
+  <p>POCO M7 Pro 5G (128 GB Storage, 6 GB RAM) x 1 ₹14,999</p>
+  <button id="cont" type="button">Continue</button>
+</section>
+<section id="pay" hidden>
+  <h2>Payment Options</h2>
+  <button id="upi" type="button">UPI</button> <button id="cod" type="button">Cash on Delivery</button> <button id="nb" type="button">Net Banking</button>
+  <p>Total Payable ₹14,249</p>
+  <p>Delivering to Rakesh, H.No 1-2, Main Road, Makthal - 509208</p>
+  <button id="place" type="button" hidden>Pay ₹14,249</button>
+</section>
+<div id="placed" hidden><h2>Order placed</h2></div>
+
+<script>
+  const show = (id) => { for (const s of ['results', 'product', 'addr', 'summ', 'pay', 'placed']) document.getElementById(s).hidden = s !== id; };
+  window.__placed = 0;
+  const q = document.getElementById('q');
+  q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { document.title = 'Search results - Mock Phone Shop'; show('results'); } });
+  for (const a of document.querySelectorAll('.card')) a.addEventListener('click', (e) => {
+    e.preventDefault();
+    // the page opens on the OTHER variant, so that the right one has to be chosen
+    document.getElementById('ptitle').textContent = 'POCO M7 Pro 5G (256 GB Storage, 8 GB RAM)';
+    document.title = 'POCO M7 Pro 5G (256 GB Storage, 8 GB RAM) Online at Best Price';
+    show('product');
+    // (the real page shows a loading screen first, with no buttons)
+    document.getElementById('loading').hidden = false;
+    document.getElementById('pbody').hidden = true;
+    setTimeout(() => { document.getElementById('loading').hidden = true; document.getElementById('pbody').hidden = false; }, 2500);
+  });
+  document.getElementById('v128').addEventListener('click', () => {
+    document.getElementById('ptitle').textContent = 'POCO M7 Pro 5G (128 GB Storage, 6 GB RAM)';
+    document.title = 'POCO M7 Pro 5G (128 GB Storage, 6 GB RAM) Online at Best Price';
+  });
+  // (the handler is on the box: the click starts at the words and bubbles up, as in a pressable)
+  // ("Buy at" is an offers panel that opens: it changes nothing else; "Buy now" is the button that starts the checkout)
+  document.querySelector('.box').addEventListener('click', (e) => { if (e.target.id === 'buyat') document.getElementById('offers').hidden = false; });
+  document.getElementById('now-wrap').addEventListener('click', (e) => { if (e.target.id === 'buynow') { document.title = 'Checkout - Mock Phone Shop'; show('addr'); } });
+  document.getElementById('dhere').addEventListener('click', () => { document.title = 'Order Summary - Mock Phone Shop'; show('summ'); });
+  document.getElementById('cont').addEventListener('click', () => { document.title = 'Payment - Mock Phone Shop'; show('pay'); });
+  // (choosing a way to pay brings up the button that pays; it is the only thing here that places the order)
+  for (const id of ['upi', 'cod', 'nb']) document.getElementById(id).addEventListener('click', () => { document.getElementById('place').hidden = false; });
+  document.getElementById('place').addEventListener('click', () => { window.__placed += 1; document.title = 'Order Placed - Mock Phone Shop'; show('placed'); document.querySelector('#placed h2').textContent = 'Order placed successfully — Order ID OD555000111222'; });
+</script>
+</body>
+</html>

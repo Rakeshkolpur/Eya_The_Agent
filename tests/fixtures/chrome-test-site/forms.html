@@ -1,0 +1,9 @@
+<!doctype html><html><head><title>Search forms</title></head><body><main><h1>Search forms</h1>
+<form id="f" onsubmit="event.preventDefault();document.getElementById('out').textContent='Submitted: '+document.getElementById('q').value">
+ <label for="q">Case number</label><input id="q" name="q" type="text">
+</form>
+<label>Year <select id="year"><option>2024</option><option>2025</option><option>2026</option></select></label>
+<label>Account password <input type="password" id="pw"></label>
+<label><input type="checkbox" id="agree"> I agree to the terms</label>
+<button onclick="document.getElementById('out').textContent='Bought it'">Place order</button>
+<p id="out"></p></main></body></html>

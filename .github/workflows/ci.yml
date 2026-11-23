@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # Eya drives Windows itself, and its tests use Windows paths.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  secrets:
+    # A second pair of eyes: fails the build if a key-shaped secret is committed. (GitHub's own secret scanning should be on too.)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Look for key-shaped strings that are not marked as fake
+        shell: bash
+        run: |
+          set -u
+          pattern='(AIza[0-9A-Za-z_-]{35}|sk-(proj-|or-v1-)?[A-Za-z0-9_-]{32,}|gsk_[A-Za-z0-9]{32,}|gh[pousr]_[A-Za-z0-9]{36,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----)'
+          hits=$(git grep -I -n -E "$pattern" -- . ':!package-lock.json' ':!tests/**' ':!docs/**' ':!*.md' || true)
+          if [ -n "$hits" ]; then
+            echo "Possible secret(s) outside tests and docs:"; echo "$hits" | sed -E 's/(AIza|sk-|gsk_|ghp_|AKIA).{6,}/\1…<hidden>/'
+            exit 1
+          fi
+          echo "No key-shaped strings outside tests and docs."

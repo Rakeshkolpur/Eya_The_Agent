@@ -1,0 +1,8 @@
+<!doctype html><html><head><title>Popups</title></head><body><main><h1>Popups page</h1>
+<button id="alert" onclick="alert('Are you sure?'); document.getElementById('out').textContent='after alert'">Show alert</button>
+<button id="confirm" onclick="document.getElementById('out').textContent = 'confirm=' + confirm('Delete everything?')">Ask me</button>
+<a href="/r/landing" target="_blank">Open in new window</a>
+<button onclick="window.open('/r/portal')">Pop a window</button>
+<button onclick="navigator.geolocation.getCurrentPosition(() => { document.getElementById('out').textContent = 'location granted'; }, (e) => { document.getElementById('out').textContent = 'location denied ' + e.code; })">Where am I</button>
+<a href="file:///C:/Windows/win.ini">Local file</a>
+<p id="out"></p></main></body></html>

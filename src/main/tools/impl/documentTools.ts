@@ -1,0 +1,193 @@
+import { promises as fs } from 'node:fs';
+import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { checkReadablePath, isBlockedFileName } from '@main/security/pathPolicy';
+import type { KnownFolders } from '@main/security/pathPolicy';
+import type { SearchSource } from '@main/providers/ai/GeminiAIProvider';
+import { describeAIFailure } from '@main/agent/AgentEngine';
+import { formatHitsAsAnswer } from '@main/browser/webSearchResults';
+import type { WebSearchHit } from '@main/browser/webSearchResults';
+import type { AttachedFiles } from '@main/files/attachedFiles';
+import { attachmentInfo, MAX_ATTACHMENT_BYTES } from '@shared/attachments';
+import { docxText } from './docx';
+import type { Tool, ToolArgs, ToolResult } from '../types';
+
+/** The slice of the Gemini provider these tools need. */
+export interface DocumentBrain {
+  hasKey(): boolean;
+  analyzeFile(dataBase64: string, mimeType: string, question: string): Promise<string>;
+  groundedSearch(query: string): Promise<{ text: string; sources: SearchSource[] }>;
+}
+
+const MAX_ANSWER_CHARS = 8000;
+
+/** The kind of a file as Gemini is told it (null when this tool cannot read it). */
+export function mimeTypeFor(path: string): string | undefined {
+  return attachmentInfo(path)?.mime;
+}
+
+function stringArg(args: ToolArgs, key: string): string | undefined {
+  const value = args[key];
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/** Files the person gave to Eya are read without the usual folder rules, since they chose them: a pasted picture kept by Eya, and any file attached from the disk. */
+export interface DocumentToolOptions {
+  readonly attachmentsDir?: string;
+  /** The files attached to messages, by exact path. */
+  readonly attached?: AttachedFiles;
+}
+
+function isInside(dir: string, target: string): boolean {
+  const rel = relative(resolve(dir), resolve(target));
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+export function createDocumentTool(folders: KnownFolders, brain: DocumentBrain, options: DocumentToolOptions = {}): Tool {
+  return {
+    schema: {
+      name: 'analyze_document',
+      status: 'Reading the document…',
+      description:
+        'Read a file and answer a question about it (summarize it, find a date or case number, extract details, describe a picture, ' +
+        'say what is in a recording): a PDF, a picture, a Word (.docx) or text file, an audio file or a video. It is sent to Gemini to be read. ' +
+        'Excel and PowerPoint files are not supported. A file the user attached to their message is given to you with its path: use that path.',
+      args: {
+        path: { type: 'string', required: true, description: 'Full path to the file.' },
+        question: {
+          type: 'string',
+          required: true,
+          description: 'What to find out, e.g. "Summarize the key points" or "What is the case number and hearing date?".',
+        },
+      },
+    },
+    async execute(args): Promise<ToolResult> {
+      const path = stringArg(args, 'path');
+      const question = stringArg(args, 'question');
+      if (path === undefined || question === undefined) {
+        return { ok: false, summary: 'missing input', error: 'A path and a question are required.' };
+      }
+      if (!brain.hasKey()) return { ok: false, summary: 'no Gemini key', error: 'Reading documents needs the Gemini key.' };
+
+      const kept = options.attachmentsDir !== undefined && isInside(options.attachmentsDir, path);
+      // (An attached file is read where it is, but a secret by its name — a key file, a password store — is still refused.)
+      const given = options.attached?.has(path) === true && !isBlockedFileName(basename(path));
+      const check = kept || given ? { ok: true as const, path: resolve(path) } : checkReadablePath(path, folders);
+      if (!check.ok) return { ok: false, summary: 'not allowed', error: check.reason };
+      const info = attachmentInfo(check.path);
+      if (info === null) {
+        return {
+          ok: false,
+          summary: 'unsupported type',
+          error: 'I can read pictures, PDFs, Word (.docx) and text files, audio and video, but not that type of file.',
+        };
+      }
+      try {
+        const stat = await fs.stat(check.path);
+        if (!stat.isFile()) return { ok: false, summary: 'not a file', error: 'That is not a file.' };
+        if (stat.size > MAX_ATTACHMENT_BYTES) {
+          return { ok: false, summary: 'too large', error: `That file is too large for me to read (over ${Math.round(MAX_ATTACHMENT_BYTES / (1024 * 1024))} MB).` };
+        }
+        let bytes = await fs.readFile(check.path);
+        let mime = info.mime;
+        if (info.extractText === true) {
+          // A Word document: its words are taken out here and read as text.
+          const text = docxText(bytes);
+          if (text === null || text === '') {
+            return { ok: false, summary: 'could not read', error: 'I could not read the words in that Word file (it may be damaged or protected).' };
+          }
+          bytes = Buffer.from(text, 'utf8');
+          mime = 'text/plain';
+        }
+        let answer: string;
+        try {
+          answer = await brain.analyzeFile(bytes.toString('base64'), mime, question);
+        } catch (err) {
+          return { ok: false, summary: 'Gemini failed', error: describeAIFailure(err) };
+        }
+        if (answer.length === 0) return { ok: false, summary: 'no answer', error: 'I could not get anything from that file.' };
+        return {
+          ok: true,
+          summary: `read ${basename(check.path)}`,
+          data: { file: basename(check.path), answer: answer.slice(0, MAX_ANSWER_CHARS) },
+        };
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        return {
+          ok: false,
+          summary: 'could not read',
+          error: code === 'ENOENT' ? 'That file does not exist.' : 'I could not read that file.',
+        };
+      }
+    },
+  };
+}
+
+/**
+ * A second way to search that doesn't spend Gemini's search-grounding
+ * allowance (a separate, much smaller free-tier bucket than ordinary model
+ * calls: when it runs out, plain Gemini calls keep working while every
+ * grounded one returns 429). Reads a real results page instead.
+ */
+export interface WebSearchFallback {
+  search(query: string): Promise<WebSearchHit[]>;
+}
+
+export function createWebSearchTool(brain: DocumentBrain, fallback?: WebSearchFallback): Tool {
+  return {
+    schema: {
+      name: 'web_search',
+      status: 'Searching the web…',
+      description:
+        'Search the web and get either a short sourced answer or a list of the top result links. Use it for current ' +
+        "information, news, court orders, prices, finding a website's real official URL, or anything you are not sure " +
+        'about. If you get a list of result links, pick by the link\'s own domain — the organization\'s real site, not a ' +
+        'news story, directory or look-alike — and open that exact URL. To just show results in a browser instead, ' +
+        'use open_url. NEVER use this to navigate within a website that is already open ("go to Cause List", "click ' +
+        'Sent") — that is click_on_page\'s job, on the real page, not a search.',
+      args: { query: { type: 'string', required: true, description: 'What to look up.' } },
+    },
+    async execute(args): Promise<ToolResult> {
+      const query = stringArg(args, 'query');
+      if (query === undefined) return { ok: false, summary: 'no query', error: 'A search query is required.' };
+
+      let failure: unknown;
+      let returnedNothing = false;
+      if (brain.hasKey()) {
+        try {
+          const { text, sources } = await brain.groundedSearch(query);
+          if (text.length > 0) {
+            return { ok: true, summary: 'searched the web', data: { answer: text.slice(0, MAX_ANSWER_CHARS), sources } };
+          }
+          returnedNothing = true;
+        } catch (err) {
+          failure = err;
+        }
+      }
+
+      // Grounded search was unavailable (out of its allowance, overloaded, or no
+      // key at all): read a real results page instead of leaving the request stuck.
+      if (fallback !== undefined) {
+        try {
+          const hits = await fallback.search(query);
+          if (hits.length > 0) {
+            return {
+              ok: true,
+              summary: 'searched the web',
+              data: {
+                answer: formatHitsAsAnswer(query, hits).slice(0, MAX_ANSWER_CHARS),
+                sources: hits.map((h) => ({ title: h.title, uri: h.url })),
+                via: 'a live search-results page',
+              },
+            };
+          }
+        } catch {
+          // fall through to the honest failure below
+        }
+      }
+
+      if (returnedNothing) return { ok: false, summary: 'no results', error: 'The search returned nothing.' };
+      if (failure === undefined) return { ok: false, summary: 'no Gemini key', error: 'Web search needs the Gemini key.' };
+      return { ok: false, summary: 'search failed', error: describeAIFailure(failure) };
+    },
+  };
+}

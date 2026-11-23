@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><title>Mock phone page (call-to-action boxes)</title>
+<style>
+  body { font-family: sans-serif; margin: 0; }
+  .row { display: flex; gap: 12px; padding: 8px 16px; align-items: center; }
+  .tile { border: 1px solid #ccc; padding: 8px 12px; cursor: pointer; }
+  /* the shape Flipkart really has: plain divs, no role, no tabindex, cursor auto, the words on a filled box */
+  .box { display: flex; align-items: center; justify-content: center; padding: 6px 16px; height: 44px; width: 260px; color: #fff; }
+  /* Flipkart's real paint: the blue box is a background IMAGE (no background colour anywhere above it); the yellow button's colour is a separate layer BEHIND the words */
+  .blue { background-image: linear-gradient(90deg, rgb(40, 116, 240), rgb(60, 140, 255)); }
+  .wrap { position: relative; width: 200px; height: 44px; }
+  .layer { position: absolute; inset: 0; background: rgb(255, 224, 16); }
+  .wrap > .words { position: relative; padding: 12px 16px; }
+  .badge { display: inline-block; padding: 2px 8px; background: rgb(212, 241, 220); color: #146c2e; height: 24px; }
+</style>
+</head>
+<body>
+<header class="row"><a href="/">Mock Phones</a><input type="text" placeholder="Search for Products, Brands and More" aria-label="Search for Products, Brands and More"></header>
+<h1>POCO M7 Pro 5G (Lavender Frost, 128 GB)</h1>
+<div class="row"><div class="tile" id="v1">128 GB + 6 GB ₹14,999</div><div class="tile" id="v2">256 GB + 8 GB ₹16,999</div></div>
+<p>Buy fresh vegetables every day from the shop next door.</p>
+<p id="plain">Buy local, buy fresh</p>
+<div class="row"><span class="badge">Next day delivery</span></div>
+<div class="row" id="blue-wrap"><div class="box blue"><div id="buy-at">Buy at ₹14,249</div></div></div>
+<div style="height: 1400px"></div>
+<div class="row" id="orange-wrap"><div class="wrap"><div class="layer"></div><div class="words"><div id="buy-now">Buy now</div></div></div></div>
+<div class="row"><div class="box blue"><div><div><div><div><div id="cont">Continue</div></div></div></div></div></div></div>
+<div class="row"><div id="cont-plain">Continue reading the reviews</div></div>
+<div id="result" style="padding: 16px"></div>
+<script>
+  // (the handlers sit on the BOX, as in a pressable: the click starts at the words and bubbles up)
+  document.getElementById('blue-wrap').addEventListener('click', function (e) {
+    if (e.target.id === 'buy-at') document.getElementById('result').textContent = 'Order summary: POCO M7 Pro 5G, total ₹14,249';
+  });
+  document.getElementById('orange-wrap').addEventListener('click', function (e) {
+    if (e.target.id === 'buy-now') document.getElementById('result').textContent = 'Checkout started';
+  });
+  document.getElementById('v1').addEventListener('click', function () { document.getElementById('result').textContent = 'Variant 128 GB + 6 GB chosen'; });
+</script>
+</body>
+</html>

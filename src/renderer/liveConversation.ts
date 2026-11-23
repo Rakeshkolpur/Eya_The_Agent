@@ -1,0 +1,512 @@
+import type { LiveConfig } from '../shared/ipcContract';
+import { liveLimitMessage } from '../shared/quotaReset';
+import { FrameBatcher, floatToPcm16 } from './pcm';
+import type { PcmPlayback } from './pcmPlayer';
+import { LIVE_INPUT_RATE } from './liveProtocol';
+import type { LiveEvent, LiveToolCall, LiveToolResult } from './liveProtocol';
+import { LiveOpenError } from './liveSession';
+import type { LiveCloseInfo, LiveSessionLike } from './liveSession';
+import { resample } from './wav';
+
+export type ConversationPhase = 'connecting' | 'listening' | 'thinking' | 'working' | 'speaking';
+export type ConversationEnd = 'user' | 'idle' | 'closed' | 'error';
+
+/** Which Live models have recently been cutting conversations off, so a broken one is tried last instead of first. */
+export interface ModelHealthStore {
+  /** Model name -> the time (ms since the epoch) until which it is tried last. */
+  load(): Readonly<Record<string, number>>;
+  save(triedLastUntil: Readonly<Record<string, number>>): void;
+}
+
+// A close whose reason is about limits: reopening cannot help, so it is reported instead.
+const QUOTA_LIKE = /quota|exhaust|resource|rate|limit|429/i;
+const RECONNECT_WINDOW_MS = 120_000;
+
+export interface ConversationHandlers {
+  onPhase(phase: ConversationPhase): void;
+  /** The server cut the session off and Eya is reopening it on another model: the conversation goes on. */
+  onReconnecting?(failedModel: string, reason: string): void;
+  /** What the user has said so far this turn. */
+  onHeard(text: string): void;
+  /** What Eya has said so far this turn. */
+  onSaid(text: string): void;
+  onEnded(reason: ConversationEnd, detail?: string): void;
+  /** A tool has been running a while: a chance to say something so the user isn't left in silence. */
+  /** A tool is taking a while: say something (what is being done at first, then that it is slow). `stage` says which. */
+  onSlowTool?(toolName: string, args?: Readonly<Record<string, unknown>>, stage?: 'start' | 'slow' | 'long'): void;
+}
+
+export interface ConversationDeps {
+  getConfig(): Promise<LiveConfig | null>;
+  /** Runs a tool in the main process; resolves with the result as JSON text. */
+  runTool(name: string, args: Readonly<Record<string, unknown>>, context?: { readonly heard: string; readonly turn: number }): Promise<string>;
+  makeSession(): LiveSessionLike;
+  createPlayback(): PcmPlayback;
+  setFrameSink(sink: ((chunk: Float32Array, sampleRate: number) => void) | null): void;
+  /** Ends the conversation after this long with nothing happening. */
+  idleMs?: number;
+  /**
+   * True while Eya is working on something for the person (a request she is carrying out, a task she is keeping, a page she is waiting on, an answer she is
+   * waiting for): the person may be silent then, busy with their own work, and the conversation is not ended for being quiet — however long it takes — so she can
+   * tell them how it went. Only `keepOpenMs` (hours) stops that, for a task that is stuck rather than working.
+   */
+  keepOpen?: () => boolean;
+  /** The longest a quiet conversation is kept open for work that never finishes (default 3 hours: a stuck task, not a working one). */
+  keepOpenMs?: number;
+  /** How long a quiet conversation stays open after the work ended, so she can say how it went and the person, who was busy, can answer (default 2 minutes). */
+  afterWorkMs?: number;
+  /** How long after Eya stops speaking the microphone stays muted (her voice fading in the room). */
+  echoTailMs?: number;
+  /** How long a tool may run before onSlowTool fires. */
+  slowToolMs?: number;
+  /** After the first cue, how long before the next (a different one), and the one after that comes at three times this. */
+  slowFollowUpMs?: number;
+  /** Remembers models that failed a session (optionally across restarts) so the next conversation does not begin with one. */
+  modelHealth?: ModelHealthStore;
+  /** How long a model that failed us is tried last (default 30 minutes). */
+  badModelMs?: number;
+  /** How many times one conversation may reopen itself after the server cut it off, per two minutes (default 2). */
+  maxReconnects?: number;
+  now?: () => number;
+}
+
+export type StartResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+
+function parseJsonObject(text: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+    return { result: parsed };
+  } catch {
+    return { result: text };
+  }
+}
+
+/** A short, honest reason for the user when a connection can't be made. */
+export function describeOpenFailure(err: unknown): string {
+  if (err instanceof LiveOpenError) {
+    const detail = `${err.reason} ${err.message}`;
+    if (QUOTA_LIKE.test(detail)) {
+      return liveLimitMessage(detail, new Date());
+    }
+    if (err.kind === 'timeout') return 'Live voice took too long to connect.';
+  }
+  return 'Live voice is not available right now.';
+}
+
+/**
+ * A spoken back-and-forth with Gemini Live. The microphone streams up, Eya's
+ * voice streams back and plays as it arrives, and tool requests run in the
+ * main process. By default it is half-duplex: the microphone is muted while she
+ * speaks (and for a moment after), so her own voice can't be mistaken for the
+ * user interrupting her. With barge-in on (headphones, or speakers that don't
+ * leak into the microphone) the microphone stays open and Gemini's own voice
+ * detection stops her the moment the user talks over her.
+ */
+export class LiveConversation {
+  private session: LiveSessionLike | null = null;
+  private player: PcmPlayback | null = null;
+  private isActive = false;
+  private speaking = false;
+  private mutedUntil = 0;
+  private bargeIn = false;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly batcher = new FrameBatcher();
+  private readonly cancelled = new Set<string>();
+  private heardText = '';
+  private saidText = '';
+  private lastSpoke: 'heard' | 'said' | null = null;
+  /** Counts the user's turns, so Eya's memory can tell two identical requests in a row from one request. */
+  private turn = 0;
+  private toolsRunning = 0;
+  /** When the conversation was first kept open past its quiet time for a task (null when it is not being). */
+  private heldSince: number | null = null;
+  /** The last time Eya was seen to be working (a tool running, a task kept, speaking), for the grace after it ends. */
+  private lastBusyAt: number | null = null;
+  private unsubscribers: Array<() => void> = [];
+  /** Model -> when it stops being tried last. Loaded on first use from the store, if there is one. */
+  private triedLastUntil: Map<string, number> | null = null;
+  private currentModel = '';
+  /** Replies the current session's model has finished: zero when the server cuts it off means the model itself is the problem. */
+  private turnsCompleted = 0;
+  private reconnectTimes: number[] = [];
+  private reconnecting = false;
+
+  constructor(
+    private readonly deps: ConversationDeps,
+    private readonly handlers: ConversationHandlers,
+  ) {}
+
+  get active(): boolean {
+    return this.isActive;
+  }
+
+  /** Shows the conversation what is on the user's screen right now (they are sharing it). Does nothing when there is no conversation. */
+  sendScreenFrame(jpegBase64: string): void {
+    if (this.isActive) this.session?.sendImage?.(jpegBase64);
+  }
+
+  async start(): Promise<StartResult> {
+    if (this.isActive) return { ok: true };
+    this.handlers.onPhase('connecting');
+
+    const config = await this.deps.getConfig();
+    if (config === null) return { ok: false, reason: 'Live voice needs a Gemini key.' };
+
+    const opened = await this.openFirst(config);
+    if ('error' in opened) return { ok: false, reason: describeOpenFailure(opened.error) };
+
+    this.isActive = true;
+    this.speaking = false;
+    this.mutedUntil = 0;
+    this.heardText = '';
+    this.saidText = '';
+    this.lastSpoke = null;
+    this.toolsRunning = 0;
+    this.lastBusyAt = null;
+    this.reconnectTimes = [];
+    this.cancelled.clear();
+    this.batcher.reset();
+    this.attach(opened.session, opened.model);
+    this.deps.setFrameSink((chunk, rate) => this.onFrame(chunk, rate));
+    this.handlers.onPhase('listening');
+    this.resetIdle();
+    return { ok: true };
+  }
+
+  // ------------------------------------------------------------- which model, and staying connected
+  private health(): Map<string, number> {
+    if (this.triedLastUntil === null) {
+      this.triedLastUntil = new Map();
+      try {
+        for (const [model, until] of Object.entries(this.deps.modelHealth?.load() ?? {})) {
+          if (typeof until === 'number') this.triedLastUntil.set(model, until);
+        }
+      } catch {
+        // An unreadable memory is no memory.
+      }
+    }
+    return this.triedLastUntil;
+  }
+
+  private remember(): void {
+    const now = this.now();
+    const live: Record<string, number> = {};
+    for (const [model, until] of this.health()) if (until > now) live[model] = until;
+    try {
+      this.deps.modelHealth?.save(live);
+    } catch {
+      // Not being able to write it down must never break a conversation.
+    }
+  }
+
+  private markBad(model: string): void {
+    this.health().set(model, this.now() + (this.deps.badModelMs ?? 30 * 60_000));
+    this.remember();
+  }
+
+  private markGood(model: string): void {
+    if (this.health().delete(model)) this.remember();
+  }
+
+  /** The configured models, those that have not recently failed first. A failed one is only moved to the back, never dropped, so it is used again if the rest fail or once it has recovered. */
+  private ordered(models: readonly string[]): string[] {
+    const now = this.now();
+    const health = this.health();
+    const failedRecently = (m: string): boolean => (health.get(m) ?? 0) > now;
+    return [...models.filter((m) => !failedRecently(m)), ...models.filter(failedRecently)];
+  }
+
+  /** Opens the first model that will connect. A model the server refuses outright (not for a limit) is remembered as bad. */
+  private async openFirst(config: LiveConfig): Promise<{ session: LiveSessionLike; model: string } | { error: unknown }> {
+    let firstError: unknown;
+    for (const model of this.ordered(config.models)) {
+      const session = this.deps.makeSession();
+      try {
+        await session.open(config.url, {
+          model,
+          voice: config.voice,
+          systemInstruction: config.systemInstruction,
+          tools: config.tools,
+        });
+        return { session, model };
+      } catch (err) {
+        firstError ??= err;
+        if (err instanceof LiveOpenError && err.kind === 'closed' && !QUOTA_LIKE.test(`${err.reason} ${err.message}`)) this.markBad(model);
+      }
+    }
+    return { error: firstError };
+  }
+
+  private attach(session: LiveSessionLike, model: string): void {
+    this.session = session;
+    this.currentModel = model;
+    this.turnsCompleted = 0;
+    this.unsubscribers = [session.onEvent((event) => this.handleEvent(event)), session.onClose((info) => this.handleClose(info))];
+  }
+
+  /**
+   * The server cut the session off (measured: gemini-3.1-flash-live-preview opens fine, then closes every audio session ~9 s
+   * in with "Internal error", while the other Live models work). Reopen on another model and carry on, so the user is not
+   * left talking to nothing — and remember which model failed.
+   */
+  private async reconnect(detail: string): Promise<void> {
+    this.reconnecting = true;
+    const failed = this.currentModel;
+    // A model that never finished one reply before it was cut off is the problem: it goes to the back of the line.
+    if (this.turnsCompleted === 0) this.markBad(failed);
+    for (const off of this.unsubscribers) off();
+    this.unsubscribers = [];
+    this.session = null;
+    this.player?.stop();
+    this.player = null;
+    this.speaking = false;
+    this.batcher.reset();
+    this.handlers.onPhase('connecting');
+    this.handlers.onReconnecting?.(failed, detail);
+    try {
+      const config = await this.deps.getConfig();
+      const opened = config === null ? null : await this.openFirst(config);
+      if (!this.isActive) {
+        // The user stopped while this was reconnecting.
+        if (opened !== null && 'session' in opened) opened.session.close();
+        return;
+      }
+      if (opened === null || 'error' in opened) {
+        this.finish('closed', detail);
+        return;
+      }
+      this.attach(opened.session, opened.model);
+      this.handlers.onPhase('listening');
+      this.resetIdle();
+    } finally {
+      this.reconnecting = false;
+    }
+  }
+
+  /** Lets the user interrupt her mid-sentence: the microphone stays open while she speaks. */
+  setBargeIn(on: boolean): void {
+    this.bargeIn = on;
+    this.batcher.reset();
+  }
+
+  get bargeInEnabled(): boolean {
+    return this.bargeIn;
+  }
+
+  /** Mutes the microphone until `ms` from now (0 lifts it), e.g. while a cue plays that must not be heard as the user. */
+  /**
+   * Eya tells the conversation something in her own words (a step that finished late, a question waiting for the user), and the model
+   * says it. False when there is no open conversation to tell.
+   */
+  tell(text: string): boolean {
+    const session = this.session;
+    if (!this.isActive || session === null || !session.isOpen || session.sendText === undefined) return false;
+    session.sendText(text);
+    this.resetIdle();
+    return true;
+  }
+
+  muteMicFor(ms: number): void {
+    this.mutedUntil = this.now() + ms;
+    this.batcher.reset();
+  }
+
+  stop(reason: ConversationEnd = 'user'): void {
+    if (!this.isActive) return;
+    const session = this.session;
+    this.finish(reason);
+    session?.close();
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  private onFrame(chunk: Float32Array, sampleRate: number): void {
+    const session = this.session;
+    if (!this.isActive || session === null || !session.isOpen) return;
+    if ((this.speaking && !this.bargeIn) || this.now() < this.mutedUntil) {
+      this.batcher.reset();
+      return;
+    }
+    const block = this.batcher.push(chunk, sampleRate);
+    if (block !== null) session.sendAudio(floatToPcm16(resample(block, sampleRate, LIVE_INPUT_RATE)));
+  }
+
+  private handleEvent(event: LiveEvent): void {
+    if (!this.isActive) return;
+    switch (event.type) {
+      case 'heard':
+        // A new user turn starts a fresh exchange on screen.
+        if (this.lastSpoke === 'said') {
+          this.heardText = '';
+          this.saidText = '';
+          this.handlers.onSaid('');
+        }
+        if (this.lastSpoke !== 'heard') this.turn += 1; // the user has started a new turn of their own
+        this.lastSpoke = 'heard';
+        this.heardText += event.text;
+        this.handlers.onHeard(this.heardText.trim());
+        this.resetIdle();
+        break;
+      case 'said':
+        this.lastSpoke = 'said';
+        this.saidText += event.text;
+        this.handlers.onSaid(this.saidText.trim());
+        this.resetIdle();
+        break;
+      case 'audio':
+        if (this.player === null) {
+          this.player = this.deps.createPlayback();
+          this.speaking = true;
+          this.handlers.onPhase('speaking');
+        }
+        this.player.push(event.pcm);
+        this.resetIdle();
+        break;
+      case 'turnComplete':
+        // The model has delivered a whole reply: it is working, so it is no longer on the "tried last" list.
+        this.turnsCompleted += 1;
+        if (this.turnsCompleted === 1) this.markGood(this.currentModel);
+        this.finishSpeaking();
+        break;
+      case 'interrupted':
+        this.player?.stop();
+        this.player = null;
+        this.speaking = false;
+        this.mutedUntil = 0;
+        this.handlers.onPhase('listening');
+        break;
+      case 'voiceActivity':
+        if (!this.speaking) this.handlers.onPhase(event.active ? 'listening' : 'thinking');
+        this.resetIdle();
+        break;
+      case 'toolCall':
+        void this.runTools(event.calls);
+        break;
+      case 'toolCancel':
+        for (const id of event.ids) this.cancelled.add(id);
+        break;
+      case 'goAway':
+      case 'setupComplete':
+        break;
+    }
+  }
+
+  private finishSpeaking(): void {
+    const player = this.player;
+    if (player === null) {
+      if (this.toolsRunning === 0) this.handlers.onPhase('listening');
+      return;
+    }
+    this.player = null;
+    player.end();
+    void player.finished.then(() => {
+      if (!this.isActive) return;
+      this.speaking = false;
+      this.mutedUntil = this.bargeIn ? 0 : this.now() + (this.deps.echoTailMs ?? 250);
+      this.handlers.onPhase('listening');
+      this.resetIdle();
+    });
+  }
+
+  private async runTools(calls: readonly LiveToolCall[]): Promise<void> {
+    this.toolsRunning += 1;
+    this.handlers.onPhase('working');
+    const cue = (stage: 'start' | 'slow' | 'long') => (): void => {
+      if (this.isActive && !this.speaking) this.handlers.onSlowTool?.(calls[0]?.name ?? '', calls[0]?.args, stage);
+    };
+    const first = this.deps.slowToolMs ?? 2500;
+    const gap = this.deps.slowFollowUpMs ?? 11_000;
+    const slowTimers = [setTimeout(cue('start'), first), setTimeout(cue('slow'), first + gap), setTimeout(cue('long'), first + gap * 3)];
+    const results: LiveToolResult[] = [];
+    try {
+      for (const call of calls) {
+        let response: Record<string, unknown>;
+        try {
+          // What the user said this turn goes along, so Eya's memory can tell that several calls were one task (and what it was).
+          response = parseJsonObject(await this.deps.runTool(call.name, call.args, { heard: this.heardText.trim(), turn: this.turn }));
+        } catch {
+          response = { ok: false, error: 'The tool failed to run.' };
+        }
+        if (!this.cancelled.has(call.id)) results.push({ id: call.id, name: call.name, response });
+      }
+    } finally {
+      for (const timer of slowTimers) clearTimeout(timer);
+      this.toolsRunning -= 1;
+    }
+    if (!this.isActive) return;
+    this.session?.sendToolResults(results);
+    if (!this.speaking) this.handlers.onPhase('thinking');
+    this.resetIdle();
+  }
+
+  private handleClose(info: LiveCloseInfo): void {
+    if (info.byUs || !this.isActive || this.reconnecting) return;
+    const detail = info.reason || `closed (${info.code})`;
+    const now = this.now();
+    this.reconnectTimes = this.reconnectTimes.filter((t) => now - t < RECONNECT_WINDOW_MS);
+    // Reopening cannot fix a limit, and must not loop: a couple of tries, then say what happened.
+    if (QUOTA_LIKE.test(info.reason) || this.reconnectTimes.length >= (this.deps.maxReconnects ?? 2)) {
+      this.finish('closed', detail);
+      return;
+    }
+    this.reconnectTimes.push(now);
+    void this.reconnect(detail);
+  }
+
+  private resetIdle(): void {
+    // Something happened: the time kept open for a task starts over.
+    this.heldSince = null;
+    this.armIdle();
+  }
+
+  private armIdle(): void {
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    if (!this.isActive) return;
+    const idleMs = this.deps.idleMs ?? 30_000;
+    this.idleTimer = setTimeout(() => {
+      const now = this.now();
+      // Mid-speech or mid-task is not idle.
+      if (this.speaking || this.toolsRunning > 0) {
+        if (this.toolsRunning > 0) this.lastBusyAt = now; // (speaking is not "work": the grace after work is for a task that has just ended)
+        this.resetIdle();
+        return;
+      }
+      // Work Eya is doing for the person is not "nothing happening", however quiet they are: stay open so she can tell them how it went. (Only work that goes on for
+      // hours is taken to be stuck.)
+      if (this.deps.keepOpen?.() === true) {
+        this.lastBusyAt = now;
+        this.heldSince ??= now;
+        if (now - this.heldSince < (this.deps.keepOpenMs ?? 3 * 60 * 60_000)) {
+          this.armIdle();
+          return;
+        }
+      } else if (this.lastBusyAt !== null && now - this.lastBusyAt < (this.deps.afterWorkMs ?? 2 * 60_000)) {
+        // The work has just ended: she says how it went and waits a little for the person, who may be busy with their own work, to answer.
+        this.armIdle();
+        return;
+      }
+      this.stop('idle');
+    }, idleMs);
+  }
+
+  private finish(reason: ConversationEnd, detail?: string): void {
+    if (!this.isActive) return;
+    this.isActive = false;
+    if (this.idleTimer !== null) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
+    for (const off of this.unsubscribers) off();
+    this.unsubscribers = [];
+    this.deps.setFrameSink(null);
+    this.player?.stop();
+    this.player = null;
+    this.speaking = false;
+    this.batcher.reset();
+    this.session = null;
+    this.handlers.onEnded(reason, detail);
+  }
+}

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fake player - unskippable advert</title>
+<style>
+  .html5-video-player { position: relative; width: 480px; height: 270px; background: #111; }
+  video.html5-main-video { width: 480px; height: 270px; background: #000; }
+</style>
+</head>
+<body>
+<h1>A video with an advert that cannot be skipped</h1>
+<div class="html5-video-player ad-showing" id="player">
+  <video class="html5-main-video" id="v" muted></video>
+</div>
+<script>
+  const player = document.getElementById('player');
+  const v = document.getElementById('v');
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 36;
+  const ctx = canvas.getContext('2d');
+  let n = 0;
+  setInterval(() => { ctx.fillStyle = 'hsl(' + (n++ * 9 % 360) + ',80%,50%)'; ctx.fillRect(0, 0, 64, 36); }, 100);
+  v.srcObject = canvas.captureStream(10);
+  window.__skips = 0;
+  // The advert has no Skip button at all and ends by itself after four seconds; the video then starts.
+  setTimeout(() => { player.classList.remove('ad-showing'); v.play().catch(() => {}); }, 4000);
+</script>
+</body>
+</html>

@@ -1,0 +1,331 @@
+/**
+ * Live integration test: the real Eya Browser Bridge extension, loaded into a
+ * real Chrome (or Edge: EYA_LIVE_EXE=edge), talking to the real ChromeBridge over the real loopback socket,
+ * driven through ChromeBrowserService against a local site made of page
+ * structures the code was never written for.
+ *
+ * Skipped unless EYA_LIVE_BROWSER=1 (it launches a browser). Run with:
+ *   EYA_LIVE_BROWSER=1 npx vitest run tests/live
+ * Set EYA_LIVE_HEADED=1 to watch it in a visible window.
+ *
+ * What this can NOT cover: the user's own signed-in profile. A temporary,
+ * empty profile is used, so real-world sign-ins, MFA and site-specific
+ * behaviour are untested here.
+ */
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync } from 'node:fs';
+import type { Server } from 'node:http';
+import { ChromeBridge } from '../../src/main/chrome/ChromeBridge';
+import type { SecretStore } from '../../src/main/chrome/ChromeBridge';
+import { ChromeBrowserService } from '../../src/main/chrome/ChromeBrowserService';
+import type { BrowserName } from '../../src/main/chrome/protocol';
+import { sensitiveActionReason } from '../../src/main/browser/sensitiveActions';
+import type { PageSnapshot } from '../../src/main/browser/pageSnapshot';
+import type { ActOnPageResult } from '../../src/main/browser/BrowserAutomationService';
+import { startTestSite } from '../fixtures/chrome-test-site/server.mjs';
+import { registerJourneyScenarios } from './sharedScenarios';
+import { findBrowserExe, prepareExtensionCopy, sleep, startTestBrowser, userCloseTab, userOpenTab, waitFor } from './liveSupport';
+import type { TestBrowser } from './liveSupport';
+
+const live = process.env['EYA_LIVE_BROWSER'] === '1';
+const headed = process.env['EYA_LIVE_HEADED'] === '1';
+
+// Chrome by default (it is the browser the user installed for this); EYA_LIVE_EXE=edge runs the same suite in Edge.
+const wantEdge = process.env['EYA_LIVE_EXE'] === 'edge';
+const KIND = wantEdge ? 'edge' : 'chrome';
+const EXPECTED_BROWSER: BrowserName = KIND;
+// Not the normal port: an Eya you are really running keeps that one.
+const TEST_BRIDGE_PORT = 47834;
+
+class MemorySecrets implements SecretStore {
+  hashes = new Map<BrowserName, string>();
+  loadHash(b: BrowserName) {
+    return this.hashes.get(b) ?? null;
+  }
+  saveHash(b: BrowserName, h: string) {
+    this.hashes.set(b, h);
+  }
+  clear(b?: BrowserName) {
+    if (b === undefined) this.hashes.clear();
+    else this.hashes.delete(b);
+  }
+}
+
+function must<T>(r: ActOnPageResult): Extract<ActOnPageResult, { ok: true }> {
+  if (!r.ok) throw new Error(`expected success, got ${r.reason}: ${'message' in r ? r.message : ''}`);
+  return r;
+}
+
+describe.skipIf(!live || findBrowserExe(KIND) === undefined)('Eya Browser Bridge: real extension, real browser (Chrome by default), real bridge', () => {
+  let site: { server: Server; port: number };
+  let base = '';
+  let bridge: ChromeBridge;
+  let svc: ChromeBrowserService;
+  let browser: TestBrowser;
+  let ext: { dir: string; cleanup: () => void };
+  const secrets = new MemorySecrets();
+
+  beforeAll(async () => {
+    site = await startTestSite(0);
+    base = `http://127.0.0.1:${site.port}`;
+    ext = prepareExtensionCopy(TEST_BRIDGE_PORT);
+
+    bridge = new ChromeBridge({ secrets, port: TEST_BRIDGE_PORT });
+    if (!(await bridge.start())) throw new Error(`port ${TEST_BRIDGE_PORT} is busy`);
+    svc = new ChromeBrowserService(bridge.forBrowser(EXPECTED_BROWSER), { browserName: EXPECTED_BROWSER });
+    bridge.openPairingWindow();
+
+    browser = await startTestBrowser({ kind: KIND, extensionDir: ext.dir, debugPort: 9334, headed });
+    await waitFor(() => bridge.isConnected(EXPECTED_BROWSER), 45_000, 'the extension to connect and pair');
+  }, 120_000);
+
+  afterAll(async () => {
+    browser?.kill();
+    await bridge?.stop();
+    site?.server.close();
+    await sleep(500);
+    browser?.cleanup();
+    ext?.cleanup();
+  }, 30_000);
+
+  const names = (s: PageSnapshot) => [...s.links, ...s.buttons];
+
+  // The same journeys as Eya's own window runs: long header menus, hover dropdowns, deeper levels, reading, finding.
+  registerJourneyScenarios('Extension', () => ({ svc, base }));
+
+  it('paired with the real extension in a real browser', () => {
+    expect(bridge.isConnected(EXPECTED_BROWSER)).toBe(true);
+    expect(bridge.info().browsers[EXPECTED_BROWSER]).toMatchObject({ connected: true, paired: true, extensionVersion: '0.12.0' });
+    expect(secrets.hashes.get(EXPECTED_BROWSER)).toBeDefined();
+  });
+
+  it('a web page cannot talk to the bridge: the Origin check refuses it', async () => {
+    const snap = await svc.openWebsite(`${base}/wscheck.html`);
+    await waitFor(async () => (await svc.inspectPage()).visibleText?.includes('ws-') === true, 8000, 'the page to try its socket');
+    const after = await svc.inspectPage();
+    expect(after.visibleText).toContain('ws-blocked');
+    expect(after.visibleText).not.toContain('ws-open');
+    expect(snap.environment).toBe('your_browser');
+    expect(bridge.isConnected()).toBe(true); // and the legitimate connection is untouched
+  }, 30_000);
+
+  it('opens a site in the user\'s browser and shows the live page', async () => {
+    const snap = await svc.openWebsite(`${base}/menu.html`);
+    expect(snap.title).toBe('Courts Portal');
+    expect(snap.buttons).toContain('Open menu');
+    expect(names(snap)).not.toContain('Cause List'); // hidden until the menu is opened
+  }, 30_000);
+
+  it('discovers a hidden menu live: nothing about this site is known in advance', async () => {
+    const opened = must(await svc.clickOnPage('Open menu'));
+    expect(opened.effects?.changes.navigated).toBe(false);
+    expect(opened.effects?.changes.appeared.join(' ')).toContain('Services');
+    const sub = must(await svc.clickOnPage('Services'));
+    expect(sub.effects?.changes.appeared.join(' ')).toContain('Cause List');
+    const page = must(await svc.clickOnPage('Cause List'));
+    expect(page.effects?.changes.navigated).toBe(true);
+    expect(page.snapshot.title).toBe('Cause List');
+    expect(page.snapshot.tables?.[0]?.rows[0]).toEqual(['1', '1', 'WP 101/2026']);
+  }, 60_000);
+
+  it('fills a field, presses a button, and sees the result on the page', async () => {
+    must(await svc.fillOnPage('Advocate Code', 'ADV-9'));
+    const done = must(await svc.clickOnPage('Search'));
+    expect(done.snapshot.visibleText).toContain('Searched for ADV-9');
+    expect(done.effects?.changes.textChanged).toBe(true);
+  }, 30_000);
+
+  it('goes back through the browser history', async () => {
+    const back = must(await svc.goBack());
+    expect(back.snapshot.title).toBe('Courts Portal');
+  }, 30_000);
+
+  it('a click lands on the innermost element under the pointer, as a real click does (an app that listens on an inner node of a row is heard)', async () => {
+    const snap = await svc.openWebsite(`${base}/inner-click.html`);
+    expect(snap.visibleText).toContain('nothing opened');
+    must(await svc.clickOnPage('Open Anna'));
+    await waitFor(async () => (await svc.inspectPage()).visibleText?.includes('opened: Anna') === true, 5000, 'the inner node to hear the click');
+  }, 30_000);
+
+  it('presses Escape (and only Escape): the open chat closes, and no other key can be sent', async () => {
+    const before = await svc.openWebsite(`${base}/escape.html`);
+    expect(before.visibleText).toContain('chat is open');
+    const pressed = await svc.pressEscape();
+    expect(pressed.ok).toBe(true);
+    await waitFor(async () => !((await svc.inspectPage()).visibleText ?? '').includes('chat is open'), 5000, 'the chat to close');
+    expect((await svc.inspectPage()).visibleText).toContain('no other key');
+  }, 30_000);
+
+  it('reuses tabs instead of piling them up, and never steers a tab it did not open', async () => {
+    const before = (await svc.listTabs()).length;
+    const again = await svc.openWebsite(`${base}/orders.html`); // another page of a site Eya already has a tab for
+    expect(again.title).toBe('Orders');
+    expect((await svc.listTabs()).length).toBe(before);
+    const root = await svc.openWebsite(`${base}/`); // the front door of a site that already has a tab open: just go there
+    expect(root.url).toContain('/orders'); // focused the existing tab as it was, rather than reloading it
+    expect(root.notes?.join(' ')).toMatch(/already had a tab open/);
+    expect((await svc.listTabs()).length).toBe(before);
+    const tabs = await svc.listTabs();
+    expect(tabs.some((t) => t.workingHere && t.openedByEya)).toBe(true);
+  }, 60_000);
+
+  it('a popup covering the page is reported, then dealt with, then the page works', async () => {
+    await svc.openWebsite(`${base}/modal.html`);
+    const covered = await svc.clickOnPage('Continue to account');
+    expect(covered).toMatchObject({ ok: false, reason: 'could_not' });
+    if (!covered.ok && covered.reason === 'could_not') expect(covered.message).toMatch(/covering/);
+    must(await svc.clickOnPage('Accept cookies'));
+    const free = must(await svc.clickOnPage('Continue to account'));
+    expect(free.snapshot.visibleText).toContain('under clicked');
+  }, 60_000);
+
+  it('follows a link that opens a new tab', async () => {
+    await svc.openWebsite(`${base}/newtab.html`);
+    const viaLink = must(await svc.clickOnPage('Open orders in new tab'));
+    expect(viaLink.effects?.newTab?.title).toBe('Orders');
+    expect(viaLink.snapshot.title).toBe('Orders');
+    const tabs = await svc.listTabs();
+    expect(tabs.find((t) => t.workingHere)?.title).toBe('Orders');
+  }, 60_000);
+
+  // KNOWN LIMITATION, pinned here on purpose so it is never forgotten or silently "fixed" by accident:
+  // Eya clicks with script-made events, which browsers do not treat as a real user gesture. A page that
+  // calls window.open() from a click handler is therefore blocked as a popup. Links (target=_blank) are
+  // unaffected. Real trusted clicks would need the 'debugger' permission, which this extension declines.
+  it('known limitation: a script-opened popup (window.open) needs a real click and is blocked', async () => {
+    const tabs = await svc.listTabs();
+    const opener = tabs.find((t) => t.title === 'New tab page');
+    expect(opener).toBeDefined();
+    await svc.switchToTab(opener!.tabId);
+    const before = (await svc.listTabs()).length;
+    const result = await svc.clickOnPage('Open cause list popup');
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.effects?.newTab).toBeUndefined();
+    expect((await svc.listTabs()).length).toBe(before);
+  }, 60_000);
+
+  it('downloads a file, and the file is really on disk with the right content', async () => {
+    await svc.openWebsite(`${base}/download.html`);
+    const r = must(await svc.clickOnPage('Download report'));
+    const dl = r.effects?.download;
+    expect(dl).toBeDefined();
+    expect(dl?.state).toBe('complete');
+    expect(dl?.name).toBe('eya-test-report.txt');
+    expect(dl?.path.startsWith(browser.downloads)).toBe(true);
+    expect(readFileSync(dl!.path, 'utf8')).toBe('eya test download\n');
+  }, 60_000);
+
+  it('notices a CAPTCHA and stops: it does not click anything on that page', async () => {
+    const snap = await svc.openWebsite(`${base}/captcha.html`);
+    expect(snap.challenge?.kind).toBe('captcha');
+    expect(await svc.clickOnPage('Continue')).toMatchObject({ ok: false, reason: 'needs_user' });
+  }, 30_000);
+
+  it('never types into a password field, and asks before a purchase-like click', async () => {
+    await svc.openWebsite(`${base}/forms.html`);
+    expect(await svc.fillOnPage('Account password', 'hunter2')).toMatchObject({ ok: false, reason: 'needs_user' });
+    const picked = must(await svc.fillOnPage('Year', '2025'));
+    // A label that wraps its drop-down is named by its own words ("Year"), not by every option inside it.
+    expect(picked.snapshot.inputs).toContain('Year');
+    const submitted = must(await svc.fillOnPage('Case number', 'WP 12/2026', { submit: true }));
+    expect(submitted.snapshot.visibleText).toContain('Submitted: WP 12/2026');
+
+    const gated = await svc.clickOnPage('Place order', (t) => sensitiveActionReason(t.name, t.role));
+    expect(gated).toMatchObject({ ok: false, reason: 'needs_confirmation', target: 'Place order' });
+    expect((await svc.inspectPage()).visibleText).not.toContain('Bought it'); // nothing was clicked
+    const allowed = must(await svc.clickOnPage('Place order')); // the user said yes: no gate this time
+    expect(allowed.snapshot.visibleText).toContain('Bought it');
+  }, 60_000);
+
+  it('works on shadow DOM, clickable divs and same-origin frames', async () => {
+    await svc.openWebsite(`${base}/shadow.html`);
+    must(await svc.clickOnPage('Shadow action'));
+    const both = must(await svc.clickOnPage('Fancy div button'));
+    expect(both.snapshot.visibleText).toMatch(/shadow clicked/);
+    expect(both.snapshot.visibleText).toMatch(/div clicked/);
+
+    await svc.openWebsite(`${base}/frames.html`);
+    const filled = must(await svc.fillOnPage('Advocate Code', 'F1'));
+    expect(filled.snapshot.inputs).toContain('Advocate Code');
+  }, 60_000);
+
+  it('waits for a slow page to finish loading before it looks', async () => {
+    const snap = await svc.openWebsite(`${base}/spa.html`);
+    expect(snap.links).toContain('Alpha order');
+  }, 30_000);
+
+  it('can look at a browser-internal page without falling over, and says it cannot read it', async () => {
+    const tabs = await svc.listTabs();
+    const blank = tabs.find((t) => t.url === '' || t.url.startsWith('about:') || t.url.startsWith('edge:'));
+    if (blank === undefined) return; // no internal tab left open in this run
+    const snap = await svc.switchToTab(blank.tabId);
+    expect(snap.notes?.join(' ')).toMatch(/browser-internal|protected|not allowed/i);
+  }, 30_000);
+
+  it('reads a search-results page in a background tab that closes again', async () => {
+    const before = (await svc.listTabs()).length;
+    const raw = (await bridge.request('search_page', { url: `${base}/fakesearch.html`, engine: 'duckduckgo' }, undefined, EXPECTED_BROWSER)) as { hits: Array<{ title: string; href: string }> };
+    expect(raw.hits).toHaveLength(2);
+    expect(raw.hits[0]!.href).toContain('uddg=');
+    expect((await svc.listTabs()).length).toBe(before);
+  }, 30_000);
+
+  it('refuses to open anything but a normal web address', async () => {
+    await expect(bridge.request('open_url', { url: 'file:///C:/Windows/win.ini' }, undefined, EXPECTED_BROWSER)).rejects.toThrow(/http/);
+    await expect(bridge.request('open_url', { url: 'javascript:alert(1)' }, undefined, EXPECTED_BROWSER)).rejects.toThrow(/http|valid/);
+  }, 30_000);
+
+  it('takes a real screenshot of the page in front: a real PNG of the window, and the page itself is left alone', async () => {
+    await svc.openWebsite(`${base}/orders.html`);
+    const before = await svc.inspectPage();
+    const shot = await svc.screenshot();
+    expect(shot.mime).toBe('image/png');
+    expect(shot.bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe(true);
+    expect(shot.width ?? 0).toBeGreaterThan(300);
+    expect(shot.height ?? 0).toBeGreaterThan(200);
+    expect(shot.bytes.length).toBeGreaterThan(3000); // a rendered page, not an empty frame
+    expect(shot.url).toContain('/orders.html');
+    expect(shot.title).toBe(before.title);
+    expect(shot).toMatchObject({ environment: 'your_browser', browser: EXPECTED_BROWSER });
+    const after = await svc.inspectPage();
+    expect({ url: after.url, title: after.title }).toEqual({ url: before.url, title: before.title });
+  }, 30_000);
+
+  it('photographs a page the USER opened themselves — one Eya never touched — as long as it is the one in front', async () => {
+    await userOpenTab(9334, `${base}/forms.html`);
+    await sleep(1500); // the tab loads and comes to the front; the browser allows about two captures a second
+    const shot = await svc.screenshot();
+    expect(shot.url).toContain('/forms.html');
+    expect(shot.bytes.subarray(1, 4).toString('ascii')).toBe('PNG');
+    await userCloseTab(9334, '/forms.html');
+    await sleep(700);
+  }, 30_000);
+
+  it('says plainly that a browser-internal page cannot be photographed', async () => {
+    const tabs = await svc.listTabs();
+    const internal = tabs.find((t) => t.url === '' || /^(about|edge|chrome):/.test(t.url));
+    if (internal === undefined) return; // no internal tab left open in this run
+    await svc.switchToTab(internal.tabId);
+    await sleep(700);
+    await expect(svc.screenshot()).rejects.toThrow(/browser page|not a website|private window|would not take/i);
+  }, 30_000);
+
+  it('reconnects by itself after the bridge restarts, using the stored secret (no new pairing)', async () => {
+    await bridge.stop();
+    expect(bridge.isConnected()).toBe(false);
+    await bridge.start();
+    expect(bridge.pairingOpen()).toBe(false);
+    await waitFor(() => bridge.isConnected(), 60_000, 'the extension to reconnect');
+    expect((await svc.inspectPage()).title).toBeTruthy();
+  }, 90_000);
+
+  it('after the pairing is forgotten it stays out until the user asks again, then pairs again', async () => {
+    bridge.forgetPairing();
+    await waitFor(() => !bridge.isConnected(), 10_000, 'the browser to be dropped');
+    await new Promise((r) => setTimeout(r, 4000));
+    expect(bridge.isConnected()).toBe(false); // it keeps knocking but is refused: no window is open
+    bridge.openPairingWindow();
+    await waitFor(() => bridge.isConnected(), 60_000, 'the extension to pair again');
+    expect((await svc.inspectPage()).title).toBeTruthy();
+  }, 120_000);
+});

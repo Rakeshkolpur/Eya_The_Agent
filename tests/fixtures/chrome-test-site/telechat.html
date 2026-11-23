@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>TeleMock</title>
+<style>
+  body { font-family: sans-serif; margin: 0; display: flex; height: 100vh; }
+  #left { width: 280px; border-right: 1px solid #ccc; overflow: auto; }
+  .row { display: flex; gap: 8px; padding: 8px 10px; text-decoration: none; color: inherit; border-bottom: 1px solid #eee; }
+  .row .title { font-weight: bold; }
+  .row .sub { color: #777; font-size: 12px; }
+  #right { flex: 1; display: flex; flex-direction: column; }
+  #top { padding: 10px 14px; border-bottom: 1px solid #ccc; }
+  #msgs { flex: 1; overflow: auto; padding: 10px; }
+  .m { margin: 6px 0; padding: 6px 10px; background: #e3f2fd; border-radius: 6px; max-width: 60%; }
+  .m i { font-style: normal; margin-left: 8px; color: #2a7; font-size: 12px; }
+  .m i.bad { color: #c22; }
+  #bar { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #ccc; align-items: center; }
+  #write { flex: 1; min-height: 28px; border: 1px solid #aaa; padding: 4px; }
+  .popup { position: fixed; inset: 25% 25%; background: #fff; border: 2px solid #246; padding: 14px; }
+</style>
+</head>
+<body>
+<div id="left">
+  <input id="q" type="text" placeholder="Search">
+  <div id="rows"></div>
+</div>
+<div id="right">
+  <div id="top"><span class="name" id="who">Choose a chat</span> <small id="num"></small></div>
+  <div id="msgs"></div>
+  <div id="bar" hidden>
+    <button id="clip" title="Attach file">&#128206;</button>
+    <div id="write" contenteditable="true" role="textbox" aria-label="Write a message..."></div>
+    <button id="go" aria-label="Send message">&#10148;</button>
+  </div>
+</div>
+<!-- This app keeps its file pickers in the page from the start, one for anything and one for photos and videos. -->
+<input type="file" id="any" style="display:none" accept="*/*">
+<input type="file" id="media" style="display:none" accept="image/*,video/*">
+<div id="popup" class="popup" hidden>
+  <b>Send File</b>
+  <div id="pname"></div>
+  <button id="pgo">SEND</button>
+  <button id="pno">CANCEL</button>
+</div>
+<script>
+  const PEOPLE = [
+    { id: 1, name: 'Rahul Sharma', num: '+91 98765 00432', last: 'ok see you' },
+    { id: 2, name: 'Rahul Verma', num: '+91 91234 55987', last: 'my pin is 4321' },
+    { id: 3, name: 'Priya Singh', num: '+91 99887 70432', last: 'thanks' },
+    { id: 4, name: 'Uber', num: '+91 90000 99999', last: 'Your ride receipt' },
+  ];
+  const log = new Map(PEOPLE.map((p) => [p.id, []]));
+  let cur = null;
+  let picked = null;
+  window.__sent = [];
+  const $ = (id) => document.getElementById(id);
+
+  function rows(filter) {
+    const f = (filter || '').toLowerCase().trim();
+    const digits = f.replace(/\D/g, '');
+    $('rows').innerHTML = '';
+    for (const p of PEOPLE) {
+      if (f && !(p.name.toLowerCase().includes(f) || (digits && p.num.replace(/\D/g, '').includes(digits)))) continue;
+      const a = document.createElement('a');
+      a.className = 'row';
+      a.href = '#chat-' + p.id;
+      a.innerHTML = '<div><div class="title"></div><div class="sub"></div></div>';
+      a.querySelector('.title').textContent = p.name;
+      a.querySelector('.sub').textContent = p.last;
+      a.addEventListener('click', (e) => { e.preventDefault(); open(p.id); });
+      $('rows').appendChild(a);
+    }
+  }
+  function draw() {
+    $('msgs').innerHTML = '';
+    for (const m of log.get(cur)) {
+      const d = document.createElement('div');
+      d.className = 'm';
+      d.append(document.createTextNode(m.file ? 'document: ' + m.file : m.text));
+      const t = document.createElement('i');
+      t.title = m.state === 'ok' ? 'Delivered' : m.state === 'bad' ? 'Failed to send' : 'Sending';
+      t.className = m.state === 'bad' ? 'bad' : '';
+      t.textContent = m.state === 'ok' ? '✓✓' : m.state === 'bad' ? '!' : '…';
+      d.append(t);
+      $('msgs').appendChild(d);
+    }
+  }
+  function open(id) {
+    cur = id;
+    const p = PEOPLE.find((x) => x.id === id);
+    $('who').textContent = p.name;
+    $('num').textContent = p.num;
+    $('bar').hidden = false;
+    document.title = 'TeleMock';
+    draw();
+  }
+  function push(m, failing) {
+    log.get(cur).push(m);
+    draw();
+    setTimeout(() => {
+      m.state = failing ? 'bad' : 'ok';
+      if (!failing) window.__sent.push({ chat: cur, text: m.text || '', file: m.file || null });
+      draw();
+    }, 400);
+  }
+  $('q').addEventListener('input', (e) => rows(e.target.value));
+  for (const id of ['any', 'media']) {
+    $(id).addEventListener('change', () => {
+      const f = $(id).files[0];
+      if (!f) return;
+      picked = f.name;
+      $('pname').textContent = f.name;
+      $('popup').hidden = false;
+      window.__picked = { name: f.name, size: f.size, type: f.type, via: id };
+    });
+  }
+  $('clip').addEventListener('click', () => {});
+  $('pgo').addEventListener('click', () => {
+    $('popup').hidden = true;
+    push({ file: picked, state: 'wait' }, /fail/i.test(picked));
+  });
+  $('pno').addEventListener('click', () => { $('popup').hidden = true; });
+  $('go').addEventListener('click', () => {
+    const text = $('write').innerText.trim();
+    if (!text || cur === null) return;
+    $('write').innerText = '';
+    push({ text, state: 'wait' }, false);
+  });
+  rows('');
+</script>
+</body>
+</html>

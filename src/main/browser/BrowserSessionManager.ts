@@ -1,0 +1,968 @@
+import { rootLogger } from '@main/logging/logger';
+import { ChromeBrowserService } from '@main/chrome/ChromeBrowserService';
+import type { BridgeInfo, BrowserLink } from '@main/chrome/ChromeBridge';
+import type { BrowserWorldTracker } from '@main/chrome/browserWorld';
+import type { BrowserName } from '@main/chrome/protocol';
+import type {
+  ActOnPageResult,
+  AdsMode,
+  AdsState,
+  AttachFileRequest,
+  AttachFileResult,
+  BrowserAdHelper,
+  BrowserAutomationService,
+  BrowserCapture,
+  BrowserFileAttach,
+  BrowserItemClicker,
+  BrowserChatLive,
+  BrowserKeyPress,
+  BrowserItemLister,
+  BrowserTabControl,
+  ChatDeleteResult,
+  ChatMediaResult,
+  ChatReadResult,
+  ChatWatchResult,
+  ClickGate,
+  FillOptions,
+  FindOnPageResult,
+  OpenWebsiteOptions,
+  PageItem,
+  ReadPageResult,
+  ScreenshotImage,
+  ScrollDirection,
+} from './BrowserAutomationService';
+import { bindToTask, inTask, pinnedHome, pinnedTab } from './tabScope';
+import { selectBrowser } from './browserSelection';
+import type { Selection } from './browserSelection';
+import { BrowserUnavailableError, CommunicationAccessError } from './errors';
+import type { CommunicationApp, CommunicationPolicy } from '@main/privacy/communicationAccess';
+import { communicationBlockedSnapshot } from '@main/privacy/redactSnapshot';
+import { pageFingerprint } from './loopGuard';
+import { chooseBrowser } from './browserRouter';
+import type { BrowserKind } from './browserRouter';
+import type { BrowserTabInfo } from './pageEffects';
+import { withExtras } from './pageSnapshot';
+import type { BrowserEnvironment, PageSnapshot } from './pageSnapshot';
+import type { WebSearchHit } from './webSearchResults';
+
+const log = rootLogger.child('browser.session');
+
+/** How long a page that has just changed (a sign-in redirecting) is given to settle before it is reported as it is. */
+const READY_BUDGET_MS = 15_000;
+
+/**
+ * Which browser Eya works in:
+ *  - `smart` (the default): Eya Browser — her own, with sign-ins of its own that stay — unless the user asks for their own browser, has chosen it in
+ *    settings, or the page is a chat app (those live in their browser). Decided by rules (browserRouter.ts), never by asking each time; a task
+ *    that has started stays where it is. The user's own browser is never taken over unless one of those applies.
+ *  - `user_browser`: ONLY the user's own, already-signed-in Chrome or Edge, through the Eya Browser Bridge
+ *    extension. If no browser is connected she says so and says what to do; she never quietly starts a separate one.
+ *  - `eya_browser`: only Eya's own separate, signed-out window (an explicit choice, e.g. for testing).
+ *  - `auto`: the user's browser when connected, otherwise Eya's own window, with a note saying so. Opt-in.
+ */
+export type BrowserMode = 'smart' | 'user_browser' | 'eya_browser' | 'auto';
+
+export function parseBrowserMode(raw: string | undefined): BrowserMode {
+  const v = (raw ?? '').trim().toLowerCase();
+  if (v === 'eya_browser' || v === 'auto' || v === 'user_browser') return v;
+  if (v === 'user_chrome') return 'user_browser';
+  return 'smart';
+}
+
+export type UserBrowser = BrowserAutomationService & BrowserTabControl;
+
+/** What the manager needs from the bridge — small, so tests can stand in for it. */
+export interface ManagedBridge {
+  connectedBrowsers(): BrowserName[];
+  isConnected(browser?: BrowserName): boolean;
+  forBrowser(browser: BrowserName): BrowserLink;
+  waitForConnection(browser: BrowserName, ms: number): Promise<boolean>;
+  waitingToPair(): BrowserName[];
+  /** Extensions that are running but were refused for being an older version than this Eya needs. */
+  outdated(): BrowserName[];
+  info(): BridgeInfo;
+}
+
+/** Starting and finding the user's NORMAL browsers (their own profile) — never a separate automation profile. */
+export interface BrowserLauncher {
+  installed(): Promise<BrowserName[]>;
+  /** Browsers that currently have a process running. */
+  running(): Promise<BrowserName[]>;
+  /** Opens the address in the user's normal browser (a new tab if it is already running). False if it could not be started. */
+  launch(browser: BrowserName, url: string): Promise<boolean>;
+}
+
+export interface SessionManagerDeps {
+  readonly bridge: ManagedBridge;
+  readonly world: BrowserWorldTracker;
+  /** Eya's own separate, signed-out window. Used only when explicitly asked for. */
+  readonly isolated: BrowserAutomationService;
+  /** A throwaway, invisible browser for web-search lookups when no user browser is available (never a window the user sees). */
+  readonly lookup?: BrowserAutomationService;
+  readonly launcher: BrowserLauncher;
+  readonly mode: BrowserMode;
+  readonly preferred?: BrowserName | null;
+  /** How long to wait for a freshly started browser's extension to connect. */
+  readonly launchWaitMs?: number;
+  /** How long to wait for an already-running browser's extension to wake up and connect before concluding it is absent. */
+  readonly runningWaitMs?: number;
+  readonly sleep?: (ms: number) => Promise<void>;
+  readonly now?: () => number;
+  readonly createService?: (link: BrowserLink, browser: BrowserName) => UserBrowser;
+  /** The Communication Access policy: chat apps are neither read nor acted in unless the user switched it on. */
+  readonly policy?: CommunicationPolicy;
+  /** Which browser the user chose in settings (used by 'smart' when nothing else decides). */
+  readonly preference?: () => BrowserKind;
+  /** The user's own words for the request being served (their "use my Chrome" is a decision they made). */
+  readonly words?: () => string;
+  /** What the Browser page watches and controls: told before and after every action; it can hold an action (paused) or refuse it (stopped). */
+  readonly activity?: BrowserActivity;
+}
+
+/** The Browser page's view of what the browser tools do. All of it is optional: without it the manager works as before. */
+export interface BrowserActivity {
+  before(op: string, detail?: string): Promise<void>;
+  /**
+   * The request being served is using the browser in a way that is not a page action the panel follows step by step (listing the chats on the page, opening one, pressing Escape, attaching a
+   * file): the panel still knows the request is working there, so the Browser page can open beside Eya. Nothing is held and nothing is recorded. Optional.
+   */
+  used?(): void;
+  after(outcome: {
+    readonly op: string;
+    readonly detail?: string;
+    readonly ok: boolean;
+    readonly reason?: string;
+    readonly message?: string;
+    readonly url?: string;
+    readonly title?: string;
+    readonly challenge?: string;
+    readonly notes?: readonly string[];
+  }): void;
+  failed(op: string, detail: string | undefined, message: string): void;
+  where(kind: BrowserKind | null, browserName?: string | null): void;
+  needMyBrowser(reason: string): void;
+}
+
+export interface BrowserOverview {
+  readonly mode: BrowserMode;
+  readonly browsers: ReadonlyArray<{
+    readonly browser: BrowserName;
+    readonly connected: boolean;
+    readonly paired: boolean;
+    readonly extensionVersion?: string;
+    readonly tabs?: number;
+    readonly inUse?: boolean;
+  }>;
+  /** Browsers whose extension is running but has not been paired yet. */
+  readonly waitingToPair: readonly BrowserName[];
+  /** Of those, the ones whose extension is an older version than this Eya needs: they only need reloading. */
+  readonly outdated: readonly BrowserName[];
+  readonly pairingOpen: boolean;
+  readonly workingIn: 'your_browser' | 'eya_browser' | null;
+  readonly workingBrowser?: BrowserName;
+}
+
+export interface WaitForUserResult {
+  readonly changed: boolean;
+  readonly snapshot: PageSnapshot;
+  /** What was in the way before (a sign-in page, a CAPTCHA…) and is no longer there. */
+  readonly cleared?: string;
+}
+
+type Pinned = { readonly kind: 'user'; readonly browser: BrowserName } | { readonly kind: 'isolated' } | null;
+
+const NAME: Record<BrowserName, string> = { chrome: 'Chrome', edge: 'Edge', other: 'browser' };
+const nameList = (bs: readonly BrowserName[]) => bs.map((b) => NAME[b]).join(' and ');
+
+const EYA_WINDOW_NOTE =
+  "This was opened in Eya Browser, Eya's own browser (not the user's everyday one): it has its own sign-ins that stay once the user has signed in there, " +
+  'and the user can watch it in Eya\'s Browser page or its window. If a site needs a sign-in the user only has in their own browser, say so and offer to use that.';
+
+function needsPairing(browsers: readonly BrowserName[]): BrowserUnavailableError {
+  return new BrowserUnavailableError(
+    `The Eya Browser Bridge extension in the user's ${nameList(browsers)} is running but is not connected to Eya yet. ` +
+      'Ask the user whether to connect it, and if they say yes call connect_chrome — that links it once, and from then on it connects by itself. ' +
+      'Nothing was opened in any other browser.',
+    { needsPairing: browsers, why: 'needs_pairing' },
+  );
+}
+
+const EXTENSIONS_PAGE: Record<BrowserName, string> = { chrome: 'chrome://extensions', edge: 'edge://extensions', other: "the browser's extensions page" };
+
+/** Installed and running, but an older version than this Eya speaks: it is neither missing nor switched off — it needs one reload. */
+function needsReload(browsers: readonly BrowserName[]): BrowserUnavailableError {
+  return new BrowserUnavailableError(
+    `The Eya Browser Bridge extension in the user's ${nameList(browsers)} is installed and running, but it is the OLD version, so Eya refused it. ` +
+      'It is not missing and not switched off: it needs reloading once. ' +
+      `Tell the user: open ${browsers.map((b) => EXTENSIONS_PAGE[b]).join(' (or ')}${browsers.length > 1 ? ')' : ''}, click the circular reload arrow on "Eya Browser Bridge" ` +
+      '(or close and reopen that browser), keep Developer mode on, and then say "connect my browser". Do not tell them to install it again. ' +
+      'Nothing was opened in any other browser.',
+    { needsPairing: browsers, why: 'needs_reload' },
+  );
+}
+
+/**
+ * The one place that decides where a browser task happens, and the only thing the browser tools talk to.
+ *
+ * It keeps a live picture of the user's real browsers (from the extension's events) and:
+ *   - opens a site by REUSING a tab the user already has on it, else a new tab in the SAME browser, else — if no browser
+ *     is open — by starting their NORMAL browser (never a separate profile) and waiting for its extension;
+ *   - uses Chrome unless the user names another browser ("in Edge") — then that one, started or woken if need be;
+ *   - never silently substitutes a different browser: if the user's one is gone mid-task, it stops and says so;
+ *   - notices when the user changed something themselves, and says so instead of carrying on from a stale picture;
+ *   - can wait, then carry on by itself, while the user signs in or completes a check.
+ */
+export class BrowserSessionManager implements BrowserAutomationService, BrowserTabControl, BrowserCapture, BrowserItemLister, BrowserItemClicker, BrowserKeyPress, BrowserAdHelper, BrowserFileAttach, BrowserChatLive {
+  private pinned: Pinned = null;
+  private pinnedAt = 0;
+  private readonly services = new Map<BrowserName, UserBrowser>();
+  private readonly lastActionAt = new Map<BrowserName, number>();
+  /** The address of the page Eya last handed back (used where there is no live tab list to ask, e.g. her own window). */
+  private lastSeenUrl: string | null = null;
+  private readonly sleepFn: (ms: number) => Promise<void>;
+  private readonly now: () => number;
+
+  constructor(private readonly deps: SessionManagerDeps) {
+    this.sleepFn = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
+    this.now = deps.now ?? Date.now;
+  }
+
+  // -------------------------------------------------------------- bookkeeping
+  /** Where a task has been going for a while stays; after ten quiet minutes the next request is routed afresh (smart mode). */
+  private pinKind(): BrowserKind | null {
+    if (this.pinned === null) return null;
+    if (this.deps.mode === 'smart' && this.now() - this.pinnedAt > 10 * 60_000) return null;
+    return this.pinned.kind === 'user' ? 'mine' : 'eya';
+  }
+
+  private pin(next: Pinned): void {
+    this.pinned = next;
+    this.pinnedAt = this.now();
+    if (next === null) this.deps.activity?.where(null);
+    else if (next.kind === 'isolated') this.deps.activity?.where('eya');
+    else this.deps.activity?.where('mine', NAME[next.browser]);
+  }
+
+  /** Runs one browser action with the Browser page watching: held while the user has paused it, refused after Stop, recorded either way. */
+  private async tracked<T>(op: string, detail: string | undefined, run: () => Promise<T>, outcomeOf: (r: T) => { ok: boolean; reason?: string; message?: string; url?: string; title?: string; challenge?: string; notes?: readonly string[] }): Promise<T> {
+    const activity = this.deps.activity;
+    if (activity === undefined) return run();
+    await activity.before(op, detail);
+    try {
+      const result = await run();
+      activity.after({ op, ...(detail !== undefined ? { detail } : {}), ...outcomeOf(result) });
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof BrowserUnavailableError && /not_connected|needs_pairing|needs_reload|no_extension|no_browser/.test(err.detail.why ?? '')) activity.needMyBrowser(message.split('\n')[0]?.slice(0, 200) ?? message);
+      else activity.failed(op, detail, message);
+      throw err;
+    }
+  }
+
+  private snapshotOutcome(s: PageSnapshot): { ok: boolean; url: string; title: string; challenge?: string; notes?: readonly string[] } {
+    return { ok: true, url: s.url, title: s.title, ...(s.challenge !== undefined ? { challenge: s.challenge.kind } : {}), ...(s.notes !== undefined ? { notes: s.notes } : {}) };
+  }
+
+  private resultOutcome(r: ActOnPageResult): { ok: boolean; reason?: string; message?: string; url?: string; title?: string; challenge?: string; notes?: readonly string[] } {
+    const s = r.snapshot;
+    const common = { url: s.url, title: s.title, ...(s.challenge !== undefined ? { challenge: s.challenge.kind } : {}), ...(s.notes !== undefined ? { notes: s.notes } : {}) };
+    if (r.ok) return { ok: true, ...common };
+    const message =
+      r.reason === 'needs_user' ? r.message : r.reason === 'could_not' ? r.message : r.reason === 'needs_confirmation' ? r.why : r.reason === 'ambiguous' ? r.options.slice(0, 6).join(', ') : r.reason === 'not_found' ? 'not on the page' : undefined;
+    return { ok: false, reason: r.reason, ...(message !== undefined ? { message } : {}), ...common };
+  }
+  /** Which kind of browser the current task is in (null before anything has been opened). */
+  currentEnvironment(): BrowserEnvironment | null {
+    if (this.pinned === null) return null;
+    return this.pinned.kind === 'user' ? 'your_browser' : 'eya_browser';
+  }
+
+  pinnedBrowser(): BrowserName | null {
+    return this.pinned?.kind === 'user' ? this.pinned.browser : null;
+  }
+
+  private service(browser: BrowserName): UserBrowser {
+    let s = this.services.get(browser);
+    if (s === undefined) {
+      const link = this.deps.bridge.forBrowser(browser);
+      s =
+        this.deps.createService?.(link, browser) ??
+        new ChromeBrowserService(link, {
+          environment: 'your_browser',
+          browserName: browser,
+          quickFor: (url) => this.deps.policy?.appForUrl(url) != null,
+          unavailableMessage: `Eya has lost her connection to the user's ${NAME[browser]} (it may have been closed). Ask them to check it is open with the Eya Browser Bridge extension on.`,
+        });
+      this.services.set(browser, s);
+    }
+    return s;
+  }
+
+  /** The chat app this address belongs to, if Communication Access is OFF for it. */
+  private blockedApp(url: string | null | undefined): CommunicationApp | null {
+    return this.deps.policy?.blockedForUrl(url) ?? null;
+  }
+
+  /** Before acting on the current page: refuse if it is a chat app and Communication Access is off. */
+  private assertAllowedHere(browser: BrowserName | undefined): void {
+    const live = browser !== undefined ? this.deps.world.tabsOf(browser) : [];
+    const urls = live.length > 0 ? [live.find((t) => t.active)?.url] : [this.lastSeenUrl];
+    for (const url of urls) {
+      const app = this.blockedApp(url);
+      if (app !== null) throw new CommunicationAccessError(app.name);
+    }
+  }
+
+  private stamp(snapshot: PageSnapshot, env: BrowserEnvironment, notes: readonly string[] = []): PageSnapshot {
+    this.lastSeenUrl = snapshot.url;
+    // A chat page is never handed back: only that it is there.
+    const app = this.blockedApp(snapshot.url);
+    return withExtras(app === null ? snapshot : communicationBlockedSnapshot(snapshot, app.name), { environment: env, notes });
+  }
+
+  private stampResult(result: ActOnPageResult, env: BrowserEnvironment, notes: readonly string[] = []): ActOnPageResult {
+    return { ...result, snapshot: this.stamp(result.snapshot, env, notes) };
+  }
+
+  /** What the user (not Eya) has done in this browser since Eya's last step. */
+  private userNotes(browser: BrowserName): string[] {
+    const since = this.lastActionAt.get(browser) ?? 0;
+    if (since === 0) return [];
+    const done = this.deps.world.userActivitySince(browser, since);
+    if (done.length === 0) return [];
+    const kinds = [...new Set(done.map((a) => a.kind.replace(/^tab_/, '').replace('_', ' ')))].join(', ');
+    return [`The user changed something in the browser since Eya's last step (${kinds}), so the page was re-read before acting rather than trusting the old picture.`];
+  }
+
+  private touched(browser: BrowserName): void {
+    this.lastActionAt.set(browser, this.now() + 600); // a little after: the events caused by Eya's own step trail in
+  }
+
+  // ---------------------------------------------------------------- selection
+  /** The browser Eya uses unless the user names another: Chrome (or the one set with EYA_PREFERRED_BROWSER). */
+  private standardBrowser(): BrowserName {
+    return this.deps.preferred ?? 'chrome';
+  }
+
+  private selectFor(url?: string): Selection | null {
+    const connected = this.deps.bridge.connectedBrowsers();
+    const tabsOnSite = url === undefined ? [] : this.deps.world.tabsOnSite(url).map((t) => ({ browser: t.browser, url: t.url, active: t.active }));
+    return selectBrowser({
+      connected,
+      tabsOnSite,
+      // A new page the user did not place anywhere goes to the standard browser, not wherever the last page happened to open.
+      taskBrowser: url === undefined ? this.pinnedBrowser() : null,
+      activeBrowser: this.deps.world.activeBrowser(),
+      preferred: this.deps.preferred ?? null,
+      defaultBrowser: this.standardBrowser(),
+      ...(url !== undefined ? { url } : {}),
+    });
+  }
+
+  /** An extension that is running but cannot connect: an outdated one needs a reload, an unpaired one needs pairing. */
+  private blockedError(waiting: readonly BrowserName[]): BrowserUnavailableError {
+    const outdated = this.deps.bridge.outdated().filter((b) => waiting.includes(b));
+    return outdated.length > 0 ? needsReload(outdated) : needsPairing(waiting);
+  }
+
+  private notConnectedError(): BrowserUnavailableError {
+    const waiting = this.deps.bridge.waitingToPair();
+    if (waiting.length > 0) return this.blockedError(waiting);
+    return new BrowserUnavailableError(
+      "None of the user's browsers is connected to Eya. Call connect_chrome (it helps the user add or connect the Eya Browser Bridge extension), then try again. " +
+        'Nothing was opened in any other browser.',
+      { why: 'not_connected' },
+    );
+  }
+
+  private async waitForAny(candidates: readonly BrowserName[], ms: number): Promise<BrowserName | null> {
+    if (candidates.length === 0) return null;
+    return new Promise<BrowserName | null>((resolve) => {
+      let remaining = candidates.length;
+      for (const b of candidates) {
+        void this.deps.bridge.waitForConnection(b, ms).then((ok) => {
+          if (ok) resolve(b);
+          else if (--remaining === 0) resolve(null);
+        });
+      }
+    });
+  }
+
+  /** Which browser to start when none is connected and Chrome is not on this PC: the preferred one if it is there, else Chrome before Edge. */
+  private pickBrowser(list: readonly BrowserName[]): BrowserName | undefined {
+    return this.deps.preferred != null && list.includes(this.deps.preferred) ? this.deps.preferred : (['chrome', 'edge', 'other'] as const).find((b) => list.includes(b));
+  }
+
+  /** The user said which browser ("open it in Edge"): that one — started or woken if need be, never quietly swapped for another. */
+  private async resolveNamed(url: string, want: BrowserName, reason = 'the user named it'): Promise<{ browser: BrowserName; startedBrowser: boolean }> {
+    if (this.deps.bridge.isConnected(want)) {
+      log.info('browser chosen', { browser: want, reason });
+      return { browser: want, startedBrowser: false };
+    }
+    if (this.deps.bridge.waitingToPair().includes(want)) throw this.blockedError([want]);
+    const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
+    if (!installed.includes(want) && !running.includes(want)) {
+      throw new BrowserUnavailableError(`${NAME[want]} could not be found on this PC, so the page was not opened there. Nothing was opened in any other browser.`, { why: 'no_browser' });
+    }
+    if (running.includes(want)) {
+      if (await this.deps.bridge.waitForConnection(want, this.deps.runningWaitMs ?? 8000)) return { browser: want, startedBrowser: false };
+      if (this.deps.bridge.waitingToPair().includes(want)) throw this.blockedError([want]);
+    }
+    if (!(await this.deps.launcher.launch(want, url))) {
+      throw new BrowserUnavailableError(`Could not start the user's ${NAME[want]}.`, { why: 'no_browser' });
+    }
+    if (await this.deps.bridge.waitForConnection(want, this.deps.launchWaitMs ?? 25_000)) return { browser: want, startedBrowser: !running.includes(want) };
+    if (this.deps.bridge.waitingToPair().includes(want)) throw this.blockedError([want]);
+    throw new BrowserUnavailableError(
+      `I opened the page in the user's ${NAME[want]}, but the Eya Browser Bridge extension in it did not answer — it is probably not installed there or is switched off. ` +
+        'Tell the user: open the extensions page of that browser, turn on Developer mode, and make sure "Eya Browser Bridge" is added and switched on. Nothing was opened in any other browser.',
+      { why: 'no_extension' },
+    );
+  }
+
+  private async resolveForOpen(url: string, want?: BrowserName): Promise<{ browser: BrowserName; startedBrowser: boolean }> {
+    if (want !== undefined) return this.resolveNamed(url, want);
+    // Nothing was named, so it is the standard browser (Chrome) — started or woken if need be, and never quietly swapped for Edge. Only
+    // on a PC that has no Chrome at all do the older rules (where the site is open, where the user is) decide.
+    const standard = this.standardBrowser();
+    if (!this.deps.bridge.isConnected(standard)) {
+      const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
+      if (installed.includes(standard) || running.includes(standard)) return this.resolveNamed(url, standard, 'the standard browser');
+    }
+    const sel = this.selectFor(url);
+    if (sel !== null) {
+      log.info('browser chosen', { browser: sel.browser, reason: sel.reason });
+      return { browser: sel.browser, startedBrowser: false };
+    }
+
+    const waiting = this.deps.bridge.waitingToPair();
+    if (waiting.length > 0) throw this.blockedError(waiting);
+
+    const [installed, running] = await Promise.all([this.deps.launcher.installed(), this.deps.launcher.running()]);
+
+    // A browser that is already open: its extension may just be waking up (it sleeps between alarms).
+    if (running.length > 0) {
+      const woke = await this.waitForAny(running, this.deps.runningWaitMs ?? 8000);
+      if (woke !== null) return { browser: woke, startedBrowser: false };
+      const stillWaiting = this.deps.bridge.waitingToPair();
+      if (stillWaiting.length > 0) throw this.blockedError(stillWaiting);
+    }
+
+    const target = this.pickBrowser(running.length > 0 ? running : installed);
+    if (target === undefined) {
+      throw new BrowserUnavailableError('Neither Chrome nor Edge could be found on this PC, so there is no browser of the user\'s to work in.', { why: 'no_browser' });
+    }
+    // Open the page in the user's NORMAL browser (their own profile; a new tab if it is already open), then wait for the extension.
+    const opened = await this.deps.launcher.launch(target, url);
+    if (!opened) {
+      throw new BrowserUnavailableError(`Could not start the user's ${NAME[target]}.`, { why: 'no_browser' });
+    }
+    log.info('started the user browser', { browser: target, alreadyRunning: running.includes(target) });
+    const connected = await this.deps.bridge.waitForConnection(target, this.deps.launchWaitMs ?? 25_000);
+    if (connected) return { browser: target, startedBrowser: !running.includes(target) };
+
+    const knocking = this.deps.bridge.waitingToPair();
+    if (knocking.length > 0) throw this.blockedError(knocking);
+    throw new BrowserUnavailableError(
+      `I opened the page in the user's ${NAME[target]}, but the Eya Browser Bridge extension in it did not answer — it is probably not installed there or is switched off. ` +
+        `Tell the user: open the browser's extensions page, turn on Developer mode, and make sure "Eya Browser Bridge" is added and switched on (say "connect my browser"; if the extension is not in the browser at all, ask Eya to show them its folder).` +
+        'Nothing was opened in any other browser, and a separate Eya browser window is only used if the user says that is fine.',
+      { why: 'no_extension' },
+    );
+  }
+
+  /** Where a request goes in smart mode: by rules, from what the user said, what they chose in settings, and where the task already is. */
+  private routeFor(url?: string): { browser: BrowserKind; reason: string } {
+    return chooseBrowser({
+      preference: this.deps.preference?.() ?? 'eya',
+      words: this.deps.words?.() ?? '',
+      pinned: this.pinKind(),
+    });
+  }
+
+  /** The switch "Open everything in Eya Browser" was changed: the next request goes where it now says, not where the last task happened to be. (Work that belongs to a live chat keeps its own place.) */
+  preferenceChanged(): void {
+    this.pin(null);
+  }
+
+  /** Continuing a task: stay where it started — and never act on a chat app while Communication Access is off. */
+  private forWork(): { svc: BrowserAutomationService; env: BrowserEnvironment; browser?: BrowserName } {
+    const chosen = this.selectWork();
+    this.assertAllowedHere(chosen.browser);
+    return chosen;
+  }
+
+  private selectWork(): { svc: BrowserAutomationService; env: BrowserEnvironment; browser?: BrowserName } {
+    // Work that belongs to a browser (a live chat, in the one it started in) goes there whatever the task's pin says now, and does not move that pin: another request opening
+    // a page in the other browser, or ten quiet minutes, must not send the chat's next look to the wrong place.
+    const homed = pinnedHome();
+    if (homed === 'eya') return { svc: this.deps.isolated, env: 'eya_browser' };
+    if (homed !== null) {
+      if (!this.deps.bridge.isConnected(homed)) {
+        throw new BrowserUnavailableError(
+          `Eya has lost her connection to the user's ${NAME[homed]} (it may have been closed). Ask them to check it is open with the Eya Browser Bridge extension on.`,
+          { why: 'lost_connection' },
+        );
+      }
+      return { svc: this.service(homed), env: 'your_browser', browser: homed };
+    }
+    const pinned = this.pinKind() === null && this.deps.mode === 'smart' ? null : this.pinned;
+    if (pinned?.kind === 'isolated') return { svc: this.deps.isolated, env: 'eya_browser' };
+    if (pinned?.kind === 'user') {
+      if (!this.deps.bridge.isConnected(pinned.browser)) {
+        throw new BrowserUnavailableError(
+          `Eya lost her connection to the user's ${NAME[pinned.browser]} partway through, so she stopped instead of carrying on in a different browser behind their back. ` +
+            'Ask the user to check their browser is open (or say "connect my browser"), then start again.',
+          { why: 'lost_connection' },
+        );
+      }
+      return { svc: this.service(pinned.browser), env: 'your_browser', browser: pinned.browser };
+    }
+    if (this.deps.mode === 'eya_browser') {
+      this.pin({ kind: 'isolated' });
+      return { svc: this.deps.isolated, env: 'eya_browser' };
+    }
+    if (this.deps.mode === 'smart' && this.routeFor().browser === 'eya') {
+      this.pin({ kind: 'isolated' });
+      return { svc: this.deps.isolated, env: 'eya_browser' };
+    }
+    const sel = this.selectFor();
+    if (sel === null) {
+      if (this.deps.mode === 'auto') {
+        this.pin({ kind: 'isolated' });
+        return { svc: this.deps.isolated, env: 'eya_browser' };
+      }
+      throw this.notConnectedError();
+    }
+    this.pin({ kind: 'user', browser: sel.browser });
+    log.info('browser chosen', { browser: sel.browser, reason: sel.reason });
+    return { svc: this.service(sel.browser), env: 'your_browser', browser: sel.browser };
+  }
+
+  // -------------------------------------------------------------- the service
+  async openWebsite(url: string, options?: OpenWebsiteOptions): Promise<PageSnapshot> {
+    return this.tracked('open', url, () => this.openNow(url, options), (s) => this.snapshotOutcome(s));
+  }
+
+  private async openNow(url: string, options?: OpenWebsiteOptions): Promise<PageSnapshot> {
+    // A TASK (Tasks page) has a browser and a tab of its own: the first page it opens fixes them, every later page and step is in the same place, and none of it moves where other
+    // work is (the global pin below is for work that is not a task).
+    const task = inTask();
+    const taskHome = task ? pinnedHome() : null;
+    const taskTab = task ? pinnedTab() : null;
+    let toEya = options?.isolated === true || this.deps.mode === 'eya_browser';
+    const notes: string[] = [];
+    if (taskHome !== null && options?.browser === undefined) {
+      toEya = taskHome === 'eya';
+    } else if (!toEya && this.deps.mode === 'smart' && options?.browser === undefined) {
+      const choice = this.routeFor(url);
+      toEya = choice.browser === 'eya';
+      log.info('browser routed', { to: choice.browser, reason: choice.reason });
+      // The user asked for their own browser while the task was in Eya Browser (or the other way round): said, not done silently.
+      const was = this.pinKind();
+      if (was !== null && was !== choice.browser) notes.push(choice.browser === 'mine' ? "Moved this task to the user's own browser, because they asked for it." : 'Moved this task to Eya Browser, because the user asked for it.');
+    }
+    if (toEya) {
+      // (said before the page opens, so the Browser page can come up beside Eya while the page is still loading)
+      this.deps.activity?.where('eya');
+      const snapshot = await this.deps.isolated.openWebsite(url, task ? (taskTab !== null ? { tabId: taskTab } : { newTab: true }) : undefined);
+      if (task) bindToTask(snapshot.tabId ?? null, 'eya');
+      else this.pin({ kind: 'isolated' });
+      return this.stamp(snapshot, 'eya_browser', [EYA_WINDOW_NOTE, ...notes]);
+    }
+
+    let browser: BrowserName;
+    let startedBrowser = false;
+    try {
+      ({ browser, startedBrowser } = await this.resolveForOpen(url, options?.browser ?? (taskHome === 'chrome' || taskHome === 'edge' ? taskHome : undefined)));
+    } catch (err) {
+      // Legacy opt-in mode only: the older behaviour of using Eya's own window when the user's browser is not there.
+      if (this.deps.mode === 'auto' && options?.browser === undefined && err instanceof BrowserUnavailableError) {
+        const snapshot = await this.deps.isolated.openWebsite(url);
+        this.pin({ kind: 'isolated' });
+        return this.stamp(snapshot, 'eya_browser', [EYA_WINDOW_NOTE]);
+      }
+      throw err;
+    }
+    const userNotes = this.userNotes(browser);
+    this.deps.activity?.where('mine', NAME[browser]);
+    const snapshot = await this.service(browser).openWebsite(url, options?.fresh === true ? { fresh: true } : undefined);
+    if (task) bindToTask(snapshot.tabId ?? null, browser === 'edge' ? 'edge' : 'chrome');
+    else this.pin({ kind: 'user', browser });
+    this.touched(browser);
+    return this.stamp(snapshot, 'your_browser', [
+      `Opened in the user's ${NAME[browser]}.`,
+      ...(startedBrowser ? [`${NAME[browser]} was not running, so Eya started it (their normal profile) and opened the page there.`] : []),
+      ...notes,
+      ...userNotes,
+    ]);
+  }
+
+  async inspectPage(): Promise<PageSnapshot> {
+    return this.tracked(
+      'inspect',
+      undefined,
+      async () => {
+        const { svc, env, browser } = this.forWork();
+        const notes = browser !== undefined ? this.userNotes(browser) : [];
+        const snapshot = await svc.inspectPage();
+        if (browser !== undefined) this.touched(browser);
+        return this.stamp(snapshot, env, notes);
+      },
+      (s) => this.snapshotOutcome(s),
+    );
+  }
+
+  async findOnPage(query: string): Promise<FindOnPageResult> {
+    return this.tracked('find', query, () => this.forWork().svc.findOnPage(query), (r) => ({ ok: true, url: r.url, title: r.title }));
+  }
+
+  /** What is clickable on the page, for Eya's own code (never the model) to choose from — refused for a chat app that is switched off. */
+  async listItems(): Promise<PageItem[]> {
+    const { svc, browser } = this.forWork();
+    const lister = svc as Partial<BrowserItemLister>;
+    if (typeof lister.listItems !== 'function') throw new Error('Listing the page is not available in this browser window.');
+    this.deps.activity?.used?.();
+    const items = await lister.listItems();
+    if (browser !== undefined) this.touched(browser);
+    return items;
+  }
+
+  /** Opens one row of a list by its first line (a chat), in the page as it is at the moment of the click. */
+  async clickItem(want: { readonly primary?: string; readonly name?: string; readonly region?: string; readonly role?: string }, gate?: ClickGate): Promise<ActOnPageResult> {
+    const { svc, browser } = this.forWork();
+    const clicker = svc as Partial<BrowserItemClicker>;
+    if (typeof clicker.clickItem !== 'function') return { ok: false, reason: 'could_not', message: 'Opening a list item is not available in this browser window.', snapshot: await svc.inspectPage() };
+    this.deps.activity?.used?.();
+    const result = await clicker.clickItem(want, gate);
+    if (browser !== undefined) this.touched(browser);
+    return result;
+  }
+
+  /** Presses Escape in the open page (it closes the open chat or popup). Only in the user's own browser, and never in a chat app that is switched off. */
+  async pressEscape(): Promise<{ readonly ok: true; readonly snapshot: PageSnapshot } | { readonly ok: false; readonly message: string }> {
+    const { svc, env, browser } = this.forWork();
+    const presser = svc as Partial<BrowserKeyPress>;
+    if (typeof presser.pressEscape !== 'function') return { ok: false, message: "Pressing a key is only possible in the user's own browser (Chrome or Edge with the Eya extension)." };
+    this.deps.activity?.used?.();
+    const result = await presser.pressEscape();
+    if (browser !== undefined) this.touched(browser);
+    return result.ok ? { ok: true, snapshot: this.stamp(result.snapshot, env) } : result;
+  }
+
+  /** Live chat: the watcher in the open chat's page (only the user's own browser; refused for a chat app that is switched off). */
+  async chatWatch(mode: 'start' | 'stop' | 'status', tabId?: number): Promise<ChatWatchResult> {
+    const { svc, browser } = this.forWork();
+    const live = svc as Partial<BrowserChatLive>;
+    if (typeof live.chatWatch !== 'function') return { ok: false, reason: 'unsupported', message: "Watching a chat is only possible in the user's own browser (Chrome or Edge with the Eya extension)." };
+    const result = await live.chatWatch(mode, tabId);
+    if (browser !== undefined) this.touched(browser);
+    return result.ok && browser !== undefined ? { ...result, browser } : result;
+  }
+
+  /** Live chat: the last messages of the chat that is open (only that chat). */
+  async chatRead(max?: number, tabId?: number): Promise<ChatReadResult> {
+    const { svc, browser } = this.forWork();
+    const live = svc as Partial<BrowserChatLive>;
+    if (typeof live.chatRead !== 'function') return { ok: false, reason: 'unsupported', message: "Reading a chat is only possible in the user's own browser (Chrome or Edge with the Eya extension)." };
+    const result = await live.chatRead(max, tabId);
+    if (browser !== undefined) this.touched(browser);
+    return result.ok && browser !== undefined ? { ...result, browser } : result;
+  }
+
+  /** Live chat: a picture or document the OTHER person sent, taken out of the open chat (only the user's own browser; refused for a chat app that is switched off). */
+  async chatMedia(messageId: string, step: 'look' | 'download', tabId?: number): Promise<ChatMediaResult> {
+    const { svc, browser } = this.forWork();
+    const live = svc as Partial<BrowserChatLive>;
+    if (typeof live.chatMedia !== 'function') return { ok: false, reason: 'failed', message: "Taking a file out of a chat is only possible in the user's own browser (Chrome or Edge with the Eya extension)." };
+    const result = await live.chatMedia(messageId, step, tabId);
+    if (browser !== undefined) this.touched(browser);
+    return result;
+  }
+
+  /** Live chat: deletes ONE message the account sent in the open chat, for everyone or only for the person (only the user's own browser; refused for a chat app that is switched off). */
+  async chatDelete(messageId: string, scope: 'me' | 'everyone', tabId?: number): Promise<ChatDeleteResult> {
+    const { svc, browser } = this.forWork();
+    const live = svc as Partial<BrowserChatLive>;
+    if (typeof live.chatDelete !== 'function') return { ok: false, reason: 'failed', message: "Deleting a message is only possible in the user's own browser (Chrome or Edge with the Eya extension)." };
+    const result = await live.chatDelete(messageId, scope, tabId);
+    if (browser !== undefined) this.touched(browser);
+    return result;
+  }
+
+  /** Presses the open page's own Skip / close buttons on adverts. Only in the user's own browser (the Eya extension does the pressing). */
+  async ads(mode: AdsMode, options: { readonly keepPlaying?: boolean; readonly play?: boolean } = {}): Promise<AdsState> {
+    const { svc, browser } = this.forWork();
+    const helper = svc as Partial<BrowserAdHelper>;
+    if (typeof helper.ads !== 'function') {
+      throw new Error("Skipping adverts only works in the user's own browser (Chrome or Edge with the Eya extension), not in this window.");
+    }
+    const state = await helper.ads(mode, options);
+    if (browser !== undefined) this.touched(browser);
+    return state;
+  }
+
+  /** Hands a file to the open page's own file picker (nothing is sent). Only through the user's own browser, and never into a chat app that is switched off. */
+  async attachFile(request: AttachFileRequest): Promise<AttachFileResult> {
+    const { svc, env, browser } = this.forWork();
+    const target = svc as Partial<BrowserFileAttach>;
+    if (typeof target.attachFile !== 'function') {
+      return { ok: false, reason: 'failed', message: "Attaching a file is only possible in the user's own browser (Chrome or Edge with the Eya extension), not in this window." };
+    }
+    this.deps.activity?.used?.();
+    const result = await target.attachFile(request);
+    if (browser !== undefined) this.touched(browser);
+    return result.snapshot !== undefined ? { ...result, snapshot: this.stamp(result.snapshot, env) } : result;
+  }
+
+  async readPage(offset?: number): Promise<ReadPageResult> {
+    return this.tracked('read', undefined, () => this.forWork().svc.readPage(offset), (r) => ({ ok: true, url: r.url, title: r.title }));
+  }
+
+  private async act(op: string, detail: string | undefined, run: (svc: BrowserAutomationService) => Promise<ActOnPageResult>): Promise<ActOnPageResult> {
+    return this.tracked(
+      op,
+      detail,
+      async () => {
+        const { svc, env, browser } = this.forWork();
+        const notes = browser !== undefined ? this.userNotes(browser) : [];
+        const result = await run(svc);
+        if (browser !== undefined) this.touched(browser);
+        return this.stampResult(result, env, notes);
+      },
+      (r) => this.resultOutcome(r),
+    );
+  }
+
+  clickOnPage(text: string, gate?: ClickGate): Promise<ActOnPageResult> {
+    return this.act('click', text, (svc) => svc.clickOnPage(text, gate));
+  }
+  fillOnPage(label: string, value: string, options?: FillOptions): Promise<ActOnPageResult> {
+    return this.act('fill', label, (svc) => svc.fillOnPage(label, value, options));
+  }
+  goBack(): Promise<ActOnPageResult> {
+    return this.act('back', undefined, (svc) => svc.goBack());
+  }
+  goForward(): Promise<ActOnPageResult> {
+    return this.act('forward', undefined, (svc) => svc.goForward());
+  }
+  reload(): Promise<ActOnPageResult> {
+    return this.act('reload', undefined, (svc) => svc.reload());
+  }
+  scroll(direction: ScrollDirection, amount?: number): Promise<ActOnPageResult> {
+    return this.act('scroll', direction, (svc) => svc.scroll(direction, amount));
+  }
+
+  async searchWeb(query: string): Promise<WebSearchHit[]> {
+    if (this.deps.mode === 'eya_browser' || (this.deps.mode === 'smart' && this.routeFor().browser === 'eya')) return (this.deps.lookup ?? this.deps.isolated).searchWeb(query);
+    const sel = this.selectFor();
+    if (sel !== null) {
+      try {
+        return await this.service(sel.browser).searchWeb(query);
+      } catch (err) {
+        log.warn('search in the user browser failed', { browser: sel.browser, err: String(err) });
+        if (this.deps.lookup === undefined) throw err;
+      }
+    }
+    // No user browser to read a results page in: an invisible throwaway lookup — it never shows a window and never
+    // stands in for the user's browser (a results page needs no sign-in).
+    if (this.deps.lookup !== undefined) return this.deps.lookup.searchWeb(query);
+    throw this.notConnectedError();
+  }
+
+  // --------------------------------------------------------------------- tabs
+  private browsersToQuery(browser?: BrowserName): BrowserName[] {
+    const connected = this.deps.bridge.connectedBrowsers();
+    if (browser !== undefined) {
+      if (!connected.includes(browser)) throw new BrowserUnavailableError(`The user's ${NAME[browser]} is not connected to Eya.`, { why: 'not_connected' });
+      return [browser];
+    }
+    if (connected.length === 0) throw this.notConnectedError();
+    return connected;
+  }
+
+  async listTabs(browser?: BrowserName): Promise<BrowserTabInfo[]> {
+    const lists = await Promise.all(this.browsersToQuery(browser).map((b) => this.service(b).listTabs()));
+    // A chat's own tab title can be a contact's name — even when Communication Access is on, the model needs only which app it is.
+    return lists.flat().map((t) => {
+      const app = this.deps.policy?.appForUrl(t.url) ?? null;
+      if (app === null) return t;
+      let origin = '';
+      try {
+        origin = new URL(t.url).origin;
+      } catch {
+        // keep it empty
+      }
+      return { ...t, title: app.name, url: origin };
+    });
+  }
+
+  private browserForTab(tabId: number, browser?: BrowserName): BrowserName {
+    if (browser !== undefined) return this.browsersToQuery(browser)[0] as BrowserName;
+    const connected = this.browsersToQuery();
+    if (connected.length === 1) return connected[0] as BrowserName;
+    const holders = connected.filter((b) => this.deps.world.tabsOf(b).some((t) => t.tabId === tabId));
+    if (holders.length === 1) return holders[0] as BrowserName;
+    throw new Error(`More than one browser is connected and tab ${tabId} could belong to either: say which browser (${nameList(connected)}) it is in.`);
+  }
+
+  async switchToTab(tabId: number, browser?: BrowserName): Promise<PageSnapshot> {
+    const target = this.browserForTab(tabId, browser);
+    const snapshot = await this.service(target).switchToTab(tabId);
+    this.pin({ kind: 'user', browser: target });
+    this.touched(target);
+    return this.stamp(snapshot, 'your_browser', [`Switched to a tab in the user's ${NAME[target]}.`]);
+  }
+
+  async closeTab(
+    tabId: number,
+    options: { readonly browser?: BrowserName; readonly allowUserTab?: boolean } = {},
+  ): Promise<{ readonly closed: boolean; readonly remainingTabs: number }> {
+    const target = this.browserForTab(tabId, options.browser);
+    return this.service(target).closeTab(tabId, { ...(options.allowUserTab !== undefined ? { allowUserTab: options.allowUserTab } : {}) });
+  }
+
+  // ---------------------------------------------------------------- screenshot
+  /**
+   * A picture of the web page the user is looking at: the tab in front in the browser they are using (which is the one
+   * Eya opened, if she just did), or — only if that is what the task is in — Eya's own window. It reads nothing from the
+   * page, so it works for any page the user has open, not just ones Eya opened.
+   */
+  async screenshot(): Promise<ScreenshotImage> {
+    const pinned = this.pinned;
+    if (pinned?.kind === 'isolated' || (pinned === null && (this.deps.mode === 'eya_browser' || (this.deps.mode === 'smart' && this.routeFor().browser === 'eya')))) {
+      const own = this.deps.isolated as Partial<BrowserCapture>;
+      if (typeof own.screenshot !== 'function') throw new Error('Screenshots are not available in this window.');
+      const picture = await own.screenshot();
+      const blockedOwn = this.blockedApp(picture.url);
+      if (blockedOwn !== null) throw new CommunicationAccessError(blockedOwn.name);
+      return picture;
+    }
+    const connected = this.deps.bridge.connectedBrowsers();
+    const active = this.deps.world.activeBrowser();
+    const browser =
+      active !== null && connected.includes(active) ? active : pinned?.kind === 'user' && connected.includes(pinned.browser) ? pinned.browser : connected[0];
+    if (browser === undefined) throw this.notConnectedError();
+    const svc = this.service(browser) as Partial<BrowserCapture>;
+    if (typeof svc.screenshot !== 'function') throw new Error('Screenshots are not available through this browser connection.');
+    const frontApp = this.blockedApp(this.deps.world.tabsOf(browser).find((t) => t.active)?.url);
+    if (frontApp !== null) throw new CommunicationAccessError(frontApp.name); // do not even take the picture
+    const image = await svc.screenshot();
+    const takenApp = this.blockedApp(image.url);
+    if (takenApp !== null) throw new CommunicationAccessError(takenApp.name);
+    log.info('screenshot taken', { browser, bytes: image.bytes.length });
+    return { ...image, browser };
+  }
+
+  // ------------------------------------------------------- status and waiting
+  describe(): BrowserOverview {
+    const info = this.deps.bridge.info();
+    const active = this.deps.world.activeBrowser();
+    const browsers = (['chrome', 'edge', 'other'] as const).flatMap((b) => {
+      const link = info.browsers[b];
+      if (link === undefined) return [];
+      const state = this.deps.world.state(b);
+      return [
+        {
+          browser: b,
+          connected: link.connected,
+          paired: link.paired,
+          ...(link.extensionVersion !== undefined ? { extensionVersion: link.extensionVersion } : {}),
+          ...(link.connected && state !== undefined ? { tabs: state.tabs.length, inUse: active === b } : {}),
+        },
+      ];
+    });
+    const working = this.currentEnvironment();
+    const workingBrowser = this.pinnedBrowser();
+    return {
+      mode: this.deps.mode,
+      browsers,
+      waitingToPair: info.waitingToPair,
+      outdated: info.outdated,
+      pairingOpen: info.pairingOpen,
+      workingIn: working,
+      ...(workingBrowser !== null ? { workingBrowser } : {}),
+    };
+  }
+
+  /**
+   * Waits — up to `timeoutMs` — for the page the user is dealing with to change (they sign in, finish a check, close a
+   * popup), then reports the page as it now is so the original task can simply continue. Woken early by the user's own
+   * activity in the browser; otherwise it looks every second and a half.
+   */
+  async waitForUserChange(timeoutMs = 30_000): Promise<WaitForUserResult> {
+    return this.tracked(
+      'wait',
+      undefined,
+      () => this.waitNow(timeoutMs),
+      (r) => ({ ...this.snapshotOutcome(r.snapshot), ...(r.changed ? {} : { ok: true }) }),
+    );
+  }
+
+  private async waitNow(timeoutMs: number): Promise<WaitForUserResult> {
+    const { svc, env, browser } = this.forWork();
+    const start = await svc.inspectPage();
+    const fingerprint = pageFingerprint(start);
+    const deadline = this.now() + timeoutMs;
+    while (this.now() < deadline) {
+      await this.sleepOrUserActivity(browser, Math.min(1500, Math.max(50, deadline - this.now())));
+      const current = await svc.inspectPage();
+      const kindBefore = start.challenge?.kind;
+      const kindNow = current.challenge?.kind;
+      const changed = current.url !== start.url || kindBefore !== kindNow || pageFingerprint(current) !== fingerprint;
+      if (!changed) continue;
+      const settled = await this.untilReady(svc, current); // let a sign-in finish redirecting
+      if (browser !== undefined) this.touched(browser);
+      return {
+        changed: true,
+        snapshot: this.stamp(settled, env),
+        ...(kindBefore !== undefined && settled.challenge?.kind !== kindBefore ? { cleared: kindBefore } : {}),
+      };
+    }
+    if (browser !== undefined) this.touched(browser);
+    return { changed: false, snapshot: this.stamp(start, env) };
+  }
+
+  /**
+   * A page that has just changed (a sign-in redirecting) is looked at again until it has stopped changing and shows something to act on, up
+   * to about 15 seconds: the first look is often a half-built page, and reporting that sent the model off saying "the page is loading".
+   */
+  private async untilReady(svc: BrowserAutomationService, first: PageSnapshot): Promise<PageSnapshot> {
+    let last = first;
+    let stable = 0;
+    const deadline = this.now() + READY_BUDGET_MS;
+    while (this.now() < deadline) {
+      await this.sleepFn(500);
+      const now = await svc.inspectPage();
+      const loading = (now.notes ?? []).some((n) => /still loading/i.test(n));
+      const hasContent = now.links.length + now.buttons.length + now.inputs.length > 0;
+      stable = !loading && pageFingerprint(now) === pageFingerprint(last) ? stable + 1 : 0;
+      last = now;
+      // The same look twice in a row, loaded, with something to act on; a page with nothing to act on (a plain notice) needs a few more.
+      if (stable >= (hasContent ? 2 : 4)) break;
+    }
+    return last;
+  }
+
+  private async sleepOrUserActivity(browser: BrowserName | undefined, ms: number): Promise<void> {
+    if (browser === undefined) return this.sleepFn(ms);
+    await new Promise<void>((resolve) => {
+      const off = this.deps.world.onUserActivity((a) => {
+        if (a.browser !== browser) return;
+        off();
+        resolve();
+      });
+      void this.sleepFn(ms).then(() => {
+        off();
+        resolve();
+      });
+    });
+  }
+
+  async close(): Promise<void> {
+    await this.deps.isolated.close();
+    await this.deps.lookup?.close();
+    for (const s of this.services.values()) await s.close();
+  }
+}

@@ -1,0 +1,29 @@
+Eya
+Copyright 2026 Rakeshkolpur
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It uses the following third-party software and models. Each remains under its own license.
+
+Runtime dependencies (installed with npm)
+  - Electron (MIT) - https://www.electronjs.org
+  - sherpa-onnx-node (Apache-2.0) - https://github.com/k2-fsa/sherpa-onnx
+  - libphonenumber-js (MIT) - https://gitlab.com/catamphetamine/libphonenumber-js
+  - node-sqlite3-wasm (MIT) - https://github.com/tndrle/node-sqlite3-wasm
+  - ws (MIT) - https://github.com/websockets/ws
+  - @huggingface/transformers (Apache-2.0) and onnxruntime-node / onnxruntime-web (MIT)
+  - kokoro-js (Apache-2.0) - https://github.com/hexgrad/kokoro
+  - React (MIT), Vite / electron-vite (MIT), Vitest (MIT), TypeScript (Apache-2.0), electron-builder and rcedit (MIT, used to build the installer)
+
+Models
+  - models/kws/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01 - a small keyword-spotting model made with icefall and
+    converted for sherpa-onnx by its authors; its own README (included in that folder) declares "Apache License 2.0".
+    It is the "hey Eya" wake-word model. Source: https://www.modelscope.cn/pkufool/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01
+  - onnx-community/whisper-tiny.en (OpenAI Whisper, MIT) - the on-device speech-recognition model. It is NOT stored in this
+    repository: `npm run fetch-models` downloads it from Hugging Face and checks it against scripts/models.lock.json.
+  - Kokoro-82M (Apache-2.0) - the optional offline voice, downloaded by the app on first use through kokoro-js.
+
+Cloud services (optional, with your own keys): Google Gemini, OpenAI-compatible APIs, Ollama (local). Their terms apply to what you
+send them.
+
+If you believe something here is attributed or licensed wrongly, please open an issue.

@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fake player - skippable advert</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; }
+  .html5-video-player { position: relative; width: 480px; height: 270px; background: #111; color: #fff; }
+  video.html5-main-video { width: 480px; height: 270px; background: #000; }
+  .ytp-play-button { position: absolute; left: 8px; bottom: 8px; width: 40px; height: 30px; }
+  .ytp-ad-module { position: absolute; right: 8px; bottom: 48px; }
+  .ytp-skip-ad-button { padding: 8px 14px; font-size: 14px; }
+  .ytp-ad-overlay-container { position: absolute; left: 20px; bottom: 50px; width: 300px; height: 40px; background: #fc0; color: #000; }
+  .ytp-ad-overlay-close-button { position: absolute; right: 0; top: 0; width: 24px; height: 24px; }
+</style>
+</head>
+<body>
+<h1>A video</h1>
+<!-- Imitates YouTube's player markup: an advert is on while the player has the class "ad-showing". -->
+<div class="html5-video-player ad-showing" id="player">
+  <video class="html5-main-video" id="v" muted></video>
+  <button class="ytp-play-button" id="playbtn" aria-label="Play"></button>
+  <div class="ytp-ad-module">
+    <button class="ytp-skip-ad-button" id="skip" style="display:none">Skip</button>
+  </div>
+  <div class="ytp-ad-overlay-container" id="overlay">Sponsored: buy things<button class="ytp-ad-overlay-close-button" id="overlayclose" aria-label="Close ad">x</button></div>
+</div>
+<p id="log">log:</p>
+<script>
+  const player = document.getElementById('player');
+  const v = document.getElementById('v');
+  const canvas = document.createElement('canvas');
+  canvas.width = 64; canvas.height = 36;
+  const ctx = canvas.getContext('2d');
+  let n = 0;
+  setInterval(() => { ctx.fillStyle = 'hsl(' + (n++ * 9 % 360) + ',80%,50%)'; ctx.fillRect(0, 0, 64, 36); }, 100);
+  v.srcObject = canvas.captureStream(10);
+  window.__skips = 0;
+  window.__closes = 0;
+  window.__playClicks = 0;
+  document.getElementById('playbtn').addEventListener('click', () => { window.__playClicks++; if (v.paused) v.play().catch(() => {}); else v.pause(); });
+  // The Skip button appears after a few seconds, as YouTube's does.
+  setTimeout(() => { document.getElementById('skip').style.display = 'block'; }, 8000);
+  document.getElementById('skip').addEventListener('click', () => {
+    window.__skips++;
+    player.classList.remove('ad-showing');
+    document.getElementById('skip').style.display = 'none';
+    // YouTube can leave the video waiting after an advert.
+    v.pause();
+    document.getElementById('log').textContent = 'log: skipped';
+  });
+  document.getElementById('overlayclose').addEventListener('click', () => {
+    window.__closes++;
+    document.getElementById('overlay').remove();
+  });
+</script>
+</body>
+</html>

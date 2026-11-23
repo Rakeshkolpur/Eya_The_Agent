@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eya Browser Bridge</title>
+  <style>
+    :root { color-scheme: light dark; --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e; }
+    body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 2.5rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.25rem; margin-bottom: .25rem; }
+    .pill { display: inline-block; padding: .15rem .65rem; border-radius: 999px; font-weight: 600; border: 1px solid currentColor; }
+    .connected { color: var(--ok); } .waiting { color: var(--warn); } .off { color: var(--bad); }
+    code { background: rgba(127,127,127,.18); padding: .05rem .3rem; border-radius: 4px; }
+    button { font: inherit; padding: .35rem .8rem; margin-top: .5rem; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: .2rem 1rem; margin: 1rem 0; }
+    dt { opacity: .7; }
+  </style>
+</head>
+<body>
+  <h1>Eya Browser Bridge</h1>
+  <p>Lets the Eya desktop assistant on <strong>this PC</strong> use the browser you are already signed in to.
+     It only talks to Eya on this computer (<code>127.0.0.1</code>), never over the internet.</p>
+
+  <p>Status: <span id="pill" class="pill off">checking…</span></p>
+  <p id="explain"></p>
+
+  <dl>
+    <dt>Browser</dt><dd id="browser">—</dd>
+    <dt>Version</dt><dd id="version">—</dd>
+    <dt>Extension ID</dt><dd id="extid">—</dd>
+  </dl>
+
+  <button id="forget" type="button">Forget pairing</button>
+  <p><small>Eya never reads your passwords, cookies or saved logins, never types into password or card fields,
+     and stops and asks you whenever a page shows a CAPTCHA or asks for a verification code.</small></p>
+  <script src="options.js" type="module"></script>
+</body>
+</html>

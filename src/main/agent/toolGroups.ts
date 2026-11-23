@@ -1,0 +1,447 @@
+import type { PromptGroup, PromptTopic } from './prompts';
+
+/**
+ * Which tools (and which parts of the system prompt) a request needs.
+ *
+ * Every model step carries every tool's schema plus the whole system prompt: on 79 tools that was about 16 000 tokens of tools and 10 000
+ * of prompt per step, five or six steps a request. On a free Gemini key that spends the day's allowance in a handful of commands. So a
+ * request carries the core tools and only the groups its words are about; the rest are named in one line and the model can switch a group
+ * on with `load_tools` if the request turns out to need it. Nothing is lost, only not sent until it is wanted.
+ */
+export type ToolGroup = PromptGroup;
+
+export const TOOL_GROUPS: readonly ToolGroup[] = ['browser', 'chat', 'word', 'files', 'system', 'screen', 'memory', 'research', 'pcfix'];
+
+/**
+ * Tools that are always available but lead straight into a group: once the model has used one, that group's tools and its part of the prompt are
+ * switched on for the rest of the request (a site that was found and opened is then clicked, read and filled in; it should not have to ask for those).
+ */
+export const PROMPT_TOPICS: readonly PromptTopic[] = ['ads', 'orders', 'social'];
+
+/** Tools that bring a topic's part of the prompt with them once used (playing a video is the moment the rules for adverts matter). */
+export const OPENS_TOPIC: Readonly<Record<string, PromptTopic>> = {
+  play_on_youtube: 'ads',
+  skip_ads: 'ads',
+  // (a follow-up like "yes, post it" says no site: the LinkedIn rules and tools stay on once a draft was saved)
+  social_draft: 'social',
+  social_compose: 'social',
+  social_make_image: 'social',
+  social_attach_image: 'social',
+  social_profile: 'social',
+};
+
+export const OPENS_GROUP: Readonly<Record<string, ToolGroup>> = { find_and_open_website: 'browser', download_from_site: 'browser' };
+
+/**
+ * Tools sent only while a topic is on: the YouTube player comes with the topic of adverts and videos (a request about a court's cause list does not
+ * carry about 1,700 characters of it on every step). A request about a song, a film or a video switches the topic on by its words, and any other can
+ * ask for it with load_tools.
+ */
+export const TOOL_TOPIC: Readonly<Record<string, PromptTopic>> = {
+  play_on_youtube: 'ads',
+  skip_ads: 'ads',
+  // writing on LinkedIn: sent only while the "social" topic is on
+  social_draft: 'social',
+  social_compose: 'social',
+  social_make_image: 'social',
+  social_attach_image: 'social',
+  social_profile: 'social',
+};
+
+/** The group of each tool; a tool that is not listed is core (always sent), the safe default. A test makes every tool name appear here. */
+const GROUP_OF: Readonly<Record<string, ToolGroup | 'core'>> = {
+  // core: opening, finding, reading, windows, clipboard, searching the web
+  analyze_document: 'core',
+  clipboard_clear: 'core',
+  clipboard_read: 'core',
+  clipboard_write: 'core',
+  close_application: 'core',
+  close_file: 'core',
+  download_file: 'core',
+  find_and_open_website: 'core',
+  find_file: 'core',
+  find_folder: 'core',
+  list_windows: 'core',
+  open_application: 'core',
+  open_file: 'core',
+  open_folder: 'core',
+  open_url: 'core',
+  read_file: 'core',
+  web_search: 'core',
+  window_control: 'core',
+  // browser
+  browser_status: 'browser',
+  click_on_page: 'browser',
+  close_browser_tab: 'browser',
+  connect_chrome: 'browser',
+  fill_on_page: 'browser',
+  find_on_page: 'browser',
+  inspect_page: 'browser',
+  list_browser_tabs: 'browser',
+  open_website: 'browser',
+  download_from_site: 'browser',
+  read_page: 'browser',
+  scroll_page: 'browser',
+  switch_browser_tab: 'browser',
+  wait_for_user_in_browser: 'browser',
+  play_on_youtube: 'browser',
+  skip_ads: 'browser',
+  social_draft: 'browser',
+  social_compose: 'browser',
+  social_make_image: 'browser',
+  social_attach_image: 'browser',
+  social_profile: 'browser',
+  // deep research on the open internet
+  deep_research: 'research',
+  // problems on this PC: what is wrong, and the usual fixes (each asks first)
+  clear_temp_files: 'pcfix',
+  edit_user_path: 'pcfix',
+  find_program: 'pcfix',
+  flush_dns: 'pcfix',
+  install_program: 'pcfix',
+  uninstall_program: 'pcfix',
+  rename_pc: 'pcfix',
+  list_startup_apps: 'pcfix',
+  set_startup_apps: 'pcfix',
+  list_background_apps: 'pcfix',
+  stop_background_apps: 'pcfix',
+  start_stopped_apps: 'pcfix',
+  speed_up_pc: 'pcfix',
+  check_microphone: 'pcfix',
+  fix_microphone: 'pcfix',
+  restart_windows_service: 'pcfix',
+  run_windows_command: 'pcfix',
+  list_pc_changes: 'pcfix',
+  pc_check: 'pcfix',
+  remove_environment_variable: 'pcfix',
+  restart_explorer: 'pcfix',
+  set_environment_variable: 'pcfix',
+  undo_pc_change: 'pcfix',
+  // chat apps
+  attach_file: 'chat',
+  share_file_to_chat: 'chat',
+  communication_access_status: 'chat',
+  find_chat: 'chat',
+  find_chat_files: 'chat',
+  live_chat: 'chat',
+  learn_chat_names: 'chat',
+  verify_sent: 'chat',
+  // Microsoft Word
+  word_edit: 'word',
+  word_format: 'word',
+  word_read: 'word',
+  word_reference: 'word',
+  word_status: 'word',
+  word_structure: 'word',
+  word_write: 'word',
+  word_from_image: 'word',
+  // Excel, PowerPoint and Notepad come with the Word group: the same family of "do this in my Office file" requests
+  excel_work: 'word',
+  powerpoint_work: 'word',
+  notepad_write: 'word',
+  // files and folders
+  copy_file: 'files',
+  create_folder: 'files',
+  delete_file: 'files',
+  delete_folder: 'files',
+  empty_recycle_bin: 'files',
+  find_recycle_bin_item: 'files',
+  get_recycle_bin_count: 'files',
+  get_recycle_bin_items: 'files',
+  move_file: 'files',
+  permanently_delete_recycle_bin_item: 'files',
+  rename_file: 'files',
+  restore_all_recycle_bin_items: 'files',
+  restore_recycle_bin_item: 'files',
+  zip_folder: 'files',
+  // the PC itself
+  get_brightness: 'system',
+  get_volume: 'system',
+  lock_screen: 'system',
+  mute_volume: 'system',
+  open_settings_page: 'system',
+  open_windows_settings: 'system',
+  restart_computer: 'system',
+  set_brightness: 'system',
+  set_volume: 'system',
+  shutdown_computer: 'system',
+  unmute_volume: 'system',
+  // the screen
+  describe_screen: 'screen',
+  screen_click: 'screen',
+  screen_elements: 'screen',
+  start_screen_share: 'screen',
+  stop_screen_share: 'screen',
+  take_screenshot: 'screen',
+  // memory and routines
+  answer_routine_suggestion: 'memory',
+  delete_routine: 'memory',
+  forget_memory: 'memory',
+  list_memories: 'memory',
+  list_routines: 'memory',
+  remember: 'memory',
+  run_routine: 'memory',
+  save_routine: 'memory',
+  update_routine: 'memory',
+};
+
+/** The group a tool belongs to, or `core` for the tools that are always sent (and any tool nobody classified). */
+export function groupOfTool(name: string): ToolGroup | 'core' {
+  return GROUP_OF[name] ?? 'core';
+}
+
+/** Every tool name that has an explicit group (for the test that no tool is left out). */
+export function classifiedTools(): readonly string[] {
+  return Object.keys(GROUP_OF);
+}
+
+/** What a request's own words point at. A group is added when one of its patterns matches; nothing matching means "the usual". */
+const TRIGGERS: ReadonlyArray<readonly [ToolGroup, RegExp]> = [
+  [
+    'word',
+    /\b(ms\s*word|microsoft word|in word|word (file|document|doc)|docx?|petition|writ|affidavit|vakalat|annexure|page numbers?|table of contents|toc|list of events|synopsis|prayer|caveat|memo of parties|running index|the document|this document|my document)\b/,
+  ],
+  [
+    // Excel, PowerPoint, Notepad, "ms office", a table that is not right, typing live, and a picture to be recreated in Word
+    'word',
+    /\b(excel|spread ?sheet|xlsx?|workbook|power ?point|pptx?|slides?|presentation|note ?pad|ms office|microsoft office|office files?)\b|\b(live typing|type (it |this |that )?live|typing live|type live|watch (it|you) typ\w*)\b|\b(recreate|re-?create|rebuild|copy|make|same)\b.{0,40}\b(in|as|to|into) (ms )?word\b|\b(photo|picture|image|screenshot|scan)\b.{0,40}\bword\b|\btables?\b.{0,40}\b(not (coming|showing|working|right|proper\w*|aligned|fitting)|broken|wrong|cut off|messed|misaligned|out of (the )?page)\b|\b(fix|repair|correct)\b.{0,20}\btables?\b/,
+  ],
+  [
+    'chat',
+    /\b(whats\s?app|telegram|signal|instagram|messenger|sms|message|messages|text (him|her|them|my|to)|tell (him|her|them)|send (it|this|that|the|a|my|him|her|them)|forward|chat|contact|communication access|chat names?)\b/,
+  ],
+  [
+    'browser',
+    /\b(website|web ?site|web ?page|site|browser|chrome|edge|firefox|brave|opera|tabs?|url|link|https?|www|google|youtube|gmail|amazon|flipkart|myntra|meesho|bookmyshow|irctc|redbus|makemytrip|goibibo|zomato|swiggy|order|book|booking|ticket|tickets|buy|purchase|cart|checkout|pay|login|log in|sign in|click|scroll|form|ecourts?|e-courts?|cause ?list|case status|high court|district court|supreme court|judg(e)?ment|online|download|visit|navigate|portal|news|price|prices|score|timetable|notification|admit card|hall ticket|application form|\.com|\.in|\.org|\.net|\.gov)\b/,
+  ],
+  [
+    'files',
+    /\b(create (a |the )?(new )?folder|new folder|make (a |the )?folder|copy|move|rename|delete|remove|erase|trash|recycle|bin|restore|zip|unzip|compress|archive|duplicate|put (it|them|this) (in|into|on|to)|organi[sz]e|sort|clean ?up|tidy|arrange|save (it|them|this) (in|into|to|as))\b/,
+  ],
+  [
+    'system',
+    /\b(volume|mute|unmute|louder|quieter|sound|brightness|brighter|dimmer|lock (the |my )?(screen|pc|computer|laptop)|restart|reboot|shut ?down|power off|windows settings|settings|wi-?fi|bluetooth|night light|battery|airplane|hibernate)\b/,
+  ],
+  [
+    'pcfix',
+    /\b(environment variables?|env(ironment)? vars?|path variable|(add|set|edit|fix|update|clean|remove|put)\b.{0,24}\bpath\b|java_?home|android_?home|classpath|winget|install(ing|ed|ation|er)?|uninstall|setup|not recogni[sz]ed|command not found|(node|npm|npx|python|pip|git|java|javac|maven|mvn|gradle|docker|dotnet|vs ?code|cargo|rustc|golang|ffmpeg|adb)\b.{0,30}\b(not (working|found|installed|recogni[sz]ed)|error|problem|issue|version|install)|disk (space|full)|storage (is )?(full|low)|low (disk|storage)|no internet|dns|proxy|temp(orary)? files?|taskbar|start menu)\b/,
+  ],
+  [
+    'pcfix',
+    /\b(pc|laptop|computer|windows)\b.{0,50}\b(not working|slow|problem|issue|error|hang|hanging|freez\w*|crash\w*|won'?t|can'?t|doesn'?t|isn'?t)|\b(not working|slow|problem|issue)\b.{0,50}\b(pc|laptop|computer|windows)\b/,
+  ],
+  [
+    // renaming the PC ("rename my pc to Rakhi", "change my computer name", "what is my pc name")
+    'pcfix',
+    /\b(rename|renaming|change|changing|set|give|put|call)\b.{0,30}\b(pc|computer|laptop|device)\b.{0,20}\b(name|called)\b|\b(rename|renaming)\b.{0,30}\b(pc|computer|laptop|device)\b|\b(pc|computer|laptop|device|machine) ?name\b|\b(name|call)\s+(my|this|the)\s+(pc|computer|laptop|device)\b|\bwhat('?s| is) (my|this|the) (pc|computer|laptop|device) (name|called)\b/,
+  ],
+  [
+    // speed, background programs, start-up apps, the microphone and sound, printers, and a command for anything else ("make my pc fast", "stop all background running apps", "stop startup apps", "mic issue")
+    'pcfix',
+    /\b(make|get|keep)\b.{0,18}\b(pc|laptop|computer|system|windows|it)\b.{0,12}\b(fast|faster|quick|quicker|smooth|smoother)\b|\b(speed(ing)? ?up|boost|optimi[sz]e|tune ?up|declutter|clean ?up)\b.{0,20}\b(pc|laptop|computer|windows|system)\b|\b(pc|laptop|computer|windows|system)\b.{0,20}\b(speed|performance|lag|laggy|lagging|slow(ness)?|sluggish)\b|\b(lagging|laggy|sluggish|running slow|too slow|slowing down)\b|\bfree( up)? (ram|memory)\b|\b(ram|memory|cpu|disk)\b.{0,15}\b(full|low|high|usage|100 ?%)\b|\bhigh (cpu|ram|memory|disk)\b|\btask ?manager\b|\bbackground (apps?|programs?|processes|tasks?|running)\b|\b(close|stop|kill|end|quit)\b.{0,12}\b(all|every|running)\b.{0,12}\b(apps?|programs?|processes|tasks?)\b|\brunning in the background\b|\bwhat('?s| is| are) (running|using)\b|\bstart ?up\b.{0,12}\b(apps?|programs?|items?|list|entries|folder)\b|\b(apps?|programs?|things)\b.{0,20}\b(start|open|launch|run)s?\b.{0,12}\b(with|when|at)\b.{0,10}\b(windows|startup|boot|login|log ?in|sign ?in)\b|\bboot ?(time|slow)\b|\bmic(rophone)?\b|\bcan'?t hear (me|you)|\bcannot hear (me|you)|\b(no|without) sound\b|\b(sound|audio|speakers?|headphones?|headset|earphones?)\b.{0,20}\b(not|problem|issue|broken|stopped|crackl\w*|low|muted)\b|\bprinter\b|\bprint ?spooler\b|\b(powershell|command prompt|cmd)\b|\brun (a |this |the )?(windows )?command\b/,
+  ],
+  [
+    'screen',
+    /\b(screen|screenshot|what('?s| is) (on|in) (my |the )?(screen|window)|look at|what do you see|describe|click on|share my|sharing|take a (picture|photo|snap))\b/,
+  ],
+  [
+    'research',
+    /\b(research|deeply|in depth|find (me )?(out|related|the full|full)|look(ing)? (it )?up|related (pdf|pdfs|document|documents|file|files|case|cases|judg(e)?ments?)|judg(e)?ments?|case law|bare act|full text|where (can|do|will) (i|we) (get|find|watch|download|listen)|(download|watch|play|listen to) (a |the |some |any )?(movie|film|song|songs|video|series|episode|album|music|book|pdf|case|document|report)|movie|movies|film|song|songs|web series|album|ott|(get|need|want) (a |the |some )?(report|paper|study|document|book))\b/,
+  ],
+  [
+    'memory',
+    /\b(remember|forget|routine|routines|from now on|always|every time|preference|my name is|what do you (remember|know)|save (this|that|it)|saved)\b/,
+  ],
+];
+
+/**
+ * Words that are about a Word document only when nothing says the request is about a website: "the main heading on the page", "the next page", "the
+ * font" are as often about a web page. (A request that names a website or an address and also says "heading" was sending all 28 Word tools, about 5,000
+ * tokens a step, for nothing.) When they do mean Word, the model switches it on with load_tools.
+ */
+const WEAK_WORD = /\b(index|paragraph|heading|bold|italic|underline|font|align(ed|ment)?|justify|spacing|margin|header|footer|going to page|go to page|page \d+|next page|previous page)\b/;
+const WEB_MARKER = /\b(website|web ?site|web ?page|site|browser|url|https?|www|online|\.com|\.in|\.org|\.net|\.gov)\b/;
+
+export interface RouteOptions {
+  /** Tools the last turn or two used, so "now make it bold" or "yes" carries on in the same area. */
+  readonly recentTools?: readonly string[];
+}
+
+/** Which optional groups to send for this request. */
+export function routeGroups(requestText: string, options: RouteOptions = {}): Set<ToolGroup> {
+  const text = requestText.toLowerCase();
+  const picked = new Set<ToolGroup>();
+  for (const [group, pattern] of TRIGGERS) if (pattern.test(text)) picked.add(group);
+  if (!picked.has('word') && WEAK_WORD.test(text) && !WEB_MARKER.test(text)) picked.add('word');
+  // Messaging goes through WhatsApp Web / Telegram Web, which is the browser.
+  if (picked.has('chat')) picked.add('browser');
+  // A PC problem may end in "open the right Settings page".
+  if (picked.has('pcfix')) picked.add('system');
+  // Writing on LinkedIn / Fiverr happens in the browser.
+  // ("reply to the comments on my post" says no site, but it is the same job: the topic's tools need the browser)
+  if (/\b(linked\s?in|fiverr)\b/.test(text) || TOPIC_TRIGGERS.some(([topic, pattern]) => topic === 'social' && pattern.test(text))) picked.add('browser');
+  // Playing a film or song, and opening what research found, happen in the browser.
+  if (picked.has('research') && /\b(play|youtube|watch|listen|open)\b/.test(text)) picked.add('browser');
+  // Words that point at nothing in particular get only the core (open, find, read, search, windows, clipboard): that covers most everyday
+  // requests, and the model switches on more with load_tools when it turns out to need it.
+  // A short reply ("yes", "save it", "no") answers whatever Eya just asked or offered, which may be a routine offer.
+  if (/^\s*(yes|yeah|yep|yup|no|nope|nah|ok|okay|sure|please|do it|go ahead|save it|don'?t|never ?mind)\b/.test(text) && text.trim().split(/\s+/).length <= 6) {
+    picked.add('memory');
+  }
+  for (const name of options.recentTools ?? []) {
+    const g = groupOfTool(name);
+    if (g !== 'core') picked.add(g);
+  }
+  // Four or more areas at once is a big multi-part job: just send everything rather than reason about it.
+  if (picked.size >= 4) return new Set(TOOL_GROUPS);
+  return picked;
+}
+
+const TOPIC_TRIGGERS: ReadonlyArray<readonly [PromptTopic, RegExp]> = [
+  ['ads', /\b(ads?|adverts?|advertisements?|pop-?ups?|youtube|videos?|songs?|movies?|films?|music|play|watch|stream\w*|series|episodes?|trailers?|skip|cookies?|banner)\b/],
+  ['social', /\b(linked\s?in|fiverr|post (?:something|an update)|(?:make|create|draft|add|do) (?:a |me a |one )?(?:new )?post|my (?:linkedin )?posts?|write (?:a |me a )?(?:linkedin )?post|(?:linkedin|new|next) post|post (?:this |it |that )?(?:on|to) |comments? (?:on|to) (?:my|this|that|the|his|her|their)|repl(?:y|ies|ying) (?:to )?(?:the |my |all )?comments?|my comments|comment replies|gigs?)\b/],
+  ['orders', /\b(order\w*|book\w*|tickets?|buy\w*|purchase\w*|cart|checkout|pay\w*|flipkart|amazon|myntra|meesho|zomato|swiggy|bookmyshow|irctc|redbus|makemytrip|goibibo|food|delivery|shop\w*)\b/],
+];
+
+/** Which parts of the browser guidance this request needs (see PromptTopic). Anything it turns out to need later is switched on with load_tools. */
+export function routeTopics(requestText: string, options: RouteOptions = {}): Set<PromptTopic> {
+  const text = requestText.toLowerCase();
+  const picked = new Set<PromptTopic>();
+  for (const [topic, pattern] of TOPIC_TRIGGERS) if (pattern.test(text)) picked.add(topic);
+  for (const name of options.recentTools ?? []) {
+    const topic = OPENS_TOPIC[name];
+    if (topic !== undefined) picked.add(topic);
+  }
+  return picked;
+}
+
+/**
+ * What a model says when it believes it has no way to do something. While abilities are switched off this usually means "the tool I
+ * need is one of them", so the engine switches everything on and asks again rather than telling the user "I can't".
+ */
+export function soundsLikeRefusal(text: string): boolean {
+  return /\b(i (can'?t|cannot|am not able|am unable|'m unable|'m not able|don'?t have (a|any|the) (tool|way|ability|access))|unable to|not able to|no (tool|way) to|isn'?t something i can)\b/i.test(text);
+}
+
+/** What `load_tools` accepts: group names, "all", separated by commas, spaces or "and". Unknown words are returned apart. */
+export function parseGroups(raw: string): { readonly groups: ReadonlySet<ToolGroup>; readonly topics: ReadonlySet<PromptTopic>; readonly unknown: readonly string[]; readonly pc: boolean } {
+  const groups = new Set<ToolGroup>();
+  const topics = new Set<PromptTopic>();
+  const unknown: string[] = [];
+  // ("pc": the tools about the PC itself, which a request that has settled into the browser had set aside: see browseFocus)
+  let pc = false;
+  const words = raw
+    .toLowerCase()
+    .split(/[\s,;/&+]+|\band\b/)
+    .map((w) => w.trim())
+    .filter((w) => w.length > 0);
+  for (const w of words) {
+    if (w === 'all' || w === 'everything') {
+      for (const g of TOOL_GROUPS) groups.add(g);
+      for (const p of PROMPT_TOPICS) topics.add(p);
+      pc = true;
+      continue;
+    }
+    if (w === 'pc' || w === 'apps') {
+      pc = true;
+      continue;
+    }
+    if (w === 'ads' || w === 'ad' || w === 'adverts' || w === 'advert' || w === 'popups' || w === 'pop-ups' || w === 'popup') {
+      topics.add('ads');
+      continue;
+    }
+    if (w === 'orders' || w === 'order' || w === 'ordering' || w === 'booking' || w === 'shopping') {
+      topics.add('orders');
+      continue;
+    }
+    const singular = w.endsWith('s') ? w.slice(0, -1) : w;
+    const hit = TOOL_GROUPS.find((g) => g === w || g === singular);
+    if (hit !== undefined) groups.add(hit);
+    else if (w === 'web' || w === 'website' || w === 'chrome') groups.add('browser');
+    else if (w === 'message' || w === 'messaging' || w === 'whatsapp') groups.add('chat');
+    else if (w === 'document' || w === 'msword') groups.add('word');
+    else if (w === 'windows') groups.add('system');
+    else if (w === 'internet' || w === 'researcher' || w === 'deep_research' || w === 'movie' || w === 'media' || w === 'pdf') groups.add('research');
+    else unknown.push(w);
+  }
+  return { groups, topics, unknown, pc };
+}
+
+/**
+ * The tools about the PC itself: other applications, windows, finding and opening files and folders, the clipboard. They are core, so every request
+ * carries them, and a request that is plainly about a website does not need them on every step (about 7,000 characters of schemas and 4,000 of
+ * instructions, repeated at every one of up to sixteen steps). See `browseFocus`.
+ */
+export const PC_TOOLS: ReadonlySet<string> = new Set([
+  'clipboard_clear',
+  'clipboard_read',
+  'clipboard_write',
+  'close_application',
+  'close_file',
+  'find_file',
+  'find_folder',
+  'list_windows',
+  'open_application',
+  'open_file',
+  'open_folder',
+  'window_control',
+]);
+
+/** What a request about a website reads, finds and downloads uses these as well; a request that has used only them has not left the web. */
+const WEB_WORK_TOOLS: ReadonlySet<string> = new Set(['web_search', 'find_and_open_website', 'open_url', 'download_file', 'analyze_document', 'read_file']);
+
+/** Words that say a request is about something on the PC as well as the web (or about the PC only). */
+const PC_WORDS =
+  /\b(files?|folders?|director(?:y|ies)|pdfs?|docx?|documents?|spreadsheets?|excel|powerpoint|slides?|zip|downloads?|downloaded|desktop|pictures?|photos?|images?|videos?|screenshots?|clipboard|copy|paste|windows?|minimi[sz]e|maximi[sz]e|close|apps?|applications?|programs?|notepad|my pc|computer|laptop|resume|invoice)\b/i;
+
+export interface FocusInput {
+  readonly groups: ReadonlySet<ToolGroup>;
+  /** What the person asked. */
+  readonly text: string;
+  /** Every tool this request has used so far. */
+  readonly toolsUsed: readonly string[];
+  /** Whether any result so far named a file on the PC (a download that finished, a file that was found). */
+  readonly sawFile: boolean;
+  /** The model asked for the PC tools back (load_tools). */
+  readonly pcOn: boolean;
+}
+
+/**
+ * Whether the PC tools can be set aside for the next step. A request that has begun working in the browser, and has used nothing but the browser and
+ * the web, and is about nothing on the PC (its words, the groups it needs, and no file in sight), goes on without them: each step is then about a
+ * quarter smaller. The first step is never narrowed, so the model always chooses from everything; anything it needs afterwards it gets with
+ * load_tools (the instructions say so), and any file, any PC word or any other group of tools brings them straight back.
+ */
+export function browseFocus(input: FocusInput): boolean {
+  if (input.pcOn || input.sawFile || input.toolsUsed.length === 0) return false;
+  if (!input.groups.has('browser')) return false;
+  for (const g of input.groups) if (g !== 'browser' && g !== 'research') return false;
+  if (PC_WORDS.test(input.text)) return false;
+  return input.toolsUsed.every((name) => WEB_WORK_TOOLS.has(name) || ['browser', 'research'].includes(groupOfTool(name)));
+}
+
+/** The tools to send: core always, the rest only when their group is switched on (and, for the few that belong to a topic, the topic too). */
+export function selectTools<T extends { readonly name: string }>(all: readonly T[], active: ReadonlySet<ToolGroup>, topics?: ReadonlySet<PromptTopic>, focused = false): T[] {
+  return all.filter((t) => {
+    const g = groupOfTool(t.name);
+    if (g !== 'core' && !active.has(g)) return false;
+    if (focused && PC_TOOLS.has(t.name)) return false;
+    const topic = TOOL_TOPIC[t.name];
+    return topic === undefined || topics === undefined || topics.has(topic);
+  });
+}
+
+/** The tool the engine itself answers: switch groups of tools on for the rest of this request. */
+export const LOAD_TOOLS_SPEC = {
+  name: 'load_tools',
+  description:
+    'Switch on more abilities for this request. Call it when what the user asked needs something listed as switched off ' +
+    '(browser, chat, word, files, system, screen, memory, pc, or the browser guidance ads, orders), then carry on with the new tools. Costs nothing and is instant.',
+  parameters: {
+    type: 'object' as const,
+    properties: {
+      groups: { type: 'string', description: 'Which to switch on: one or more of browser, chat, word, files, system, screen, memory, pc, ads, orders (comma separated), or "all".' },
+    },
+    required: ['groups'] as readonly string[],
+  },
+} as const;

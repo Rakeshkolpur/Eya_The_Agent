@@ -1,0 +1,11 @@
+<!doctype html><html><head><title>Socket check</title></head><body><main><h1>Socket check</h1>
+<p id="r">pending</p></main>
+<script>
+ // What a malicious web page would try: talk straight to the local Eya bridge.
+ // The bridge only accepts the extension's own origin, so this must be refused.
+ try {
+   const ws = new WebSocket('ws://127.0.0.1:47821/eya-bridge');
+   ws.onopen = () => { document.getElementById('r').textContent = 'ws-open'; ws.close(); };
+   ws.onerror = () => { document.getElementById('r').textContent = 'ws-blocked'; };
+ } catch (e) { document.getElementById('r').textContent = 'ws-blocked'; }
+</script></body></html>
